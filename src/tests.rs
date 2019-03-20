@@ -35,11 +35,12 @@ impl ProdConsProto {
 impl Component for ProdConsProto { fn run(&mut self) {
 	let mut running = true;
 	let guards = vec![
-		(bitset!{Self::P00G_BIT, Self::P01P_BIT}, |me: &Self| { me.p01p.put(me.p00g.get()?) }),
+		(bitset!{Self::P00G_BIT, Self::P01P_BIT},
+			// TODO data constraint
+			|me: &Self| { me.p01p.put(me.p00g.get()?) }),
 	];
 
 	let mut ready = BitSet::new();
-
 	let mut sel = Select::new();
 	let bitmap = map! {
 		sel.recv(self.p00g.inner()) => Self::P00G_BIT,
