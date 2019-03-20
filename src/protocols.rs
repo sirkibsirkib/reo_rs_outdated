@@ -1,20 +1,5 @@
-
 use bit_set::BitSet;
-
-pub struct Guard<'a> {
-	pub ready_set: BitSet,
-	pub action_fn: &'a (dyn Fn()),
-	// TODO data constraint
-}
-impl<'a> Guard<'a> {
-	pub fn new(ready_set: BitSet, action_fn: &'a (dyn Fn())) -> Self {
-		Self {
-			ready_set,
-			action_fn,
-		}
-	}
-}
-
+use hashbrown::HashMap;
 
 macro_rules! bitset {
 	($( $port:expr ),*) => {{
@@ -22,4 +7,21 @@ macro_rules! bitset {
 		$( s.insert($port); )*
 		s
 	}}
+}
+
+macro_rules! map {
+    (@single $($x:tt)*) => (());
+    (@count $($rest:expr),*) => (<[()]>::len(&[$(map!(@single $rest)),*]));
+
+    ($($key:expr => $value:expr,)+) => { map!($($key => $value),+) };
+    ($($key:expr => $value:expr),*) => {
+        {
+            let _cap = map!(@count $($key),*);
+            let mut _map = HashMap::with_capacity(_cap);
+            $(
+                let _ = _map.insert($key, $value);
+            )*
+            _map
+        }
+    };
 }

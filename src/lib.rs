@@ -1,16 +1,12 @@
-// use hashbrown::{HashSet, HashMap};
-// use parking_lot::{Condvar, Mutex};
-// use hibitset::BitSet;
-// use std::marker::PhantomData;
-// use any_sized_map::AnySizedMap;
 
-// this module contains the most general reo things
+// general Reo primitives for the runtime
 mod reo;
 
-// this module conte
+// useful for the compiler to generate protocol components
 #[macro_use]
 mod protocols;
 
 
+// testing module
 #[cfg(test)]
 mod tests;

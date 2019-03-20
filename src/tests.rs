@@ -1,4 +1,5 @@
 use crate::reo::*;
+use hashbrown::HashMap;
 // use crate::protocols::*;
 
 use crossbeam::scope;
@@ -40,14 +41,13 @@ impl Component for ProdConsProto { fn run(&mut self) {
 	let mut ready = BitSet::new();
 
 	let mut sel = Select::new();
-	let r_p00g = sel.recv(self.p00g.inner());
-	let r_p01p = sel.send(self.p01p.inner());
+	let bitmap = map! {
+		sel.recv(self.p00g.inner()) => Self::P00G_BIT,
+		sel.send(self.p01p.inner()) => Self::P01P_BIT,
+	};
 	while running {
-		match sel.ready() {
-			x if x==r_p00g => { ready.insert(Self::P00G_BIT); },
-			x if x==r_p01p => { ready.insert(Self::P01P_BIT); },
-			_ => unreachable!(),
-		}
+		let sel_flagged = &sel.ready();
+		ready.insert(*bitmap.get(sel_flagged).unwrap());
 		for g in guards.iter() {
 			if ready.is_subset(&g.0) {
 				if (g.1)(&self).is_err() {
@@ -64,8 +64,11 @@ fn sync() {
 	let (p00p, p00g) = new_port();
 	let (p01p, p01g) = new_port();
 	scope(|s| {
-		s.builder().name("Producer".into()).spawn(|_| Producer{p00p}.run()).unwrap();
-		s.builder().name("ProdConsProto".into()).spawn(|_| ProdConsProto{p00g, p01p}.run()).unwrap();
-		s.builder().name("Consumer".into()).spawn(|_| Consumer{p01g}.run()).unwrap();
+		s.builder().name("Producer".into()).spawn(
+			|_| Producer{p00p}.run()).unwrap();
+		s.builder().name("ProdConsProto".into()).spawn(
+			|_| ProdConsProto{p00g, p01p}.run()).unwrap();
+		s.builder().name("Consumer".into()).spawn(
+			|_| Consumer{p01g}.run()).unwrap();
 	}).unwrap()
 }

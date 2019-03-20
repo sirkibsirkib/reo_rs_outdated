@@ -4,10 +4,10 @@ use crossbeam::channel::{Sender, Receiver, bounded, Select, SendError, RecvError
 pub struct PortClosedError;
 use std::convert::From;
 impl<T> From<SendError<T>> for PortClosedError {
-	fn from(e: SendError<T>) -> PortClosedError { Self }
+	fn from(_e: SendError<T>) -> PortClosedError { Self }
 }
 impl From<RecvError> for PortClosedError {
-	fn from(e: RecvError) -> PortClosedError { Self }
+	fn from(_e: RecvError) -> PortClosedError { Self }
 }
 
 pub trait Component {
