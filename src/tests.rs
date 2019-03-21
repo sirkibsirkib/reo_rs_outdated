@@ -100,13 +100,19 @@ fn port() {
         s.spawn(|_| {
             std::thread::sleep(Duration::from_millis(2000));
             a.put(Box::new(MyType(0)));
+                std::thread::sleep(Duration::from_millis(250));
             a.put(Box::new(MyType(1)));
+                std::thread::sleep(Duration::from_millis(250));
             a.put(Box::new(MyType(2)));
             println!("T1 (putter) exit");
         });
         s.spawn(|_| {
             for _ in 0..10 {
-                std::thread::sleep(Duration::from_millis(300));
+                std::thread::sleep(Duration::from_millis(100));
+                println!("peek1 {:?}", b.peek());
+                std::thread::sleep(Duration::from_millis(100));
+                println!("peek2 {:?}", b.peek());
+                std::thread::sleep(Duration::from_millis(100));
                 println!("get {:?}", b.get());
             }
             println!("T2 (getter) exit");

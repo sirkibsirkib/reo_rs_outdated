@@ -13,8 +13,7 @@ struct Inner<T> {
 - 0/1 putters share the Inner
 - 0/1 getters share the Inner
 - inner.refs == sum of #getters + #putters
-- Box is dropped if dropped and refs==1 AND inner.occuped == 1
-- (this means that if occupied==0, the atomics may never be dropped, which is OK)
+- Box is dropped if dropped and refs==1. contents are then dropped if inner.occuped == 1
 */
 struct Shared<T> {
     inner: ManuallyDrop<Box<Inner<T>>>,
@@ -46,7 +45,7 @@ pub fn new_port<T>() -> (PutPort<T>, GetPort<T>) {
     };
     let shared1 = Shared { inner: inner1 };
     let shared2 = Shared { inner: inner2 };
-    (PutPort { shared: shared1 }, GetPort { shared: shared2 })
+    (PutPort { shared: shared1 }, GetPort { shared: shared2, know_occupied: false })
 }
 
 ///////////
@@ -59,20 +58,22 @@ impl<T> PutPort<T> {
         let was = self.shared.inner.occupied.swap(true, Ordering::Relaxed);
         let mut old = mem::replace(&mut self.shared.inner.t, ManuallyDrop::new(datum));
         if was {
-            println!("WAS SOMETHING");
+            println!("PUT WAS SOMETHING");
             unsafe { ManuallyDrop::drop(&mut old) };
         } else {
-            println!("WASNT SOMETHING");
+            println!("PUT WASNT SOMETHING");
         }
     }
 }
 
 pub struct GetPort<T> {
     shared: Shared<T>,
+    know_occupied: bool,
 }
 impl<T> GetPort<T> {
     pub fn get(&mut self) -> Option<T> {
         let was = self.shared.inner.occupied.swap(false, Ordering::Relaxed);
+        self.know_occupied = false;
         if was {
             println!("GET WAS SOMETHING");
             let mut ret: ManuallyDrop<T> = ManuallyDrop::new(unsafe { mem::uninitialized() });
@@ -83,12 +84,20 @@ impl<T> GetPort<T> {
             None
         }
     }
+    pub fn peek(&mut self) -> Option<&T> {
+        if !self.know_occupied {
+            self.know_occupied = self.shared.inner.occupied.load(Ordering::Relaxed);
+        } 
+        if self.know_occupied {
+            Some(&self.shared.inner.t)
+        } else {
+            None
+        }
+    }
 }
 
 /*
 TODO:
-- allow getter to have variable "CERTAINLY FULL" to avoid the atomic check
-- implement PEEK for getter
 - find a way to BLOCK on the get and put...
 - look into this atomic ordering business
 - look into CachePadded
