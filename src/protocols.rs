@@ -25,3 +25,12 @@ macro_rules! map {
         }
     };
 }
+
+macro_rules! guard_cmd {
+    ($guards:ident, $firing:expr, $data_con:expr, $fire_func:expr) => {
+        let data_con = $data_con;
+        let fire_func = $fire_func;
+        let g = ($firing, &data_con, &fire_func);
+        $guards.push(g);
+    };
+}

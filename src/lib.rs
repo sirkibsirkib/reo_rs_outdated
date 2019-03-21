@@ -1,4 +1,3 @@
-
 // general Reo primitives for the runtime
 mod reo;
 
@@ -6,6 +5,7 @@ mod reo;
 #[macro_use]
 mod protocols;
 
+mod port;
 
 // testing module
 #[cfg(test)]
