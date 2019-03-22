@@ -1,9 +1,9 @@
-use std::time::Duration;
-use hashbrown::HashSet;
-use crossbeam::{Receiver, Sender};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use crossbeam::{Receiver, Sender};
+use hashbrown::HashSet;
+use parking_lot::{Condvar, RwLock};
 use std::mem::{self, ManuallyDrop};
-use parking_lot::RwLock;
+use std::time::Duration;
 
 // both port-halves SHARE this on the heap
 
@@ -39,11 +39,15 @@ impl<T> Drop for Shared<T> {
         if self.inner.refs.fetch_sub(1, Ordering::Relaxed) == 1 {
             if self.inner.occupied.load(Ordering::Relaxed) {
                 println!("DROP BOX WITH T (T is SOME)");
-                unsafe { ManuallyDrop::drop(&mut self.inner.t); }
+                unsafe {
+                    ManuallyDrop::drop(&mut self.inner.t);
+                }
             } else {
                 println!("DROP BOX WITHOUT T (T is NONE)");
             }
-            unsafe { ManuallyDrop::drop(&mut self.inner); }
+            unsafe {
+                ManuallyDrop::drop(&mut self.inner);
+            }
         }
     }
 }
@@ -64,7 +68,13 @@ pub fn new_port<T>() -> (PutPort<T>, GetPort<T>) {
     };
     let shared1 = Shared { inner: inner1 };
     let shared2 = Shared { inner: inner2 };
-    (PutPort { shared: shared1 }, GetPort { shared: shared2, know_occupied: false })
+    (
+        PutPort { shared: shared1 },
+        GetPort {
+            shared: shared2,
+            know_occupied: false,
+        },
+    )
 }
 
 ///////////
@@ -76,7 +86,10 @@ impl<T> PutPort<T> {
     pub fn put(&mut self, datum: T) {
         let inner: &mut Inner<T> = &mut self.shared.inner;
         let Inner {
-            updater, occupied, t, ..
+            updater,
+            occupied,
+            t,
+            ..
         } = inner;
         let r_lock = updater.read();
         let was = occupied.swap(true, Ordering::Relaxed);
@@ -92,6 +105,25 @@ impl<T> PutPort<T> {
         } else {
             println!("PUT WASNT SOMETHING");
         }
+    }
+
+    pub fn register_with(&mut self, sel: &mut Selector, token: usize) -> Result<(), TokenError> {
+        // TODO
+        let mut w_lock = self.shared.inner.updater.write();
+        println!("registering");
+        if let Some(ref mut prev_update_putter) = w_lock.update_putter {
+            println!("prev putter");
+            let e = PortEvent::DeregisteredGet(prev_update_putter.token);
+            let r = prev_update_putter.sender.send(e);
+            println!("{:?}", r);
+        } else {
+            println!("no prev putter notifier");
+        }
+        w_lock.update_getter = Some(Notifier {
+            sender: sel.sender_proto.clone(),
+            token,
+        });
+        Ok(())
     }
 }
 impl<T> Drop for PutPort<T> {
@@ -114,7 +146,10 @@ impl<T> GetPort<T> {
         self.know_occupied = false;
         let inner: &mut Inner<T> = &mut self.shared.inner;
         let Inner {
-            updater, occupied, t, ..
+            updater,
+            occupied,
+            t,
+            ..
         } = inner;
         let r_lock = updater.read();
         let was = occupied.swap(false, Ordering::Relaxed);
@@ -136,14 +171,14 @@ impl<T> GetPort<T> {
     pub fn peek(&mut self) -> Option<&T> {
         if !self.know_occupied {
             self.know_occupied = self.shared.inner.occupied.load(Ordering::Relaxed);
-        } 
+        }
         if self.know_occupied {
             Some(&self.shared.inner.t)
         } else {
             None
         }
     }
-    pub fn register_with(&mut self, sel: &mut Selector, token: usize) -> Result<(),TokenError> {
+    pub fn register_with(&mut self, sel: &mut Selector, token: usize) -> Result<(), TokenError> {
         // TODO
         let mut w_lock = self.shared.inner.updater.write();
         println!("registering");
@@ -151,9 +186,9 @@ impl<T> GetPort<T> {
             println!("prev putter");
             let e = PortEvent::DeregisteredGet(prev_update_getter.token);
             let r = prev_update_getter.sender.send(e);
-            println!("{:?}",r );
+            println!("{:?}", r);
         } else {
-            println!("no prev putter");
+            println!("no prev getter notifier");
         }
         w_lock.update_getter = Some(Notifier {
             sender: sel.sender_proto.clone(),
@@ -184,7 +219,7 @@ pub enum PortEvent {
     DeregisteredGet(usize),
     Get(usize),
     Put(usize),
-    Dropped(usize)
+    Dropped(usize),
 }
 
 pub struct Selector {
@@ -194,7 +229,7 @@ pub struct Selector {
 }
 impl Default for Selector {
     fn default() -> Self {
-        let (s,r) = crossbeam::channel::bounded(10);
+        let (s, r) = crossbeam::channel::bounded(10);
         Self {
             // TODO
             toks_waiting: r,

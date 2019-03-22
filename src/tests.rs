@@ -1,12 +1,42 @@
 // use crate::reo::*;
-use hashbrown::HashMap;
 use crate::port::PortEvent;
+use hashbrown::HashMap;
 // use crate::protocols::*;
 
 // use bit_set::BitSet;
 // use crossbeam::channel::{select, Select};
 use crossbeam::scope;
 use std::time::Duration;
+
+#[test]
+fn port2_test() {
+    use crate::ports2::*;
+    let (mut p, mut g) = new_port();
+    println!("spawning threads...");
+    scope(|s| {
+        s.spawn(move |_| {
+            let sel = Selector::default();
+            let dur = Duration::from_millis(1000);
+            std::thread::sleep(dur);
+            p.put(5).unwrap();
+            println!("put ok");
+        });
+        s.spawn(|_| {
+            let sel = Selector::default();
+            g.register_with(&sel, 0);
+            loop {
+                println!("waiting...");
+                let ev = sel.wait_timeout(Duration::from_millis(2000));
+                println!("ev {:?}", ev);
+                match ev {
+                    Some(PortEvent::GetReady(0)) => println!("GOT {:?}", g.get()),
+                    None => break,
+                    _ => {}
+                }
+            }
+        });
+    });
+}
 
 // struct Producer {
 //     p00p: PortPutter<u32>,
@@ -85,57 +115,54 @@ use std::time::Duration;
 //     }
 // }
 
-#[derive(Debug)]
-struct MyType(u32);
-impl Drop for MyType {
-    fn drop(&mut self) {
-        println!("MYDROP {:?}", self.0);
-    }
-}
+// #[derive(Debug)]
+// struct MyType(u32);
+// impl Drop for MyType {
+//     fn drop(&mut self) {
+//         println!("MYDROP {:?}", self.0);
+//     }
+// }
 
-#[test]
-fn port() {
-    use std::time::Duration;
-    let (mut a, mut b) = crate::port::new_port();
-    scope(|s| {
-        s.spawn(|_| {
-            std::thread::sleep(Duration::from_millis(2000));
-            a.put(Box::new(MyType(0)));
-                std::thread::sleep(Duration::from_millis(250));
-            a.put(Box::new(MyType(1)));
-                std::thread::sleep(Duration::from_millis(250));
-            a.put(Box::new(MyType(2)));
-            println!("T1 (putter) exit");
-        });
-        s.spawn(|_| {
+// #[test]
+// fn port() {
+//     use std::time::Duration;
+//     let (mut a, mut b) = crate::port::new_port();
+//     scope(|s| {
+//         s.spawn(|_| {
+//             for i in 0..5 {
+//                 a.put(i);
+//             }
+//             println!("T1 (putter) exit");
+//         });
+//         s.spawn(|_| {
 
-            let mut sel = crate::port::Selector::default();
-            b.register_with(&mut sel, 0).unwrap();
+//             let mut sel = crate::port::Selector::default();
+//             b.register_with(&mut sel, 0).unwrap();
 
-            for _ in 0..10 {
-                let x = sel.wait_timeout(Duration::from_millis(3000));
-                println!("GETTER wait {:?}", x);
-                match x {
-                    Some(PortEvent::Get(0)) => println!("{:?}", b.get()),
-                    None => return,
-                    _ => {},
-                }
+//             for _ in 0..10 {
+//                 let x = sel.wait_timeout(Duration::from_millis(3000));
+//                 println!("GETTER wait {:?}", x);
+//                 match x {
+//                     Some(PortEvent::Put(0)) => println!("GOT {:?}", b.get()),
+//                     None => return,
+//                     Some(y) => println!("got else ?? {:?}", y),
+//                 }
 
-                // std::thread::sleep(Duration::from_millis(100));
-                // println!("peek1 {:?}", b.peek());
-                // // std::thread::sleep(Duration::from_millis(100));
-                // println!("peek2 {:?}", b.peek());
-                // // std::thread::sleep(Duration::from_millis(100));
-                // println!("get {:?}", b.get());
-            }
-            println!("T2 (getter) exit");
-        });
-    })
-    .unwrap();
-    println!("main waiting...");
-    std::thread::sleep(Duration::from_millis(2000));
-    println!("MAIN DONE");
-}
+//                 // std::thread::sleep(Duration::from_millis(100));
+//                 // println!("peek1 {:?}", b.peek());
+//                 // // std::thread::sleep(Duration::from_millis(100));
+//                 // println!("peek2 {:?}", b.peek());
+//                 // // std::thread::sleep(Duration::from_millis(100));
+//                 // println!("get {:?}", b.get());
+//             }
+//             println!("T2 (getter) exit");
+//         });
+//     })
+//     .unwrap();
+//     println!("main waiting...");
+//     std::thread::sleep(Duration::from_millis(2000));
+//     println!("MAIN DONE");
+// }
 
 // #[test]
 // fn sync() {
