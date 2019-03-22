@@ -1,88 +1,89 @@
-use crate::reo::*;
+// use crate::reo::*;
 use hashbrown::HashMap;
+use crate::port::PortEvent;
 // use crate::protocols::*;
 
-use bit_set::BitSet;
-use crossbeam::channel::{select, Select};
+// use bit_set::BitSet;
+// use crossbeam::channel::{select, Select};
 use crossbeam::scope;
 use std::time::Duration;
 
-struct Producer {
-    p00p: PortPutter<u32>,
-}
-impl Component for Producer {
-    fn run(&mut self) {
-        for i in 0..10 {
-            // std::thread::sleep(Duration::from_millis(500));
-            self.p00p.put(i).unwrap();
-        }
-    }
-}
+// struct Producer {
+//     p00p: PortPutter<u32>,
+// }
+// impl Component for Producer {
+//     fn run(&mut self) {
+//         for i in 0..10 {
+//             // std::thread::sleep(Duration::from_millis(500));
+//             self.p00p.put(i).unwrap();
+//         }
+//     }
+// }
 
-struct Consumer {
-    p01g: PortGetter<u32>,
-}
-impl Component for Consumer {
-    fn run(&mut self) {
-        while let Ok(x) = self.p01g.get() {
-            println!("cons {:?}", x);
-        }
-    }
-}
+// struct Consumer {
+//     p01g: PortGetter<u32>,
+// }
+// impl Component for Consumer {
+//     fn run(&mut self) {
+//         while let Ok(x) = self.p01g.get() {
+//             println!("cons {:?}", x);
+//         }
+//     }
+// }
 
-struct ProdConsProto {
-    p00g: PortGetter<u32>,
-    p01p: PortPutter<u32>,
-}
-impl ProdConsProto {
-    const P00G_BIT: usize = 0;
-    const P01P_BIT: usize = 1;
-}
-impl Component for ProdConsProto {
-    fn run(&mut self) {
-        let mut running = true;
-        let mut guards = vec![];
-        guard_cmd!(
-            guards,
-            bitset! {Self::P00G_BIT, Self::P01P_BIT},
-            || true,
-            || self.p01p.put(self.p00g.get()?)
-        );
+// struct ProdConsProto {
+//     p00g: PortGetter<u32>,
+//     p01p: PortPutter<u32>,
+// }
+// impl ProdConsProto {
+//     const P00G_BIT: usize = 0;
+//     const P01P_BIT: usize = 1;
+// }
+// impl Component for ProdConsProto {
+//     fn run(&mut self) {
+//         let mut running = true;
+//         let mut guards = vec![];
+//         guard_cmd!(
+//             guards,
+//             bitset! {Self::P00G_BIT, Self::P01P_BIT},
+//             || true,
+//             || self.p01p.put(self.p00g.get()?)
+//         );
 
-        let mut ready = BitSet::new();
-        while running {
-            let mut sel = Select::new();
-            if !ready.contains(Self::P00G_BIT) {
-                sel.recv(self.p00g.inner());
-            }
-            if !ready.contains(Self::P01P_BIT) {
-                sel.send(self.p01p.inner());
-            }
+//         let mut ready = BitSet::new();
+//         while running {
+//             let mut sel = Select::new();
+//             if !ready.contains(Self::P00G_BIT) {
+//                 sel.recv(self.p00g.inner());
+//             }
+//             if !ready.contains(Self::P01P_BIT) {
+//                 sel.send(self.p01p.inner());
+//             }
 
-            println!("blocking.. ");
-            let sel_flagged = sel.ready();
+//             println!("blocking.. ");
+//             let sel_flagged = sel.ready();
 
-            ready.insert(sel_flagged); // assume identity function!
-            println!("ready (flagged: {:?}) all: {:?}", sel_flagged, &ready);
-            for g in guards.iter() {
-                println!("readY: {:?} this guard needs {:?}", &ready, &g.0);
-                if ready.is_superset(&g.0) {
-                    println!("firing ready!");
-                    if (g.1)() {
-                        // check data const
-                        println!("data pass!");
-                        if (g.2)().is_err() {
-                            running = false;
-                        };
-                        ready.difference_with(&g.0);
-                    } else {
-                        println!("data fail!");
-                    }
-                }
-            }
-        }
-    }
-}
+//             ready.insert(sel_flagged); // assume identity function!
+//             println!("ready (flagged: {:?}) all: {:?}", sel_flagged, &ready);
+//             for g in guards.iter() {
+//                 println!("readY: {:?} this guard needs {:?}", &ready, &g.0);
+//                 if ready.is_superset(&g.0) {
+//                     println!("firing ready!");
+//                     if (g.1)() {
+//                         // check data const
+//                         println!("data pass!");
+//                         if (g.2)().is_err() {
+//                             running = false;
+//                         };
+//                         ready.difference_with(&g.0);
+//                     } else {
+//                         println!("data fail!");
+//                     }
+//                 }
+//             }
+//         }
+//     }
+// }
 
 #[derive(Debug)]
 struct MyType(u32);
@@ -107,13 +108,25 @@ fn port() {
             println!("T1 (putter) exit");
         });
         s.spawn(|_| {
+
+            let mut sel = crate::port::Selector::default();
+            b.register_with(&mut sel, 0).unwrap();
+
             for _ in 0..10 {
-                std::thread::sleep(Duration::from_millis(100));
-                println!("peek1 {:?}", b.peek());
-                std::thread::sleep(Duration::from_millis(100));
-                println!("peek2 {:?}", b.peek());
-                std::thread::sleep(Duration::from_millis(100));
-                println!("get {:?}", b.get());
+                let x = sel.wait_timeout(Duration::from_millis(3000));
+                println!("GETTER wait {:?}", x);
+                match x {
+                    Some(PortEvent::Get(0)) => println!("{:?}", b.get()),
+                    None => return,
+                    _ => {},
+                }
+
+                // std::thread::sleep(Duration::from_millis(100));
+                // println!("peek1 {:?}", b.peek());
+                // // std::thread::sleep(Duration::from_millis(100));
+                // println!("peek2 {:?}", b.peek());
+                // // std::thread::sleep(Duration::from_millis(100));
+                // println!("get {:?}", b.get());
             }
             println!("T2 (getter) exit");
         });
