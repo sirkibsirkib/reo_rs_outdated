@@ -1,8 +1,10 @@
+use parking_lot::MutexGuard;
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use parking_lot::Condvar;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
+use self::PortEventClass as Ev;
 
 
 pub trait Component {
@@ -42,7 +44,7 @@ impl<T> Putter<T> {
             let prev = p.datum.replace(datum);
             assert!(prev.is_none());
             if let Some(Listener {ref sender, token}) = p.get_listener {
-                let _ = sender.send(PortEvent::GetReady(token));
+                let _ = sender.send(PortEvent{token, class: Ev::GetReady});
             };
         }
         println!("putter rendezvous...");
@@ -54,7 +56,7 @@ impl<T> Putter<T> {
         let mut p = self.shared.protected.lock();
         let sender = sel.sender.clone();
         if p.datum.is_none() {
-            let _ = sender.send(PortEvent::PutReady(token));
+            let _ = sender.send(PortEvent{token, class: Ev::PutReady});
         }
         let was = p.put_listener.replace(Listener {sender, token});
         assert!(was.is_none());
@@ -67,7 +69,7 @@ impl<T> Drop for Putter<T> {
         println!("putter drop");
         let p = self.shared.protected.lock();
         if let Some(Listener {ref sender, token}) = p.put_listener {
-            let _ = sender.send(PortEvent::Dropped(token));
+            let _ = sender.send(PortEvent{token, class: Ev::Dropped});
         }
     }
 }
@@ -87,7 +89,7 @@ impl<T> Getter<T> {
             Some(x) => {
                 println!("notifying putters");
                 if let Some(Listener {ref sender, token}) = p.put_listener {
-                    let _ = sender.send(PortEvent::PutReady(token));
+                    let _ = sender.send(PortEvent{token, class: Ev::PutReady});
                 };
                 self.shared.putter_wait_to_write.notify_all();
                 Ok(x)
@@ -95,15 +97,28 @@ impl<T> Getter<T> {
             None => Err(()),
         }
     }
-    pub fn register_with(&mut self, sel: &Selector, token: Token) {
+    pub fn register_with(&mut self, sel: &Selector, token: Token) -> Option<Token> {
         let mut p = self.shared.protected.lock();
         let sender = sel.sender.clone();
+        let maybe_tok: Option<Token> = Self::deregister_with_lock(&mut p);
         if p.datum.is_some() {
             println!("GETTER NOT WITH REG");
-            let _ = sender.send(PortEvent::GetReady(token));
+            let _ = sender.send(PortEvent { token, class: Ev::GetReady});
         }
-        let was = p.get_listener.replace(Listener {sender, token});
-        assert!(was.is_none());
+        let _ = p.get_listener.replace(Listener {sender, token});
+        maybe_tok
+    }
+    pub fn deregister(&mut self) -> Option<Token> {
+        let mut p = self.shared.protected.lock();
+        Self::deregister_with_lock(&mut p)
+    }
+    fn deregister_with_lock(p: &mut MutexGuard<Protected<T>>) -> Option<Token> {
+        if let Some(Listener {sender, token}) = p.get_listener.take() {
+            let _ = sender.send(PortEvent {token, class: Ev::Deregistered});
+            Some(token)   
+        } else {
+            None
+        }
     }
 }
 impl<T> Drop for Getter<T> {
@@ -111,7 +126,7 @@ impl<T> Drop for Getter<T> {
         println!("getter drop");
         let p = self.shared.protected.lock();
         if let Some(Listener {ref sender, token}) = p.get_listener {
-            let _ = sender.send(PortEvent::Dropped(token));
+            let _ = sender.send(PortEvent {token, class: Ev::Dropped});
         }
         self.shared.putter_wait_to_write.notify_all();
     }
@@ -141,19 +156,16 @@ pub fn new_port<T>() -> (Putter<T>, Getter<T>) {
 type Token = usize;
 
 #[derive(Debug, Copy, Clone)]
-pub enum PortEvent {
-    GetReady(Token),
-    PutReady(Token),
-    Dropped(Token),
+pub enum PortEventClass {
+    GetReady,
+    PutReady,
+    Deregistered,
+    Dropped,
 }
-impl PortEvent {
-    pub fn token(self) -> Token {
-        match self {
-            PortEvent::GetReady(t) => t,
-            PortEvent::PutReady(t) => t,
-            PortEvent::Dropped(t) => t,
-        }
-    }
+#[derive(Debug, Copy, Clone)]
+pub struct PortEvent {
+    pub class: PortEventClass,
+    pub token: Token,
 }
 
 pub struct Selector {

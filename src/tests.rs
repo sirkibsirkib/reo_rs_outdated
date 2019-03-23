@@ -1,8 +1,9 @@
 // use crate::reo::*;
 // use crate::port::PortEvent;
-use hashbrown::HashMap;
+// use hashbrown::HashMap;
 use crate::ports2::*;
 use crate::protocols::*;
+use crate::ports2::PortEventClass as Ev;
 
 use bit_set::BitSet;
 // use crossbeam::channel::{select, Select};
@@ -31,7 +32,7 @@ fn port_test() {
                 let ev = sel.wait_timeout(Duration::from_millis(2000));
                 println!("ev {:?}", ev);
                 match ev {
-                    Some(PortEvent::GetReady(0)) => println!("GOT {:?}", g.get()),
+                    Some(PortEvent{class: Ev::GetReady, ..}) => println!("GOT {:?}", g.get()),
                     None => break,
                     _ => {}
                 }
@@ -108,13 +109,14 @@ impl Component for ProdConsProto {
                 }
                 ev.unwrap()
             };
-            match ev {
-                PortEvent::GetReady(token) => { ready.insert(token); },
-                PortEvent::PutReady(token) => { ready.insert(token); },
-                PortEvent::Dropped(_) => unimplemented!(),
+            match ev.class {
+                Ev::GetReady => { ready.insert(ev.token); },
+                Ev::PutReady => { ready.insert(ev.token); },
+                Ev::Dropped => return,
+                Ev::Deregistered => {},
             }
             println!("... proto wait done");
-            println!("token was {}", ev.token());
+            println!("token was {}", ev.token);
             for g in guards.iter() {
                 println!("ready: {:?} this guard needs {:?}", &ready, &g.0);
                 if ready.is_superset(&g.0) {
