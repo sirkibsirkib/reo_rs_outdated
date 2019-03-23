@@ -2,10 +2,8 @@
 // mod reo;
 
 // useful for the compiler to generate protocol components
-// #[macro_use]
-// mod protocols;
-
-mod port;
+#[macro_use]
+mod protocols;
 
 mod ports2;
 

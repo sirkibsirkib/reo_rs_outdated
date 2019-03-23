@@ -4,6 +4,13 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
 
+
+pub trait Component {
+    fn run(&mut self);
+}
+
+/////////////////////////////////////
+
 struct Listener {
     sender: Sender<PortEvent>,
     token: usize,
@@ -11,50 +18,56 @@ struct Listener {
 
 struct Protected<T> {
     datum: Option<T>,
-    put_listeners: Vec<Listener>,
-    get_listeners: Vec<Listener>,
+    put_listener: Option<Listener>,
+    get_listener: Option<Listener>,
 }
 
 struct Shared<T> {
     protected: Mutex<Protected<T>>,
-    full: Condvar,
-    empty: Condvar,
+    putter_wait_to_write: Condvar,
 }
 
 pub struct Putter<T> {
     shared: Arc<Shared<T>>,
+    rendezvous: Sender<()>,
 }
 impl<T> Putter<T> {
     pub fn put(&self, datum: T) -> Result<(), T> {
-        if Arc::strong_count(&self.shared) == 1 {
-            return Err(datum);
+        {
+            let mut p = self.shared.protected.lock();
+            while p.datum.is_some() {
+                println!("putter waiting");
+                self.shared.putter_wait_to_write.wait(&mut p);
+            }
+            let prev = p.datum.replace(datum);
+            assert!(prev.is_none());
+            if let Some(Listener {ref sender, token}) = p.get_listener {
+                let _ = sender.send(PortEvent::GetReady(token));
+            };
         }
-        let mut p = self.shared.protected.lock();
-        if p.datum.is_some() {
-            self.shared.empty.wait(&mut p);
-        }
-        if p.datum.is_some() {
-            return Err(datum);
-        }
-        self.shared.full.notify_one();
-        p.get_listeners
-            .retain(|Listener { sender, token }| sender.send(PortEvent::GetReady(*token)).is_ok());
-        let prev = p.datum.replace(datum);
-        assert!(prev.is_none());
+        println!("putter rendezvous...");
+        let _ = self.rendezvous.send(());
+        println!("...putter rendezvous done");
         Ok(())
     }
     pub fn register_with(&mut self, sel: &Selector, token: Token) {
         let mut p = self.shared.protected.lock();
         let sender = sel.sender.clone();
-        p.put_listeners.push(Listener { sender, token });
+        if p.datum.is_none() {
+            let _ = sender.send(PortEvent::PutReady(token));
+        }
+        let was = p.put_listener.replace(Listener {sender, token});
+        assert!(was.is_none());
     }
+    // TODO deregister
 }
 
 impl<T> Drop for Putter<T> {
     fn drop(&mut self) {
+        println!("putter drop");
         let p = self.shared.protected.lock();
-        for Listener { sender, token } in p.put_listeners.iter() {
-            let _ = sender.send(PortEvent::Dropped(*token));
+        if let Some(Listener {ref sender, token}) = p.put_listener {
+            let _ = sender.send(PortEvent::Dropped(token));
         }
     }
 }
@@ -62,57 +75,66 @@ impl<T> Drop for Putter<T> {
 ////////////
 pub struct Getter<T> {
     shared: Arc<Shared<T>>,
+    rendezvous: Receiver<()>,
 }
 impl<T> Getter<T> {
     pub fn get(&self) -> Result<T, ()> {
-        if Arc::strong_count(&self.shared) == 1 {
-            return Err(());
-        }
+        println!("getter rendezvous...");
+        self.rendezvous.recv().map_err(|_| ())?;
         let mut p = self.shared.protected.lock();
-        if p.datum.is_none() {
-            self.shared.full.wait(&mut p);
-        }
+        println!("...getter rendezvous done");
         match p.datum.take() {
             Some(x) => {
-                p.put_listeners.retain(|Listener { sender, token }| {
-                    sender.send(PortEvent::GetReady(*token)).is_ok()
-                });
+                println!("notifying putters");
+                if let Some(Listener {ref sender, token}) = p.put_listener {
+                    let _ = sender.send(PortEvent::PutReady(token));
+                };
+                self.shared.putter_wait_to_write.notify_all();
                 Ok(x)
-            }
+            },
             None => Err(()),
         }
     }
     pub fn register_with(&mut self, sel: &Selector, token: Token) {
         let mut p = self.shared.protected.lock();
         let sender = sel.sender.clone();
-        p.get_listeners.push(Listener { sender, token });
+        if p.datum.is_some() {
+            println!("GETTER NOT WITH REG");
+            let _ = sender.send(PortEvent::GetReady(token));
+        }
+        let was = p.get_listener.replace(Listener {sender, token});
+        assert!(was.is_none());
     }
 }
 impl<T> Drop for Getter<T> {
     fn drop(&mut self) {
+        println!("getter drop");
         let p = self.shared.protected.lock();
-        for Listener { sender, token } in p.get_listeners.iter() {
-            let _ = sender.send(PortEvent::Dropped(*token));
+        if let Some(Listener {ref sender, token}) = p.get_listener {
+            let _ = sender.send(PortEvent::Dropped(token));
         }
+        self.shared.putter_wait_to_write.notify_all();
     }
 }
+////////////////////
 
 pub fn new_port<T>() -> (Putter<T>, Getter<T>) {
     let protected = Protected {
         datum: None,
-        put_listeners: vec![],
-        get_listeners: vec![],
+        put_listener: None,
+        get_listener: None,
     };
+    let (s, r) = crossbeam::channel::bounded(0);
     let shared = Arc::new(Shared {
-        empty: Default::default(),
-        full: Default::default(),
+        putter_wait_to_write: Default::default(),
         protected: Mutex::new(protected),
     });
     (
         Putter {
             shared: shared.clone(),
+            rendezvous: s,
         },
-        Getter { shared },
+        Getter { shared, rendezvous: r },
     )
 }
 
@@ -123,6 +145,15 @@ pub enum PortEvent {
     GetReady(Token),
     PutReady(Token),
     Dropped(Token),
+}
+impl PortEvent {
+    pub fn token(self) -> Token {
+        match self {
+            PortEvent::GetReady(t) => t,
+            PortEvent::PutReady(t) => t,
+            PortEvent::Dropped(t) => t,
+        }
+    }
 }
 
 pub struct Selector {

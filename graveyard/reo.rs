@@ -15,9 +15,6 @@ impl From<RecvError> for PortClosedError {
     }
 }
 
-pub trait Component {
-    fn run(&mut self);
-}
 
 pub fn new_port<T>() -> (PortPutter<T>, PortGetter<T>) {
     let (data_s, data_r) = bounded(1);
