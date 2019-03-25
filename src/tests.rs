@@ -1,45 +1,16 @@
-// use crate::reo::*;
-// use crate::port::PortEvent;
-// use hashbrown::HashMap;
-// use crate::ports2::PortEventClass as Ev;
-// use crate::ports2::*;
-use crate::ports1::*;
-use crate::protocols::*;
-
 use bit_set::BitSet;
-// use crossbeam::channel::{select, Select};
-use crossbeam::scope;
-use std::time::Duration;
+use hashbrown::HashSet;
+use mio::{Events, Poll, PollOpt, Ready, Token};
+use crate::reo::{self, Putter, Getter, Component};
 
-// #[test]
-// fn port_test() {
-//     // use crate::ports2::*;
-//     let (mut p, mut g) = new_port();
-//     println!("spawning threads...");
-//     scope(|s| {
-//         s.spawn(move |_| {
-//             p.put(5).unwrap();
-//             p.put(2).unwrap();
-//         });
-//         s.spawn(|_| {
-//             loop {
-//                 println!("{:?}", g.get());
-//             }
-//         });
-//     })
-//     .unwrap();
-// }
 
 struct Producer {
     p00p: Putter<u32>,
 }
 impl Component for Producer {
     fn run(&mut self) {
-        for i in 0..10 {
-            std::thread::sleep(Duration::from_millis(500));
-            println!("producer put...");
+        for i in 0..1000 {
             self.p00p.put(i).unwrap();
-            println!("... producer put done");
         }
     }
 }
@@ -49,71 +20,65 @@ struct Consumer {
 }
 impl Component for Consumer {
     fn run(&mut self) {
+        let mut got = Vec::with_capacity(1000);
         loop {
-            println!("consumer cons...");
+            // println!("consumer cons...");
             if let Ok(x) = self.p01g.get() {
-                println!("...cons got {:?}", x);
+                got.push(x);
             } else {
                 println!("cons got err. quitting");
                 break;
             }
         }
+        println!("got {:?}", &got);
     }
 }
 
+mod bits_prod_cons_proto {
+    pub const P00G_BIT: usize = 0;
+    pub const P01P_BIT: usize = 1;
+}
 struct ProdConsProto {
     p00g: Getter<u32>,
     p01p: Putter<u32>,
 }
-impl ProdConsProto {
-    const P00G_BIT: usize = 0;
-    const P01P_BIT: usize = 1;
-}
 impl Component for ProdConsProto {
     fn run(&mut self) {
-        // std::thread::sleep(Duration::from_millis(2000));
-        // create the selector to block on
+        use bits_prod_cons_proto::*;
 
-        use mio::*;
+        // Create poller and register ports
         let poll = Poll::new().unwrap();
-        poll.register(&self.p00g, Token(Self::P00G_BIT), Ready::readable(),
-              PollOpt::edge()).unwrap();
-        poll.register(&self.p01p, Token(Self::P01P_BIT), Ready::writable(),
-              PollOpt::edge()).unwrap();
+        let mut events = Events::with_capacity(32);
+        let a = Ready::all();
+        let edge = PollOpt::edge();
+        poll.register(&self.p00g, Token(P00G_BIT), a, edge).unwrap();
+        poll.register(&self.p01p, Token(P01P_BIT), a, edge).unwrap();
 
         // define the guards
         let mut guards = vec![];
-        guard_cmd!(
-            guards,
-            bitset! {Self::P00G_BIT, Self::P01P_BIT},
+        guard_cmd!(guards,
+            bitset! {P00G_BIT, P01P_BIT},
             |_me: &mut Self| true,
-            |me: &mut Self| me.p01p.put(me.p00g.get()?).map_err(|_| ())
+            |me: &mut Self| me.p01p.put(me.p00g.get()?).map_err(discard!())
         );
+        let mut active_guards: HashSet<_> = (0..guards.len()).collect();
 
-        let mut running = true;
         let mut ready = BitSet::new();
-        let mut events = Events::with_capacity(1024);
-        while running {
+        while !active_guards.is_empty() {
             poll.poll(&mut events, None).unwrap();
             for event in events.iter() {
-                println!("event {:?}", &event);
                 ready.insert(event.token().0);
-                println!("TOKEN {}", event.token().0);
             }
-            for g in guards.iter() {
-                println!("ready: {:?} this guard needs {:?}", &ready, &g.0);
-                if ready.is_superset(&g.0) {
-                    println!("firing ready!");
-                    if (g.1)(self) {
-                        // check data const
-                        println!("data pass!");
-                        if (g.2)(self).is_err() {
-                            running = false;
-                        };
-                        ready.difference_with(&g.0);
-                    } else {
-                        println!("data fail!");
-                    }
+            for (guard_idx, g) in guards.iter().enumerate() {
+                if active_guards.contains(&guard_idx) // guard is active
+                && ready.is_superset(&g.0) // firing constraint
+                && (g.1)(self) // data constraint
+                {
+                    ready.difference_with(&g.0); // remove fired ports from ready set
+                    if (g.2)(self).is_err() {
+                        // apply change and make guard inactive if any port dies
+                        active_guards.remove(&guard_idx);
+                    };
                 }
             }
         }
@@ -122,9 +87,12 @@ impl Component for ProdConsProto {
 
 #[test]
 fn sync() {
-    let (p00p, p00g) = new_port();
-    let (p01p, p01g) = new_port();
-    scope(|s| {
+    // create ports
+    let (p00p, p00g) = reo::new_port();
+    let (p01p, p01g) = reo::new_port();
+
+    // spin up threads
+    crossbeam::scope(|s| {
         s.builder()
             .name("Producer".into())
             .spawn(move |_| Producer { p00p }.run())
@@ -138,5 +106,5 @@ fn sync() {
             .spawn(move |_| Consumer { p01g }.run())
             .unwrap();
     })
-    .unwrap()
+    .expect("A worker thread panicked!");   
 }
