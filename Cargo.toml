@@ -10,5 +10,5 @@ bit-set = "0.5.0"
 hashbrown = "0.1.8"
 parking_lot = "0.7.1"
 pulse = "0.5.3"
-
+mio = "0.6.16"
 chashmap = "2.2.2"

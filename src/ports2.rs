@@ -1,11 +1,10 @@
-use parking_lot::MutexGuard;
+use self::PortEventClass as Ev;
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use parking_lot::Condvar;
 use parking_lot::Mutex;
+use parking_lot::MutexGuard;
 use std::sync::Arc;
 use std::time::Duration;
-use self::PortEventClass as Ev;
-
 
 pub trait Component {
     fn run(&mut self);
@@ -43,8 +42,11 @@ impl<T> Putter<T> {
             }
             let prev = p.datum.replace(datum);
             assert!(prev.is_none());
-            if let Some(Listener {ref sender, token}) = p.get_listener {
-                let _ = sender.send(PortEvent{token, class: Ev::GetReady});
+            if let Some(Listener { ref sender, token }) = p.get_listener {
+                let _ = sender.send(PortEvent {
+                    token,
+                    class: Ev::GetReady,
+                });
             };
         }
         println!("putter rendezvous...");
@@ -56,9 +58,12 @@ impl<T> Putter<T> {
         let mut p = self.shared.protected.lock();
         let sender = sel.sender.clone();
         if p.datum.is_none() {
-            let _ = sender.send(PortEvent{token, class: Ev::PutReady});
+            let _ = sender.send(PortEvent {
+                token,
+                class: Ev::PutReady,
+            });
         }
-        let was = p.put_listener.replace(Listener {sender, token});
+        let was = p.put_listener.replace(Listener { sender, token });
         assert!(was.is_none());
     }
     // TODO deregister
@@ -68,8 +73,11 @@ impl<T> Drop for Putter<T> {
     fn drop(&mut self) {
         println!("putter drop");
         let p = self.shared.protected.lock();
-        if let Some(Listener {ref sender, token}) = p.put_listener {
-            let _ = sender.send(PortEvent{token, class: Ev::Dropped});
+        if let Some(Listener { ref sender, token }) = p.put_listener {
+            let _ = sender.send(PortEvent {
+                token,
+                class: Ev::Dropped,
+            });
         }
     }
 }
@@ -88,12 +96,15 @@ impl<T> Getter<T> {
         match p.datum.take() {
             Some(x) => {
                 println!("notifying putters");
-                if let Some(Listener {ref sender, token}) = p.put_listener {
-                    let _ = sender.send(PortEvent{token, class: Ev::PutReady});
+                if let Some(Listener { ref sender, token }) = p.put_listener {
+                    let _ = sender.send(PortEvent {
+                        token,
+                        class: Ev::PutReady,
+                    });
                 };
                 self.shared.putter_wait_to_write.notify_all();
                 Ok(x)
-            },
+            }
             None => Err(()),
         }
     }
@@ -103,9 +114,12 @@ impl<T> Getter<T> {
         let maybe_tok: Option<Token> = Self::deregister_with_lock(&mut p);
         if p.datum.is_some() {
             println!("GETTER NOT WITH REG");
-            let _ = sender.send(PortEvent { token, class: Ev::GetReady});
+            let _ = sender.send(PortEvent {
+                token,
+                class: Ev::GetReady,
+            });
         }
-        let _ = p.get_listener.replace(Listener {sender, token});
+        let _ = p.get_listener.replace(Listener { sender, token });
         maybe_tok
     }
     pub fn deregister(&mut self) -> Option<Token> {
@@ -113,9 +127,12 @@ impl<T> Getter<T> {
         Self::deregister_with_lock(&mut p)
     }
     fn deregister_with_lock(p: &mut MutexGuard<Protected<T>>) -> Option<Token> {
-        if let Some(Listener {sender, token}) = p.get_listener.take() {
-            let _ = sender.send(PortEvent {token, class: Ev::Deregistered});
-            Some(token)   
+        if let Some(Listener { sender, token }) = p.get_listener.take() {
+            let _ = sender.send(PortEvent {
+                token,
+                class: Ev::Deregistered,
+            });
+            Some(token)
         } else {
             None
         }
@@ -125,8 +142,11 @@ impl<T> Drop for Getter<T> {
     fn drop(&mut self) {
         println!("getter drop");
         let p = self.shared.protected.lock();
-        if let Some(Listener {ref sender, token}) = p.get_listener {
-            let _ = sender.send(PortEvent {token, class: Ev::Dropped});
+        if let Some(Listener { ref sender, token }) = p.get_listener {
+            let _ = sender.send(PortEvent {
+                token,
+                class: Ev::Dropped,
+            });
         }
         self.shared.putter_wait_to_write.notify_all();
     }
@@ -149,7 +169,10 @@ pub fn new_port<T>() -> (Putter<T>, Getter<T>) {
             shared: shared.clone(),
             rendezvous: s,
         },
-        Getter { shared, rendezvous: r },
+        Getter {
+            shared,
+            rendezvous: r,
+        },
     )
 }
 
