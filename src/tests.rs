@@ -12,7 +12,7 @@ struct Producer {
 }
 impl Component for Producer {
     fn run(&mut self) {
-        for i in 0..3 {
+        for i in 0..7 {
             self.p_out.put(i + self.offset).unwrap();
         }
     }
@@ -42,10 +42,12 @@ impl ProdConsProto {
         Self { p00g, p01g, p02p, m00 }
     }
 }
+
+def_consts![0 => P00G, P01G, P02P, M00G, M00P];
 impl ProdConsProto {
     fn shutdown_if_mem(&mut self, raw_token: usize) -> Option<[usize; 2]> {
         Some(match raw_token {
-            3 | 4 => { self.m00.shutdown(); [3,4] }
+            M00G | M00P => { self.m00.shutdown(); [M00G, M00P] }
             _ => return None,
         })
     }
@@ -61,17 +63,17 @@ impl Component for ProdConsProto {
         let edge = PollOpt::edge();
         // bind port-ends and memory-ends with identifiable tokens
 
-        poll.register(self.p00g.reg(), Token(0), a, edge).unwrap();
-        poll.register(self.p01g.reg(), Token(1), a, edge).unwrap();
-        poll.register(self.p02p.reg(), Token(2), a, edge).unwrap();
-        poll.register(self.m00.reg_p().deref(), Token(3), a, edge).unwrap();
-        poll.register(self.m00.reg_g().deref(), Token(4), a, edge).unwrap();
+        poll.register(self.p00g.reg(), Token(P00G), a, edge).unwrap();
+        poll.register(self.p01g.reg(), Token(P01G), a, edge).unwrap();
+        poll.register(self.p02p.reg(), Token(P02P), a, edge).unwrap();
+        poll.register(self.m00.reg_p().deref(), Token(M00P), a, edge).unwrap();
+        poll.register(self.m00.reg_g().deref(), Token(M00G), a, edge).unwrap();
 
         // define the guards
         let mut guards = vec![];
         guard_cmd!(
             guards,
-            bitset! {0,2,3},
+            bitset! {P00G,P01G,P02P,M00P},
             |_me: &mut Self| true,
             |me: &mut Self| {
                 me.p02p.put(me.p00g.get()?).closed_err()?;
@@ -81,7 +83,7 @@ impl Component for ProdConsProto {
         );
         guard_cmd!(
             guards,
-            bitset! {1,4},
+            bitset! {P02P,M00G},
             |_me: &mut Self| true,
             |me: &mut Self| {
                 me.p02p.put(me.m00.get()?).closed_err()?;

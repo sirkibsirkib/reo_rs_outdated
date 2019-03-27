@@ -18,6 +18,18 @@ macro_rules! tok_bitset {
     }}
 }
 
+macro_rules! def_consts {
+    ($offset:expr =>) => {{};};
+    ($offset:expr => $e:ident) => {
+        const $e: usize = $offset;
+    };
+    ($offset:expr => $e:ident, $($es:ident),+) => {
+        const $e: usize = $offset;
+        def_consts!($offset+1 => $($es),*);
+    };
+}
+
+
 macro_rules! map {
     (@single $($x:tt)*) => (());
     (@count $($rest:expr),*) => (<[()]>::len(&[$(map!(@single $rest)),*]));
