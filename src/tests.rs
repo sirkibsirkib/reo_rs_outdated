@@ -171,3 +171,51 @@ fn alternator() {
     })
     .expect("A worker thread panicked!");
 }
+
+
+
+
+
+///////////////////////////////////
+
+use crate::protocols::*;
+struct Protoboi {
+    g0: Getter<u32>,
+    g1: Getter<u32>,
+}
+impl Peeker for Protoboi {
+    fn try_peek_two<T: 'static>(&mut self, ids: [GetterId;2]) -> Result<[Option<&T>;2],PortClosed> {
+        use std::any::Any;
+
+        let x = match self.g0.try_peek()? {
+            Some(x) => {
+                let x: &(dyn Any) = x;
+                if let Some(x) = x.downcast_ref::<T>() {
+                    Some(x)
+                } else {
+                    panic!("X mismatch")
+                }
+            },
+            None => None,
+        };
+        let y = match self.g1.try_peek()? {
+            Some(y) => {
+                let y: &(dyn Any) = y;
+                if let Some(y) = y.downcast_ref::<T>() {
+                    Some(y)
+                } else {
+                    panic!("y mismatch")
+                }
+            },
+            None => None,
+        };
+        Ok([x,y])
+    }
+}
+
+
+
+#[test] 
+fn traity() {
+
+}

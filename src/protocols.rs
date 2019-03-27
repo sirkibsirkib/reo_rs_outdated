@@ -63,6 +63,8 @@ macro_rules! action_cmd {
         $guard.2
     };
 }
+
+
 //
 // struct ReachTracker {
 //     token_occurrences: HashMap<usize,usize>,
@@ -139,10 +141,10 @@ macro_rules! action_cmd {
 //     }
 // }
 
-// #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-// struct GetterId(usize);
-// #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-// struct PutterId(usize);
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct GetterId(usize);
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct PutterId(usize);
 
 // #[derive(Debug)]
 // struct Action {
@@ -151,11 +153,143 @@ macro_rules! action_cmd {
 // }
 
 // #[derive(Debug)]
-// enum Check {
-//     PeekEquality([GetterId;2]),
-//     PeekSome(GetterId),
-//     PeekNone(GetterId),
+// enum Check<T> {
+//     PeekEquality(GetterId, GetterId),
 // }
+
+pub trait Actionable<D: DataMover>: HasRelevantTokens {
+    fn act(&self, d: &mut D) -> Result<(),PortClosed>;
+}
+
+pub trait TryClone {
+    fn try_clone(&self) -> Self;
+}
+impl<T:Clone> TryClone for T {
+    fn try_clone(&self) -> Self {
+        self.clone()
+    }
+} 
+
+pub struct TypedAction<T:TryClone,D: DataMover> {
+    from: GetterId,
+    to: Vec<PutterId>,
+    _phantom_t: std::marker::PhantomData<T>,
+    _phantom_d: std::marker::PhantomData<D>,
+}
+impl<T:TryClone,D:DataMover> Actionable<D> for TypedAction<T,D> {
+    fn act(&self, d: &mut D) -> Result<(),PortClosed> {
+        let x = d.get::<T>(self.from)?;
+        for &dest in self.to.iter().skip(1) {
+            d.put(dest, x.try_clone())?;
+        }
+        if let Some(&dest) = self.to.iter().next() {
+            d.put(dest, x)?;
+        }
+        unimplemented!()
+    }
+}
+impl<T:TryClone,D:DataMover> HasRelevantTokens for TypedAction<T,D> {
+    fn populate_relevant_tokens(&self, bitset: &mut BitSet) {
+        bitset.insert(self.from.0);
+        for t in self.to.iter() {
+            bitset.insert(t.0);
+        }
+    }
+}
+
+
+pub trait HasRelevantTokens {
+    fn populate_relevant_tokens(&self, bitset: &mut BitSet);
+}
+
+pub trait Checkable<P: Peeker>: HasRelevantTokens {
+    fn check(&self, p: &mut P) -> Result<bool, PortClosed>;
+    fn redundant_with_ready_bitset(&self) -> bool;
+}
+
+pub struct TypedCheck<T:PartialEq,P:Peeker> {
+    a: GetterId,
+    b: GetterId,
+    _phantom_t: std::marker::PhantomData<T>,
+    _phantom_p: std::marker::PhantomData<P>,
+}
+impl<T:PartialEq+'static,P:Peeker> Checkable<P> for TypedCheck<T,P> {
+    fn check(&self, p: &mut P) -> Result<bool,PortClosed> {
+        let [a_ref, b_ref] = p.try_peek_two::<T>([self.a, self.b])?;
+        Ok(a_ref == b_ref)
+    }
+    fn redundant_with_ready_bitset(&self) -> bool {
+        false
+    }
+}
+impl<T:PartialEq,P:Peeker> HasRelevantTokens for TypedCheck<T,P> {
+    fn populate_relevant_tokens(&self, bitset: &mut BitSet) {
+        bitset.insert(self.a.0);
+        bitset.insert(self.b.0);
+    }
+}
+
+pub trait Peeker {
+    fn try_peek_two<T:'static>(&mut self, ids: [GetterId;2]) -> Result<[Option<&T>;2],PortClosed>;
+    // fn try_peek<T>(&mut self, id: GetterId) -> Result<Option<&T>,()>;
+}
+
+pub trait DataMover {
+    fn get<T>(&mut self, id: GetterId) -> Result<T,PortClosed>;
+    fn put<T>(&mut self, id: PutterId, datum: T) -> Result<(),PortClosed>;
+}
+
+pub struct GuardedCmd<X:Peeker+DataMover> {
+    pub enabled: bool,
+    min_ready_set: BitSet,
+    data_constraint: Vec<Box<dyn Checkable<X>>>,
+    actions: Vec<Box<dyn Actionable<X>>>,
+}
+impl<X:Peeker+DataMover> GuardedCmd<X> {
+    pub fn construct(
+            checkable: impl IntoIterator<Item=Box<(dyn Checkable<X>)>>,
+            actionable: impl IntoIterator<Item=Box<(dyn Actionable<X>)>>,
+            ) -> Self {
+        let mut min_ready_set = BitSet::new();
+        let mut data_constraint = vec![];
+        let mut actions = vec![];
+        for c in checkable {
+            c.populate_relevant_tokens(&mut min_ready_set);
+            if !c.redundant_with_ready_bitset() {
+                data_constraint.push(c);
+            }
+        }
+        for a in actionable {
+            a.populate_relevant_tokens(&mut min_ready_set);
+            actions.push(a);
+        }
+        Self {
+            enabled: true,
+            min_ready_set,
+            data_constraint,
+            actions,
+        }
+    }
+    pub fn wont_block(&self, bitset: &BitSet) -> bool {
+        self.min_ready_set.is_subset(bitset)
+    }
+    pub fn check_all(&self, x: &mut X) -> Result<bool,PortClosed> {
+        for c in self.data_constraint.iter() {
+            if !c.check(x)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+    pub fn act_all(&self, x: &mut X) -> Result<(),PortClosed> {
+        for a in self.actions.iter() {
+            a.act(x)?;
+        }
+        Ok(())
+    }
+}
+
+
 // impl Check {
 //     pub fn pass_check<A: ActionExecutor>(&self, a: &mut A) -> bool {
 //         match self {
