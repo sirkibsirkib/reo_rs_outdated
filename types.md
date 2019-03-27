@@ -35,3 +35,43 @@ Limitations:
 2. try make it transparent T->T
 3. in cases where its not possible: HERE IS A CONFLICT
 	* user must explicitly fix the thing
+
+
+////////////////////////////////
+We define PROPERTIES. They may be in three states:
+	HAS,
+	HASNT,
+	UNKNOWN
+
+1. Linear
+	HAS if type is not allowed to be dropped in-circuit, otherwise HASNT
+
+1. Clonable
+	HAS if circuit is replicated. flows up+down
+
+1. Read
+	HAS if input type for blackbox component and is accessed. 
+	flows upstream	
+
+1. Written
+	HAS if input type for blackbox component and is written to.
+	flows upstream	
+
+1. FixedTypeSig
+	HAS if input or output type for blackbox component
+	flows upstream
+
+1. SmallShallow
+	HAS only if type is cheap to MOVE
+
+--------
+
+Steps:
+1. if !(Read) && !(Write) && !(FixedTypeSig) && !(Linear):
+	change type to UNIT and plug in a transformation step
+
+1. if !(Read) && !(Linear):
+	leave uninit memory and pass bogus data
+1. 
+
+
