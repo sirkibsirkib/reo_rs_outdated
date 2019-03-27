@@ -1,6 +1,6 @@
+use crate::reo::PortClosed;
 use bit_set::BitSet;
 use hashbrown::HashMap;
-use crate::reo::PortClosed;
 
 macro_rules! bitset {
 	($( $port:expr ),*) => {{
@@ -9,7 +9,6 @@ macro_rules! bitset {
 		s
 	}}
 }
-
 
 macro_rules! tok_bitset {
     ($( $tok:expr ),*) => {{
@@ -40,12 +39,30 @@ macro_rules! guard_cmd {
     ($guards:ident, $firing:expr, $data_con:expr, $fire_func:expr) => {
         let data_con = $data_con;
         let fire_func = $fire_func;
-        let g: (BitSet, &(dyn Fn(&mut _)->bool), &(dyn Fn(&mut _)->Result<(),PortClosed>))
-            = ($firing, &data_con, &fire_func);
+        let g: (
+            BitSet,
+            &(dyn Fn(&mut _) -> bool),
+            &(dyn Fn(&mut _) -> Result<(), PortClosed>),
+        ) = ($firing, &data_con, &fire_func);
         $guards.push(g);
     };
 }
 
+macro_rules! ready_set {
+    ($guard:expr) => {
+        $guard.0
+    };
+}
+macro_rules! data_constraint {
+    ($guard:expr) => {
+        $guard.1
+    };
+}
+macro_rules! action_cmd {
+    ($guard:expr) => {
+        $guard.2
+    };
+}
 //
 // struct ReachTracker {
 //     token_occurrences: HashMap<usize,usize>,
@@ -67,7 +84,7 @@ macro_rules! guard_cmd {
 // #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 // pub struct Tok(usize);
 // impl Tok{
-//     const COUNTMASK: usize = 0 ^ 1; 
+//     const COUNTMASK: usize = 0 ^ 1;
 //     pub const fn new_putter(pid: usize) -> Self {
 //         Self(pid*2)
 //     }
@@ -95,7 +112,7 @@ macro_rules! guard_cmd {
 // }
 
 // pub struct GuardTracker {
-//     refcounts: HashMap<usize, usize>, 
+//     refcounts: HashMap<usize, usize>,
 // }
 // impl GuardTracker {
 //     pub fn new<'a>(it: impl IntoIterator<Item=&'a BitSet>) -> Self {
@@ -121,7 +138,6 @@ macro_rules! guard_cmd {
 
 //     }
 // }
-
 
 // #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 // struct GetterId(usize);

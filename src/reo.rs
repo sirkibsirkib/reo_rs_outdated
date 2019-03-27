@@ -1,7 +1,7 @@
-use std::ops::Deref;
 use crossbeam::{Receiver, Sender};
 use mio::{Ready, Registration, SetReadiness};
 use std::io;
+use std::ops::Deref;
 
 pub trait Component {
     fn run(&mut self);
@@ -32,10 +32,10 @@ pub fn new_port<T>() -> (Putter<T>, Getter<T>) {
 }
 
 pub trait ClosedErrorable<T> {
-    fn closed_err(self) -> Result<T,PortClosed>;
+    fn closed_err(self) -> Result<T, PortClosed>;
 }
-impl<T,E> ClosedErrorable<T> for Result<T,E> {
-    fn closed_err(self) -> Result<T,PortClosed> {
+impl<T, E> ClosedErrorable<T> for Result<T, E> {
+    fn closed_err(self) -> Result<T, PortClosed> {
         self.map_err(|_| PortClosed)
     }
 }
@@ -81,21 +81,19 @@ impl<T> Putter<T> {
 
 impl<T> Getter<T> {
     // like peek but guaranteed never to block
-    pub fn try_peek(&mut self) -> Result<Option<&T>,PortClosed> {
+    pub fn try_peek(&mut self) -> Result<Option<&T>, PortClosed> {
         if self.cache.is_none() {
             use crossbeam::channel::TryRecvError;
-            self.cache.replace(
-                match self.data.try_recv() {
-                    Ok(datum) => {
-                        self.set_peer_readiness(true).unwrap();
-                        datum
-                    },
-                    Err(TryRecvError::Empty) => return Ok(None),
-                    Err(TryRecvError::Disconnected) => return Err(PortClosed),
+            self.cache.replace(match self.data.try_recv() {
+                Ok(datum) => {
+                    self.set_peer_readiness(true).unwrap();
+                    datum
                 }
-            );
+                Err(TryRecvError::Empty) => return Ok(None),
+                Err(TryRecvError::Disconnected) => return Err(PortClosed),
+            });
         }
-        Ok(Some(self.cache.as_ref().unwrap()))        
+        Ok(Some(self.cache.as_ref().unwrap()))
     }
 
     // like get but does not remove the datum
@@ -153,7 +151,7 @@ struct EventedTup {
 impl Default for EventedTup {
     fn default() -> Self {
         let (reg, ready) = mio::Registration::new2();
-        Self {reg, ready}
+        Self { reg, ready }
     }
 }
 #[derive(Default)]
@@ -173,42 +171,48 @@ impl<T> Memory<T> {
             let _ = self.full.ready.set_readiness(Ready::readable());
         }
     }
-    pub fn put(&mut self, datum: T) -> Result<(),T> {
-        if self.shutdown {return Err(datum)}
+    pub fn put(&mut self, datum: T) -> Result<(), T> {
+        if self.shutdown {
+            return Err(datum);
+        }
         match self.data.replace(datum) {
             None => {
                 // println!("PUT MEM");
                 self.update_ready();
                 Ok(())
-            },
+            }
             Some(x) => Err(x),
         }
     }
-    pub fn get(&mut self) -> Result<T,PortClosed> {
-        if self.shutdown {return Err(PortClosed)}
+    pub fn get(&mut self) -> Result<T, PortClosed> {
+        if self.shutdown {
+            return Err(PortClosed);
+        }
         match self.data.take() {
             Some(x) => {
                 self.update_ready();
                 Ok(x)
-            },
+            }
             None => Err(PortClosed),
         }
     }
-    pub fn peek(&self) -> Result<&T,PortClosed> {
-        if self.shutdown {return Err(PortClosed)}
+    pub fn peek(&self) -> Result<&T, PortClosed> {
+        if self.shutdown {
+            return Err(PortClosed);
+        }
         match self.data.as_ref() {
             Some(x) => Ok(x),
             None => Err(PortClosed),
         }
     }
-    pub fn reg_g(&self) -> impl Deref<Target=Registration> + '_ {
-        RegHandle { 
+    pub fn reg_g(&self) -> impl Deref<Target = Registration> + '_ {
+        RegHandle {
             reg: &self.full.reg,
             when_dropped: move || self.update_ready(),
         }
     }
-    pub fn reg_p(&self) -> impl Deref<Target=Registration> + '_ {
-        RegHandle { 
+    pub fn reg_p(&self) -> impl Deref<Target = Registration> + '_ {
+        RegHandle {
             reg: &self.empty.reg,
             when_dropped: move || self.update_ready(),
         }
@@ -224,19 +228,27 @@ impl<T> Memory<T> {
     }
 }
 
-struct RegHandle<'a,F> where F: Fn() {
+struct RegHandle<'a, F>
+where
+    F: Fn(),
+{
     reg: &'a Registration,
     when_dropped: F,
 }
-impl<'a,F> Drop for RegHandle<'a,F> where F: Fn() {
+impl<'a, F> Drop for RegHandle<'a, F>
+where
+    F: Fn(),
+{
     fn drop(&mut self) {
         (self.when_dropped)()
     }
 }
-impl<'a,F> std::ops::Deref for RegHandle<'a,F> where F: Fn() {
+impl<'a, F> std::ops::Deref for RegHandle<'a, F>
+where
+    F: Fn(),
+{
     type Target = Registration;
     fn deref(&self) -> &Self::Target {
         &self.reg
     }
 }
-
