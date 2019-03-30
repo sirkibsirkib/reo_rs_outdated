@@ -184,9 +184,11 @@ impl<T> Memory<T> {
         }
     }
     pub fn get(&mut self) -> Result<T, PortClosed> {
-        if self.shutdown {
-            return Err(PortClosed);
-        }
+        // TODO check if this is correct. GET with shutdown thingy is OK
+        // UNTIL there is no data waiting
+        // if self.shutdown {
+        //     return Err(PortClosed);
+        // }
         match self.data.take() {
             Some(x) => {
                 self.update_ready();

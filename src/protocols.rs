@@ -1,9 +1,8 @@
 use mio::{Poll, Events};
-use hashbrown::HashSet;
-use crate::reo::PortClosed;
+use hashbrown::{HashSet, HashMap};
+use crate::PortClosed;
 use bit_set::BitSet;
 use indexmap::IndexSet;
-use hashbrown::HashMap;
 
 #[macro_export]
 macro_rules! bitset {
@@ -14,14 +13,14 @@ macro_rules! bitset {
 	}}
 }
 
-#[macro_export]
-macro_rules! tok_bitset {
-    ($( $tok:expr ),*) => {{
-        let mut s = BitSet::new();
-        $( s.insert($tok.inner()); )*
-        s
-    }}
-}
+// #[macro_export]
+// macro_rules! tok_bitset {
+//     ($( $tok:expr ),*) => {{
+//         let mut s = BitSet::new();
+//         $( s.insert($tok.inner()); )*
+//         s
+//     }}
+// }
 
 #[macro_export]
 macro_rules! def_consts {
@@ -35,6 +34,7 @@ macro_rules! def_consts {
     };
 }
 
+// short for "try peek". used in data-constraint closures for brevity
 #[macro_export]
 macro_rules! tpk {
     ($var:expr) => {
@@ -70,6 +70,13 @@ macro_rules! defm {
     }
 }
 
+/*
+function for clarity and brevity
+allows one to seemingly define closures inside the GuardCmd structure
+in reality, the closures exist in the same scope as the command.
+this is necessary to ensure it has the closures have the necessary lifetime
+and don't need heap-allocation
+ */
 #[macro_export]
 macro_rules! guard_cmd {
     ($guards:ident, $firing:expr, $data_con:expr, $action:expr) => {
@@ -101,57 +108,101 @@ impl<'a,T> GuardCmd<'a,T> {
     }
 }
 
-
 macro_rules! active_gcmds {
     ($guards:expr, $active_guards:expr) => {
         $guards.iter().enumerate().filter(|(i,_)| $active_guards.contains(i))
     }
 }
 
+/*
+Contains all the behaviour common to protocol components.
+Stub functions are defined to expose the minimal surface area for defining the
+differences between specific protocols. The samey work is provided as a default
+implementation.
+*/
 pub trait ProtoComponent: Sized {
+    // given a raw token, if it has a peer (eg: putter for getter) that this struct
+    // also manages locally, return its token. (This is thus only needed for Memory tokens)
     fn get_local_peer_token(&self, token: usize) -> Option<usize>;
-    fn token_shutdown(&mut self, token: usize);
-    fn register_all(&mut self, poll: &Poll);
-    fn run_to_termination<'a,'b>(&'a mut self, gcmds: &'b [GuardCmd<Self>]) {
 
+    // shut down the structure for this token. used to kill memory cells that are unreachable
+    // TODO error handling 
+    fn token_shutdown(&mut self, token: usize);
+
+    // register all local ports and memory cells with the provided poll instance
+    fn register_all(&mut self, poll: &Poll);
+
+    /*
+    The system runs until termination, where termination is the state where all
+    guard commands are INACTIVE.
+
+    A command becomes INACTIVE if any of the ports in its firing set emit PortClosed error
+    when the command executes its ACTION.
+    A port is closed by the protocol itself if it becomes UNREACHABLE, where 
+    there are no occurrences of its PEER in the the union of all firing-bitsets for active
+    guard-commands. (intuitively: A command relying on port1-getter will never progress
+    if there are no remaining )
+
+    // TODO change implementation of Memory cell such that dropping the putter doesn't
+    // result in closing the getter until any data inside the memory cell is yielded.
+    */
+    fn run_to_termination<'a,'b>(&'a mut self, gcmds: &'b [GuardCmd<Self>]) {
+        // aux data about the provided guard command slice
         let guard_idx_range = 0..gcmds.len();
         let mut active_guards: HashSet<_> = guard_idx_range.collect();
+        let mut tok_counter = TokenCounter::new(gcmds.iter().map(|g| g.get_ready_set()));
+
+        // build mio::Poll object and related structures for polling.
+        // delegate token registration to the other methods
         let mut ready = BitSet::new();
         let mut make_inactive = IndexSet::new();
-        let mut tok_counter = TokenCounter::new(gcmds.iter().map(|g| g.get_ready_set()));
         let mut events = Events::with_capacity(32);
         let poll = Poll::new().unwrap();
         self.register_all(&poll);
-
+        
         while !active_guards.is_empty() {
+            // blocking call. resumes when 1+ events are stored inside `events`
             poll.poll(&mut events, None).unwrap();
-            for event in events.iter() {
-                // put the ready flag up
+            for event in events.iter() { // iter() consumes 1+ stored events.
+                // put the ready flag up `$.0` unwraps the mio::Token, 
+                // exposing the usize (mapping 1-to-1) with bitmap index.
                 ready.insert(event.token().0);
             }
-            // 1+ events have occurrec
+            // check if any guards can be fired
+            /*
+            TODO detect unsatisfiable guard? (eg: data_constraint depends only on
+            values that will never change.
+            */
             for (i, g) in active_gcmds!(gcmds, active_guards) {
                 if ready.is_superset(g.get_ready_set()) && (g.data_constraint)(self)
                 {
+                    // unset the bits that have fired.
                     ready.difference_with(g.get_ready_set());
+                    // this call releases getters and putters
                     let result = g.perform_action(self);
                     if result.is_err() {
+                        // Err(PortClosed) caught!
+                        // TODO somehow acquire GETS and PUTS safely 
+                        // such that all can be killed with PortError at once.
                         make_inactive.insert(i);
                     };
                 }
             }
             while let Some(i) = make_inactive.pop() {
                 active_guards.remove(&i);
+                // `dead_bits` represent tokens that have just become unreachable
                 let dead_bits = tok_counter.dec_return_dead(gcmds[i].get_ready_set());
+                // we map these onto the set of tokens whose PEERS have just become unreachable
                 let mut dead_bit_peers = BitSet::default();
                 for t in dead_bits.iter() {
                     if let Some(t_peer) = self.get_local_peer_token(t) {
                         dead_bit_peers.insert(t_peer);
                     }
                 }
+                // make any guards with these peers inactive
                 for (i, g) in active_gcmds!(gcmds, active_guards) {
                     if g.get_ready_set().intersection(&dead_bit_peers).count() > 0 {
-                        // this guard will never fire again! contains a token with dead peer
+                        // this guard will never fire again! make inactive
                         make_inactive.insert(i);
                     }
                 }
@@ -163,9 +214,12 @@ pub trait ProtoComponent: Sized {
 
 #[derive(Debug)]
 struct TokenCounter {
+    // maps from bit-index to refcounts
     m: HashMap<usize, usize>,
 }
 impl TokenCounter {
+    // given some bitsets, count the total references
+    // eg: [{011}, {110}] gives counts [1,2,1]
     fn new<'a>(it: impl Iterator<Item=&'a BitSet>) -> Self {
         let mut m = HashMap::default();
         for b in it {
@@ -175,6 +229,11 @@ impl TokenCounter {
         }
         Self {m}
     }
+
+    // decrement all refcounts flagged by this bitset by 1.
+    // eg: [1,2,1] given {110} results in {0,1,1}
+    // the function returns a bitset of indices that have become 0.
+    // in the example above, we would return {100}
     pub fn dec_return_dead(&mut self, bitset: &BitSet) -> BitSet {
         let mut dead = BitSet::new();
         for b in bitset.iter() {
