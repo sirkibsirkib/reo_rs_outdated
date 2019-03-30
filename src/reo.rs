@@ -1,7 +1,6 @@
 use crossbeam::{Receiver, Sender};
 use mio::{Ready, Registration, SetReadiness};
 use std::io;
-use std::ops::Deref;
 
 pub trait Component {
     fn run(&mut self);
@@ -205,13 +204,13 @@ impl<T> Memory<T> {
             None => Err(PortClosed),
         }
     }
-    pub fn reg_g(&self) -> impl Deref<Target = Registration> + '_ {
+    pub fn reg_g(&self) -> impl AsRef<Registration> + '_ {
         RegHandle {
             reg: &self.full.reg,
             when_dropped: move || self.update_ready(),
         }
     }
-    pub fn reg_p(&self) -> impl Deref<Target = Registration> + '_ {
+    pub fn reg_p(&self) -> impl AsRef<Registration> + '_ {
         RegHandle {
             reg: &self.empty.reg,
             when_dropped: move || self.update_ready(),
@@ -243,12 +242,11 @@ where
         (self.when_dropped)()
     }
 }
-impl<'a, F> std::ops::Deref for RegHandle<'a, F>
+impl<'a, F> AsRef<Registration> for RegHandle<'a, F>
 where
     F: Fn(),
 {
-    type Target = Registration;
-    fn deref(&self) -> &Self::Target {
+    fn as_ref(&self) -> &Registration {
         &self.reg
     }
 }

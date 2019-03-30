@@ -1,6 +1,5 @@
 use mio::{Poll, Events};
 use hashbrown::HashSet;
-use std::ops::Range;
 use crate::reo::PortClosed;
 use bit_set::BitSet;
 use indexmap::IndexSet;
@@ -65,57 +64,14 @@ macro_rules! map {
 }
 
 #[macro_export]
-macro_rules! guard_cmd {
-    ($guards:ident, $firing:expr, $data_con:expr, $fire_func:expr) => {
-        let data_con = $data_con;
-        let fire_func = $fire_func;
-        let g: (
-            BitSet,
-            &(dyn Fn(&mut _) -> bool),
-            &(dyn Fn(&mut _) -> Result<(), PortClosed>),
-        ) = ($firing, &data_con, &fire_func);
-        $guards.push(g);
-    };
-}
-
-// #[macro_export]
-// macro_rules! ready_set {
-//     ($guard:expr) => {
-//         $guard.0
-//     };
-// }
-
-// #[macro_export]
-// macro_rules! data_constraint {
-//     ($guard:expr) => {
-//         $guard.1
-//     };
-// }
-
-#[macro_export]
 macro_rules! defm {
     () => {
         Memory::default()
     }
 }
 
-// #[macro_export]
-// macro_rules! action_cmd {
-//     ($guard:expr) => {
-//         $guard.2
-//     };
-// }
-
-
-macro_rules! active_gcmds {
-    ($guards:expr, $active_guards:expr) => {
-        $guards.iter().enumerate().filter(|(i,_)| $active_guards.contains(i))
-    }
-}
-
-
 #[macro_export]
-macro_rules! guard_cmd2 {
+macro_rules! guard_cmd {
     ($guards:ident, $firing:expr, $data_con:expr, $action:expr) => {
         let data_con = $data_con;
         let action = $action;
@@ -144,6 +100,14 @@ impl<'a,T> GuardCmd<'a,T> {
         (self.action)(t)
     }
 }
+
+
+macro_rules! active_gcmds {
+    ($guards:expr, $active_guards:expr) => {
+        $guards.iter().enumerate().filter(|(i,_)| $active_guards.contains(i))
+    }
+}
+
 pub trait ProtoComponent: Sized {
     fn get_local_peer_token(&self, token: usize) -> Option<usize>;
     fn token_shutdown(&mut self, token: usize);
@@ -165,19 +129,18 @@ pub trait ProtoComponent: Sized {
                 // put the ready flag up
                 ready.insert(event.token().0);
             }
+            // 1+ events have occurrec
             for (i, g) in active_gcmds!(gcmds, active_guards) {
                 if ready.is_superset(g.get_ready_set()) && (g.data_constraint)(self)
                 {
                     ready.difference_with(g.get_ready_set());
                     let result = g.perform_action(self);
-                    print!("RES {:?}", result);
                     if result.is_err() {
                         make_inactive.insert(i);
                     };
                 }
             }
             while let Some(i) = make_inactive.pop() {
-                print!("MAKING {} inactive!", i);
                 active_guards.remove(&i);
                 let dead_bits = tok_counter.dec_return_dead(gcmds[i].get_ready_set());
                 let mut dead_bit_peers = BitSet::default();

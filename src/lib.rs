@@ -1,8 +1,8 @@
 #[macro_use]
 pub mod protocols;
 
-#[macro_use]
-pub mod reo;
+mod reo;
+pub use reo::*;
 
 #[cfg(test)]
 mod tests;

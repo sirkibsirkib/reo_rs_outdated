@@ -1,12 +1,8 @@
-use crate::protocols::ProtoComponent;
-use crate::reo::{self, ClosedErrorable, Component, Getter, Memory, PortClosed, Putter};
+
 use bit_set::BitSet;
-use hashbrown::HashSet;
-use indexmap::IndexSet;
-use mio::{Events, Poll, PollOpt, Ready, Token};
-use std::ops::Deref;
-use std::ops::Range;
-use crate::protocols::GuardCmd;
+use mio::{Poll, PollOpt, Ready, Token};
+use crate::reo::{self, ClosedErrorable, Component, Getter, Memory, Putter};
+use crate::protocols::{GuardCmd, ProtoComponent};
 
 struct Producer {
     p_out: Putter<u32>,
@@ -14,7 +10,7 @@ struct Producer {
 }
 impl Component for Producer {
     fn run(&mut self) {
-        for i in 0..7 {
+        for i in 0..3 {
             self.p_out.put(i + self.offset).unwrap();
         }
     }
@@ -66,17 +62,17 @@ impl ProtoComponent for ProdConsProto {
         poll.register(self.p00g.reg(), Token(P00G), a, edge).unwrap();
         poll.register(self.p01g.reg(), Token(P01G), a, edge).unwrap();
         poll.register(self.p02p.reg(), Token(P02P), a, edge).unwrap();
-        poll.register(self.m00.reg_p().deref(), Token(M00P), a, edge).unwrap();
-        poll.register(self.m00.reg_g().deref(), Token(M00G), a, edge).unwrap();
+        poll.register(self.m00.reg_p().as_ref(), Token(M00P), a, edge).unwrap();
+        poll.register(self.m00.reg_g().as_ref(), Token(M00G), a, edge).unwrap();
     }
 }
 impl Component for ProdConsProto {
     fn run(&mut self) {
         let mut gcmds = vec![];
-        guard_cmd2!(gcmds,
+        guard_cmd!(gcmds,
             bitset! {P00G,P01G,P02P,M00P},
-            |me: &mut Self| {
-                tpk!(me.p00g) != tpk!(me.p01g)
+            |_me: &mut Self| {
+                true
             },
             |me: &mut Self| {
                 me.p02p.put(me.p00g.get()?).closed_err()?;
@@ -84,7 +80,7 @@ impl Component for ProdConsProto {
                 Ok(())
             }
         );
-        guard_cmd2!(gcmds,
+        guard_cmd!(gcmds,
             bitset! {P02P,M00G},
             |_me: &mut Self| {
                 true
