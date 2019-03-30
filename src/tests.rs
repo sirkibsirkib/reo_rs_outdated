@@ -1,3 +1,4 @@
+use crate::protocols::ProtoComponent;
 use crate::reo::{self, ClosedErrorable, Component, Getter, Memory, PortClosed, Putter};
 use bit_set::BitSet;
 use hashbrown::HashSet;
@@ -5,6 +6,7 @@ use indexmap::IndexSet;
 use mio::{Events, Poll, PollOpt, Ready, Token};
 use std::ops::Deref;
 use std::ops::Range;
+use crate::protocols::GuardCmd;
 
 struct Producer {
     p_out: Putter<u32>,
@@ -44,104 +46,55 @@ impl ProdConsProto {
 }
 
 def_consts![0 => P00G, P01G, P02P, M00G, M00P];
-impl ProdConsProto {
-    fn shutdown_if_mem(&mut self, raw_token: usize) -> Option<[usize; 2]> {
-        Some(match raw_token {
-            M00G | M00P => { self.m00.shutdown(); [M00G, M00P] }
+impl ProtoComponent for ProdConsProto {
+    fn get_local_peer_token(&self, token: usize) -> Option<usize> {
+        Some(match token {
+            M00P => M00G,
+            M00G => M00P,
             _ => return None,
         })
     }
-}
-impl Component for ProdConsProto {
-    fn run(&mut self) {
-        // use bits_prod_cons_proto::*;
-
-        // Create poller and register ports
-        let poll = Poll::new().unwrap();
-        let mut events = Events::with_capacity(32);
+    fn token_shutdown(&mut self, token: usize) {
+        match token {
+            M00P | M00G => self.m00.shutdown(),
+            _ => {},
+        }
+    }
+    fn register_all(&mut self, poll: &Poll) {
         let a = Ready::all();
         let edge = PollOpt::edge();
-        // bind port-ends and memory-ends with identifiable tokens
-
         poll.register(self.p00g.reg(), Token(P00G), a, edge).unwrap();
         poll.register(self.p01g.reg(), Token(P01G), a, edge).unwrap();
         poll.register(self.p02p.reg(), Token(P02P), a, edge).unwrap();
         poll.register(self.m00.reg_p().deref(), Token(M00P), a, edge).unwrap();
         poll.register(self.m00.reg_g().deref(), Token(M00G), a, edge).unwrap();
-
-        // define the guards
-        let mut guards = vec![];
-        guard_cmd!(
-            guards,
+    }
+}
+impl Component for ProdConsProto {
+    fn run(&mut self) {
+        let mut gcmds = vec![];
+        guard_cmd2!(gcmds,
             bitset! {P00G,P01G,P02P,M00P},
-            |_me: &mut Self| true,
+            |me: &mut Self| {
+                tpk!(me.p00g) != tpk!(me.p01g)
+            },
             |me: &mut Self| {
                 me.p02p.put(me.p00g.get()?).closed_err()?;
                 me.m00.put(me.p01g.get()?).closed_err()?;
                 Ok(())
             }
         );
-        guard_cmd!(
-            guards,
+        guard_cmd2!(gcmds,
             bitset! {P02P,M00G},
-            |_me: &mut Self| true,
+            |_me: &mut Self| {
+                true
+            },
             |me: &mut Self| {
                 me.p02p.put(me.m00.get()?).closed_err()?;
                 Ok(())
             }
         );
-        let guard_idx_range: Range<usize> = 0..guards.len();
-        let mut active_guards: HashSet<_> = guard_idx_range.collect();
-        for (i, g) in guards.iter().enumerate() {
-            println!("{:?}: {:?}", i, &g.0);
-        }
-
-        let mut ready = BitSet::new();
-        let mut make_inactive = IndexSet::new();
-        while !active_guards.is_empty() {
-            poll.poll(&mut events, None).unwrap();
-            for event in events.iter() {
-                // raise the 'ready' flag for this token.
-                ready.insert(event.token().0);
-            }
-            for (guard_idx, g) in guards.iter().enumerate() {
-                if active_guards.contains(&guard_idx)
-                    && ready.is_superset(&ready_set!(g))
-                    && data_constraint!(g)(self)
-                {
-                    // remove fired ports from ready set
-                    ready.difference_with(&ready_set!(g));
-                    // apply the ACTION associated with this guard
-                    let result = action_cmd!(g)(self);
-                    if result.is_err() {
-                        // failed! some port / memory closed!
-                        // make a note to make this guard inactive
-                        make_inactive.insert(guard_idx);
-                    };
-                }
-            }
-            while let Some(g_idx) = make_inactive.pop() {
-                // make this guard inactive
-                active_guards.remove(&g_idx);
-                for tok in ready_set!(guards[g_idx]).iter() {
-                    // traverse firing set
-                    if let Some([mem_tok_p, mem_tok_g]) = self.shutdown_if_mem(tok) {
-                        let idx_should_become_inactive = guards
-                            .iter()
-                            .enumerate()
-                            .filter(|(i, g)| {
-                                active_guards.contains(i)
-                                    && (ready_set!(g).contains(mem_tok_p)
-                                        || ready_set!(g).contains(mem_tok_g))
-                            })
-                            .map(|(i, _)| i);
-                        for i in idx_should_become_inactive {
-                            make_inactive.insert(i);
-                        }
-                    }
-                }
-            }
-        }
+        self.run_to_termination(&gcmds);
     }
 }
 
