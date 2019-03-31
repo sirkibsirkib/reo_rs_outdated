@@ -154,7 +154,8 @@ pub trait ProtoComponent: Sized {
 
         // build mio::Poll object and related structures for polling.
         // delegate token registration to the other methods
-        let mut ready = BitSet::new();
+        let mut ready_bits = BitSet::new();
+        let mut dead_bits = BitSet::new();
         let mut make_inactive = IndexSet::new();
         let mut events = Events::with_capacity(32);
         let poll = Poll::new().unwrap();
@@ -166,7 +167,7 @@ pub trait ProtoComponent: Sized {
             for event in events.iter() { // iter() consumes 1+ stored events.
                 // put the ready flag up `$.0` unwraps the mio::Token, 
                 // exposing the usize (mapping 1-to-1) with bitmap index.
-                ready.insert(event.token().0);
+                ready_bits.insert(event.token().0);
             }
             // check if any guards can be fired
             /*
@@ -174,10 +175,10 @@ pub trait ProtoComponent: Sized {
             values that will never change.
             */
             for (i, g) in active_gcmds!(gcmds, active_guards) {
-                if ready.is_superset(g.get_ready_set()) && (g.data_constraint)(self)
+                if ready_bits.is_superset(g.get_ready_set()) && (g.data_constraint)(self)
                 {
                     // unset the bits that have fired.
-                    ready.difference_with(g.get_ready_set());
+                    ready_bits.difference_with(g.get_ready_set());
                     // this call releases getters and putters
                     let result = g.perform_action(self);
                     if result.is_err() {
@@ -191,17 +192,15 @@ pub trait ProtoComponent: Sized {
             while let Some(i) = make_inactive.pop() {
                 active_guards.remove(&i);
                 // `dead_bits` represent tokens that have just become unreachable
-                let dead_bits = tok_counter.dec_return_dead(gcmds[i].get_ready_set());
-                // we map these onto the set of tokens whose PEERS have just become unreachable
-                let mut dead_bit_peers = BitSet::default();
-                for t in dead_bits.iter() {
-                    if let Some(t_peer) = self.get_local_peer_token(t) {
-                        dead_bit_peers.insert(t_peer);
+                for new_dead_bit in tok_counter.dec_return_dead(gcmds[i].get_ready_set()) {
+                    dead_bits.insert(new_dead_bit);
+                    if let Some(t_peer) = self.get_local_peer_token(new_dead_bit) {
+                        dead_bits.insert(t_peer);
                     }
                 }
                 // make any guards with these peers inactive
                 for (i, g) in active_gcmds!(gcmds, active_guards) {
-                    if g.get_ready_set().intersection(&dead_bit_peers).count() > 0 {
+                    if g.get_ready_set().intersection(&dead_bits).count() > 0 {
                         // this guard will never fire again! make inactive
                         make_inactive.insert(i);
                     }
@@ -234,13 +233,11 @@ impl TokenCounter {
     // eg: [1,2,1] given {110} results in {0,1,1}
     // the function returns a bitset of indices that have become 0.
     // in the example above, we would return {100}
-    pub fn dec_return_dead(&mut self, bitset: &BitSet) -> BitSet {
-        let mut dead = BitSet::new();
-        for b in bitset.iter() {
-            let v = self.m.get_mut(&b).expect("BAD BITSET");
+    pub fn dec_return_dead<'a,'b: 'a>(&'a mut self, bitset: &'b BitSet) -> impl Iterator<Item=usize> + 'a {
+        bitset.iter().filter(move |b| {
+            let v = self.m.get_mut(b).expect("BAD BITSET");
             *v -= 1;
-            dead.insert(b);
-        }
-        dead
+            *v == 0
+        })
     }
 }
