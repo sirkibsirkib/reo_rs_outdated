@@ -1,3 +1,4 @@
+use std::time::Duration;
 use crossbeam::{Receiver, Sender};
 use mio::{Ready, Registration, SetReadiness};
 use std::io;
@@ -56,8 +57,41 @@ pub struct Getter<T> {
     putter_set_ready: SetReadiness,
 }
 
+#[derive(Debug)]
+pub enum TryPutErr<T: Sized> {
+    PortClosed(Option<T>),
+    PeerNotReady(T),
+}
+
 //////////////////////////////
 impl<T> Putter<T> {
+    pub fn try_put(&mut self, datum: T, timeout: Option<Duration>) -> Result<(), TryPutErr<T>> {
+        use crossbeam::{TrySendError, SendTimeoutError};
+        if let Some(to) = timeout {
+            match self.data.send_timeout(datum, to) {
+                Ok(()) => {},
+                Err(SendTimeoutError::Timeout(t)) => {
+                    return Err(TryPutErr::PeerNotReady(t))
+                }
+                Err(SendTimeoutError::Disconnected(t)) => {
+                    return Err(TryPutErr::PortClosed(Some(t)))
+                }
+            }
+        } else {
+            match self.data.try_send(datum) {
+                Ok(()) => {},
+                Err(TrySendError::Full(t)) => {
+                    return Err(TryPutErr::PeerNotReady(t))
+                },
+                Err(TrySendError::Disconnected(t)) => {
+                    return Err(TryPutErr::PortClosed(Some(t)))
+                },
+            }
+        }
+        self.done_sig.recv().map_err(|_| TryPutErr::PortClosed(None))?;
+        self.set_peer_readiness(false).unwrap();
+        Ok(())
+    }
     pub fn put(&mut self, datum: T) -> Result<(), PortClosed> {
         self.set_peer_readiness(true).unwrap();
         self.data.send(datum).closed_err()?;

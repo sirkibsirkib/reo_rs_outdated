@@ -154,8 +154,8 @@ pub trait ProtoComponent: Sized {
 
         // build mio::Poll object and related structures for polling.
         // delegate token registration to the other methods
-        let mut ready_bits = BitSet::new();
-        let mut dead_bits = BitSet::new();
+        let mut ready_bits = BitSet::new(); // ever-changing bitset of tokens for READY ports
+        let mut dead_bits = BitSet::new(); // increasing-only bitset of tokens for DEAD ports
         let mut make_inactive = IndexSet::new();
         let mut events = Events::with_capacity(32);
         let poll = Poll::new().unwrap();
