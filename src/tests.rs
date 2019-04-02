@@ -1,7 +1,9 @@
 
 use bit_set::BitSet;
 use mio::{Poll, PollOpt, Ready, Token};
-use crate::reo::{self, ClosedErrorable, Component, Getter, Memory, Putter};
+// use crate::reo::{self, ClosedErrorable, Component, Getter, Memory, Putter};
+use crate::reo::{Component, Memory};
+use crate::port_backend::{Getter, Putter};
 use crate::protocols::{GuardCmd, ProtoComponent};
 
 struct Producer {
@@ -126,3 +128,11 @@ fn alternator() {
 
 
 ///////////////////////////////////
+// #[test]
+// fn backendtest() {
+
+// }
+
+// pub fn testy(mut p1: Putter<u32>, mut p2: Putter<u32>, mut g1: Getter<u32>, mut g2: Getter<u32>) {
+//     let ready_w = BitSet::new();
+// }
