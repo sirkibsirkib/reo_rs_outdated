@@ -56,7 +56,7 @@ enum  PutterState {
 	StateBUnpeeked,
 	StateBPeeked,
 }
-pub struct Getter<T> {
+pub struct PortGetter<T> {
 	shared: Arc<Shared<T>>,
 	barrier: crossbeam::Sender<PutterwardSignal>, 
 	putter_state: PutterState,
@@ -64,8 +64,30 @@ pub struct Getter<T> {
 	peer_ready: SetReadiness,
 }
 
-impl<T> Getter<T> {
-	pub fn peek(&mut self) -> Result<&T,()> {
+impl<T> PortGetter<T> {
+	pub fn reg(&self) -> &Registration {
+		&self.my_reg
+	}
+}
+impl<T> Getter<T> for PortGetter<T> {
+	fn try_peek(&mut self) -> Result<&T,bool> {
+		if self.putter_state == PutterState::StateA {
+			/////// Barrier 1 
+			use crossbeam::TrySendError;
+			match self.barrier.try_send(PutterwardSignal::AToB) {
+				Ok(()) => {},
+				Err(TrySendError::Disconnected(_)) => return Err(false),
+				Err(TrySendError::Full(_)) => return Err(true),
+			}
+		}
+		self.putter_state = PutterState::StateBPeeked;
+		let datum: &T = unsafe {
+			let r: *mut T = *self.shared.data.get();
+			&*r
+		};
+		Ok(datum)
+	}
+	fn peek(&mut self) -> Result<&T,()> {
 		if self.putter_state == PutterState::StateA {
 			/////// Barrier 1 
 			if self.barrier.send(PutterwardSignal::AToB).is_err() {
@@ -79,8 +101,7 @@ impl<T> Getter<T> {
 		};
 		Ok(datum)
 	}
-	pub fn get(&mut self) -> Result<T,()> {
-
+	fn get(&mut self) -> Result<T,()> {
 		self.peer_ready.set_readiness(Ready::writable()).unwrap(); // CERTAIN PUT
 		if self.putter_state == PutterState::StateA  {
 			/////// Barrier 1 
@@ -95,12 +116,9 @@ impl<T> Getter<T> {
 		self.putter_state = PutterState::StateA;
 		Ok(datum)
 	}
-	pub fn reg(&self) -> &Registration {
-		&self.my_reg
-	}
 }
 
-pub struct Putter<T> {
+pub struct PortPutter<T> {
 	shared: Arc<Shared<T>>,
 	barrier: crossbeam::Receiver<PutterwardSignal>,
 	my_reg: Registration,
@@ -113,8 +131,13 @@ pub enum TryPutErr<T> {
 	Timeout(T),
 }
 
-impl<T> Putter<T> {
-	pub fn put(&mut self, mut datum: T) -> Result<(),T> {
+impl<T> PortPutter<T> {
+	pub fn reg(&self) -> &Registration {
+		&self.my_reg
+	}
+}
+impl<T> Putter<T> for PortPutter<T> {
+	fn put(&mut self, mut datum: T) -> Result<(),T> {
 		let r: *mut T = &mut datum;
 		unsafe { *self.shared.data.get() = r };
 		self.peer_ready.set_readiness(Ready::writable()).unwrap(); // CERTAIN GET
@@ -137,7 +160,7 @@ impl<T> Putter<T> {
 			Err(crossbeam::RecvError) => return Err(datum),
 		}		
 	}
-	pub fn try_put(&mut self, mut datum: T, mut wait_duration: Option<Duration>) -> Result<(),TryPutErr<T>> {
+	fn try_put(&mut self, mut datum: T, mut wait_duration: Option<Duration>) -> Result<(),TryPutErr<T>> {
 		let start = std::time::Instant::now();
 		let r: *mut T = &mut datum;
 		unsafe { *self.shared.data.get() = r }; // set contents to datum on my stack
@@ -181,58 +204,39 @@ impl<T> Putter<T> {
 				Err(crossbeam::RecvError) => return Err(TryPutErr::PeerDropped(datum)),
 			}
 		}
-		
-	}
-	pub fn reg(&self) -> &Registration {
-		&self.my_reg
 	}
 }
 
 
-unsafe impl<T> Sync for Putter<T> {}
-unsafe impl<T> Sync for Getter<T> {}
-unsafe impl<T> Send for Putter<T> {}
-unsafe impl<T> Send for Getter<T> {}
-impl<T> Drop for Getter<T> {
+unsafe impl<T> Sync for PortPutter<T> {}
+unsafe impl<T> Sync for PortGetter<T> {}
+unsafe impl<T> Send for PortPutter<T> {}
+unsafe impl<T> Send for PortGetter<T> {}
+impl<T> Drop for PortGetter<T> {
 	fn drop(&mut self) {
 		self.peer_ready.set_readiness(Ready::readable()).unwrap(); // say: peer dead!
 	}
 }
-impl<T> Drop for Putter<T> {
+impl<T> Drop for PortPutter<T> {
 	fn drop(&mut self) {
 		self.peer_ready.set_readiness(Ready::readable()).unwrap(); // say: peer dead!
 	}
 }
 
-// #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-// pub enum WaitResult {
-// 	Rendezvous,
-// 	PeerDropped,
-// 	Timeout,
-// }
-// impl WaitResult {
-// 	pub fn was_rendezvous(self) -> bool {
-// 		match self {
-// 			WaitResult::Rendezvous => true,
-// 			_ => false,
-// 		}
-// 	}
-// }
-
-pub fn new_port<T>() -> (Putter<T>, Getter<T>) {
+pub fn new_port<T>() -> (PortPutter<T>, PortGetter<T>) {
     let (g_reg, g_red) = mio::Registration::new2();
     let (p_reg, p_red) = mio::Registration::new2();
 	let a_shared = Arc::new(Shared {
 		data: UnsafeCell::new(std::ptr::null_mut()),
 	});
 	let (s,r) = crossbeam::channel::bounded(0);
-	let p = Putter {
+	let p = PortPutter {
 		shared: a_shared.clone(),
 		barrier: r,
 		my_reg: p_reg,
 		peer_ready: g_red,
 	};
-	let g = Getter {
+	let g = PortGetter {
 		shared: a_shared,
 		barrier: s,
 		putter_state: PutterState::StateA,
@@ -243,32 +247,37 @@ pub fn new_port<T>() -> (Putter<T>, Getter<T>) {
 }
 
 
+#[derive(Debug, Copy, Clone)]
+pub enum FreezeOutcome {
+	Frozen,
+	PeerNotWaiting,
+	PeerDropped,
+	PutterCommitted,
+}
+
 pub trait Freezer {
-	// non-blocking no-value peek
-	// panics if this gotten value has been peeked before
-	// returns Err(()) if the port is dead
-	// returns Ok(true) if the freeze succeeds. the putter locked, peek / get won't block.
-	// returns Ok(false) if freeze fails. putter isn't ready. peek / get may block.
-	fn freeze(&mut self) -> Result<bool,()>;
+	// attempts to freeze a waiting try_put on the putter's side
+	// returns Ok(_) if the value
+	fn freeze(&mut self) -> FreezeOutcome;
 
 	// only execute AFTER successful freeze where no peek has been performed
 	// blocks until the putter receives the signal
 	fn thaw(&mut self);
 }
-impl<T> Freezer for Getter<T> {
-	fn freeze(&mut self) -> Result<bool,()> {
+impl<T> Freezer for PortGetter<T> {
+	fn freeze(&mut self) -> FreezeOutcome {
 		use crossbeam::channel::TrySendError;
 		match self.putter_state {
 			PutterState::StateA => match self.barrier.try_send(PutterwardSignal::AToB) {
 				Ok(()) => {
 					self.putter_state = PutterState::StateBUnpeeked;
-					Ok(true)
+					FreezeOutcome::Frozen
 				},
-				Err(TrySendError::Full(_)) => Ok(false),
-				Err(TrySendError::Disconnected(_)) => Err(()),
+				Err(TrySendError::Full(_)) => FreezeOutcome::PeerNotWaiting,
+				Err(TrySendError::Disconnected(_)) => FreezeOutcome::PeerDropped,
 			},
-			PutterState::StateBPeeked => panic!("Catcall on peeked value!"),
-			PutterState::StateBUnpeeked => return Ok(true),
+			PutterState::StateBPeeked => FreezeOutcome::PutterCommitted,
+			PutterState::StateBUnpeeked => FreezeOutcome::Frozen,
 		}
 	}
 	fn thaw(&mut self) {
@@ -293,8 +302,6 @@ impl Default for EventedTup {
     }
 }
 
-
-
 #[derive(Default)]
 pub struct Memory<T> {
     shutdown: bool,
@@ -302,35 +309,8 @@ pub struct Memory<T> {
     full: EventedTup,
     empty: EventedTup,
 }
-impl<T> Memory<T> {
-    pub fn shutdown(&mut self) {
-        if !self.shutdown {
-            self.shutdown = true;
-            println!("SHUTTING DOWN");
-            // self.update_ready();
-            let _ = self.empty.ready.set_readiness(Ready::writable());
-            let _ = self.full.ready.set_readiness(Ready::writable());
-        }
-    }
-    pub fn put(&mut self, datum: T) -> Result<(), T> {
-        if self.shutdown {
-            return Err(datum);
-        }
-        match self.data.replace(datum) {
-            None => {
-                // println!("PUT MEM");
-                self.update_ready();
-                Ok(())
-            }
-            Some(x) => Err(x),
-        }
-    }
-    pub fn get(&mut self) -> Result<T, ()> {
-        // TODO check if this is correct. GET with shutdown thingy is OK
-        // UNTIL there is no data waiting
-        // if self.shutdown {
-        //     return Err(PortClosed);
-        // }
+impl<T> Getter<T> for Memory<T> {
+    fn get(&mut self) -> Result<T, ()> {
         match self.data.take() {
             Some(x) => {
                 self.update_ready();
@@ -339,13 +319,25 @@ impl<T> Memory<T> {
             None => Err(()),
         }
     }
-    pub fn peek(&self) -> Result<&T, ()> {
+	fn try_peek(&mut self) -> Result<&T,bool> {
+		self.peek().map_err(|_| false)
+	}
+    fn peek(&mut self) -> Result<&T, ()> {
         if self.shutdown {
             return Err(());
         }
         match self.data.as_ref() {
             Some(x) => Ok(x),
             None => Err(()),
+        }
+    }
+}
+impl<T> Memory<T> {
+    pub fn shutdown(&mut self) {
+        if !self.shutdown {
+            self.shutdown = true;
+            let _ = self.empty.ready.set_readiness(Ready::writable());
+            let _ = self.full.ready.set_readiness(Ready::writable());
         }
     }
     pub fn reg_g(&self) -> impl AsRef<Registration> + '_ {
@@ -370,6 +362,23 @@ impl<T> Memory<T> {
         }
     }
 }
+impl<T> Putter<T> for Memory<T> {
+    fn put(&mut self, datum: T) -> Result<(), T> {
+        if self.shutdown {
+            return Err(datum);
+        }
+        match self.data.replace(datum) {
+            None => {
+                self.update_ready();
+                Ok(())
+            }
+            Some(x) => Err(x),
+        }
+    }
+	fn try_put(&mut self, datum: T, _wait_duration: Option<Duration>) -> Result<(),TryPutErr<T>> {
+		self.put(datum).map_err(|t| TryPutErr::PeerDropped(t))
+	}
+}
 
 struct RegHandle<'a, F>
 where
@@ -393,4 +402,16 @@ where
     fn as_ref(&self) -> &Registration {
         &self.reg
     }
+}
+
+
+pub trait Putter<T> {
+	fn put(&mut self, datum: T) -> Result<(),T>;
+	fn try_put(&mut self, datum: T, wait_duration: Option<Duration>) -> Result<(),TryPutErr<T>>;
+}
+
+pub trait Getter<T> {
+	fn try_peek(&mut self) -> Result<&T,bool>;
+	fn peek(&mut self) -> Result<&T,()>;
+	fn get(&mut self) -> Result<T,()>;
 }

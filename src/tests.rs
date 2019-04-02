@@ -3,13 +3,12 @@ use crate::port_backend::Freezer;
 use bit_set::BitSet;
 use mio::{Poll, PollOpt, Ready, Token};
 use std::time::Duration;
-// use crate::reo::{self, ClosedErrorable, Component, Getter, Memory, Putter};
 use crate::reo::{Component};
-use crate::port_backend::{Memory, Getter, Putter};
+use crate::port_backend::{Memory, PortGetter, PortPutter, Putter, Getter};
 use crate::protocols::{GuardCmd, ProtoComponent, DiscardableError};
 
 struct Producer {
-    p_out: Putter<u32>,
+    p_out: PortPutter<u32>,
     offset: u32,
 }
 impl Component for Producer {
@@ -21,7 +20,7 @@ impl Component for Producer {
 }
 
 struct Consumer {
-    p_in: Getter<u32>,
+    p_in: PortGetter<u32>,
 }
 impl Component for Consumer {
     fn run(&mut self) {
@@ -31,15 +30,15 @@ impl Component for Consumer {
     }
 }
 struct ProdConsProto {
-    p00g: Getter<u32>,
-    p01g: Getter<u32>,
-    p02p: Putter<u32>,
+    p00g: PortGetter<u32>,
+    p01g: PortGetter<u32>,
+    p02p: PortPutter<u32>,
     m00: Memory<u32>,
 }
 impl ProdConsProto {
 
     #[rustfmt::skip]
-    pub fn new(p00g: Getter<u32>, p01g: Getter<u32>, p02p: Putter<u32>) -> Self {
+    pub fn new(p00g: PortGetter<u32>, p01g: PortGetter<u32>, p02p: PortPutter<u32>) -> Self {
         let m00 = Default::default();
         Self { p00g, p01g, p02p, m00 }
     }
@@ -146,6 +145,6 @@ fn alternator() {
 
 // }
 
-// pub fn testy(mut p1: Putter<u32>, mut p2: Putter<u32>, mut g1: Getter<u32>, mut g2: Getter<u32>) {
+// pub fn testy(mut p1: Putter<u32>, mut p2: Putter<u32>, mut g1: PortGetter<u32>, mut g2: PortGetter<u32>) {
 //     let ready_w = BitSet::new();
 // }

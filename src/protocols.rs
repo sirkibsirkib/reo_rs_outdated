@@ -1,9 +1,8 @@
 
-use mio::Token;
-use crate::port_backend::Freezer;
+use crate::reo::Component;
+use crate::port_backend::{Freezer,FreezeOutcome};
 use mio::{Poll, Events};
 use hashbrown::{HashSet, HashMap};
-// use crate::PortClosed;
 use bit_set::BitSet;
 use indexmap::IndexSet;
 
@@ -16,14 +15,6 @@ macro_rules! bitset {
 	}}
 }
 
-// #[macro_export]
-// macro_rules! tok_bitset {
-//     ($( $tok:expr ),*) => {{
-//         let mut s = BitSet::new();
-//         $( s.insert($tok.inner()); )*
-//         s
-//     }}
-// }
 
 #[macro_export]
 macro_rules! def_consts {
@@ -37,7 +28,6 @@ macro_rules! def_consts {
     };
 }
 
-// short for "try peek". used in data-constraint closures for brevity
 #[macro_export]
 macro_rules! tpk {
     ($var:expr) => {
@@ -123,7 +113,7 @@ Stub functions are defined to expose the minimal surface area for defining the
 differences between specific protocols. The samey work is provided as a default
 implementation.
 */
-pub trait ProtoComponent: Sized {
+pub trait ProtoComponent: Component + Sized {
     // given a raw token, if it has a peer (eg: putter for getter) that this struct
     // also manages locally, return its token. (This is thus only needed for Memory tokens)
     fn get_local_peer_token(&self, token: usize) -> Option<usize>;
@@ -232,11 +222,21 @@ pub trait ProtoComponent: Sized {
 pub fn try_lock_all_return_failed<'a, 'b, I, T: ProtoComponent>(t: &'a mut T, it: I) -> Result<Option<usize>,()>
 where I: Iterator<Item=usize> + Clone {
     for bit in it.clone() {
-        if !t.lookup_getter(bit).expect("BRANG1").freeze()? {
-            for bit2 in it.take_while(|&bit2| bit2 != bit) {
-                t.lookup_getter(bit2).expect("BRANG2").thaw();
+        match t.lookup_getter(bit).expect("BRANG1").freeze() {
+            FreezeOutcome::PutterCommitted => panic!("This putter has committed!"),
+            FreezeOutcome::Frozen => {},
+            FreezeOutcome::PeerNotWaiting => {
+                for bit2 in it.take_while(|&bit2| bit2 != bit) {
+                    t.lookup_getter(bit2).expect("BRANG2").thaw();
+                }
+                return Ok(Some(bit));
+            },
+            FreezeOutcome::PeerDropped => {
+                for bit2 in it.take_while(|&bit2| bit2 != bit) {
+                    t.lookup_getter(bit2).expect("BRANG2").thaw();
+                }
+                return Err(());
             }
-            return Ok(Some(bit));
         }
     }
     Ok(None)
