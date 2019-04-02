@@ -88,3 +88,6 @@ each protocol runs with 1 thread.
 with only PUT GET and PEEK
 data flows only in ONE direction. this is workable since even if data gets stuck
 halfway through the protocol
+
+
+lock_all(impl Iterator<>)

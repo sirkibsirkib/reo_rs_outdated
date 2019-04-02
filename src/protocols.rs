@@ -1,6 +1,9 @@
+
+use mio::Token;
+use crate::port_backend::Catcallable;
 use mio::{Poll, Events};
 use hashbrown::{HashSet, HashMap};
-use crate::PortClosed;
+// use crate::PortClosed;
 use bit_set::BitSet;
 use indexmap::IndexSet;
 
@@ -89,12 +92,12 @@ macro_rules! guard_cmd {
 pub struct GuardCmd<'a, T> {
     ready_set: BitSet,
     data_constraint: &'a (dyn Fn(&mut T)->bool),
-    action: &'a (dyn Fn(&mut T)->Result<(), PortClosed>),
+    action: &'a (dyn Fn(&mut T)->Result<(), ()>),
 }
 impl<'a,T> GuardCmd<'a,T> {
     pub fn new(ready_set: BitSet,
         data_constraint: &'a (dyn Fn(&mut T)->bool),
-        action: &'a (dyn Fn(&mut T)->Result<(), PortClosed>)) -> Self {
+        action: &'a (dyn Fn(&mut T)->Result<(), ()>)) -> Self {
         Self { ready_set, data_constraint, action}
     }
     pub fn get_ready_set(&self) -> &BitSet {
@@ -103,7 +106,7 @@ impl<'a,T> GuardCmd<'a,T> {
     pub fn check_constraint(&self, t: &mut T) -> bool {
         (self.data_constraint)(t)
     }
-    pub fn perform_action(&self, t: &mut T) -> Result<(), PortClosed> {
+    pub fn perform_action(&self, t: &mut T) -> Result<(), ()> {
         (self.action)(t)
     }
 }
@@ -132,6 +135,8 @@ pub trait ProtoComponent: Sized {
     // register all local ports and memory cells with the provided poll instance
     fn register_all(&mut self, poll: &Poll);
 
+    fn lookup_getter(&mut self, tok: usize) -> Option<&mut (dyn Catcallable)>;
+
     /*
     The system runs until termination, where termination is the state where all
     guard commands are INACTIVE.
@@ -155,6 +160,7 @@ pub trait ProtoComponent: Sized {
         // build mio::Poll object and related structures for polling.
         // delegate token registration to the other methods
         let mut ready_bits = BitSet::new(); // ever-changing bitset of tokens for READY ports
+        let mut tentative_bits = BitSet::new(); // ever-changing bitset of tokens for READY ports
         let mut dead_bits = BitSet::new(); // increasing-only bitset of tokens for DEAD ports
         let mut make_inactive = IndexSet::new();
         let mut events = Events::with_capacity(32);
@@ -167,26 +173,48 @@ pub trait ProtoComponent: Sized {
             for event in events.iter() { // iter() consumes 1+ stored events.
                 // put the ready flag up `$.0` unwraps the mio::Token, 
                 // exposing the usize (mapping 1-to-1) with bitmap index.
-                ready_bits.insert(event.token().0);
+                println!("EVENT {:?}", &event);
+                let r = event.readiness(); 
+                if r.is_writable() {
+                    ready_bits.insert(event.token().0);
+                } else if r.is_readable() {
+                    ready_bits.insert(event.token().0);
+                    tentative_bits.insert(event.token().0);
+                }
             }
+            std::thread::sleep(std::time::Duration::from_millis(5));
             // check if any guards can be fired
             /*
             TODO detect unsatisfiable guard? (eg: data_constraint depends only on
             values that will never change.
             */
             for (i, g) in active_gcmds!(gcmds, active_guards) {
-                if ready_bits.is_superset(g.get_ready_set()) && (g.data_constraint)(self)
-                {
-                    // unset the bits that have fired.
-                    ready_bits.difference_with(g.get_ready_set());
-                    // this call releases getters and putters
-                    let result = g.perform_action(self);
-                    if result.is_err() {
-                        // Err(PortClosed) caught!
-                        // TODO somehow acquire GETS and PUTS safely 
-                        // such that all can be killed with PortError at once.
-                        make_inactive.insert(i);
+                if g.ready_set.is_superset(&ready_bits) {
+                    let catcall_res = catcall_all_or_release(self, tentative_bits.intersection(g.get_ready_set()));
+                    match catcall_res {
+                        Ok(true) => {},
+                        Ok(false) => {
+                            tentative_bits.difference_with(g.get_ready_set());
+                            continue;
+                        },
+                        Err(()) => {
+                            tentative_bits.difference_with(g.get_ready_set());
+                            make_inactive.insert(i);
+                            continue;
+                        },
                     };
+                    // for bit in g.ready_set.intersection
+                    // if !g.ready_set.intersection(&ready_bits).intersection(&tentative_bits).is_empty() {
+                    //     unimplemented!()
+                    // }
+                    if (g.data_constraint)(self) {
+                        {
+                            // unset the bits that have fired.
+                            ready_bits.difference_with(g.get_ready_set());
+                            // this call releases getters and putters
+                            g.perform_action(self).expect("ACTION SHOULD NOT PANIC");
+                        }
+                    }
                 }
             }
             while let Some(i) = make_inactive.pop() {
@@ -208,6 +236,21 @@ pub trait ProtoComponent: Sized {
             }
         }
     }
+}
+
+
+pub fn catcall_all_or_release<'a, 'b, T: ProtoComponent>(t: &'a mut T, to_catcall: bit_set::Intersection<'b, u32>) -> Result<bool,()> {
+    for bit in to_catcall.clone() {
+        let res = t.lookup_getter(bit).expect("BRANG").catcall()?;
+        if !res {
+            println!("CATCALL FAIL ON {}", bit);
+            for bit2 in to_catcall.take_while(|&x| x != bit) {
+                t.lookup_getter(bit2).expect("BRANG2").try_release_putter();
+            }
+            return Ok(false)
+        }
+    }
+    Ok(true)
 }
 
 
@@ -241,3 +284,15 @@ impl TokenCounter {
         })
     }
 }
+
+
+
+pub trait DiscardableError<T> {
+    fn unit_err(self) -> Result<T, ()>;
+}
+impl<T, E> DiscardableError<T> for Result<T, E> {
+    fn unit_err(self) -> Result<T, ()> {
+        self.map_err(|_| ())
+    }
+}
+

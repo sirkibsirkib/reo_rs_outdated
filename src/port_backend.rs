@@ -80,6 +80,8 @@ impl<T> Getter<T> {
 		Ok(datum)
 	}
 	pub fn get(&mut self) -> Result<T,()> {
+
+		self.peer_ready.set_readiness(Ready::writable()).unwrap(); // CERTAIN PUT
 		if self.putter_state == PutterState::StateA  {
 			/////// Barrier 1 
 			if self.barrier.send(PutterwardSignal::AToB).is_err() {
@@ -89,6 +91,7 @@ impl<T> Getter<T> {
 		let datum = unsafe { mem::replace(&mut **self.shared.data.get(), mem::uninitialized()) };
 		/////// Barrier 2 
 		let _ = self.barrier.send(PutterwardSignal::BToAAccepted);
+		self.peer_ready.set_readiness(Ready::empty()).unwrap();
 		self.putter_state = PutterState::StateA;
 		Ok(datum)
 	}
@@ -104,6 +107,7 @@ pub struct Putter<T> {
 	peer_ready: SetReadiness,
 }
 
+#[derive(Debug)]
 pub enum TryPutErr<T> {
 	PeerDropped(T),
 	Timeout(T),
@@ -113,9 +117,8 @@ impl<T> Putter<T> {
 	pub fn put(&mut self, mut datum: T) -> Result<(),T> {
 		let r: *mut T = &mut datum;
 		unsafe { *self.shared.data.get() = r };
-		self.peer_ready.set_readiness(Ready::writable()); // CERTAIN GET
+		self.peer_ready.set_readiness(Ready::writable()).unwrap(); // CERTAIN GET
 		/////// Barrier 1 
-		self.peer_ready.set_readiness(Ready::readable()).unwrap(); // say: peer won't block!
 		match self.barrier.recv() { // SIGNAL 1
 			Ok(PutterwardSignal::AToB) => {},
 			Ok(wrong_signal) => panic!("Putter got wrong signal! {:?}", wrong_signal),
@@ -123,7 +126,7 @@ impl<T> Putter<T> {
 		}
 		/////// Barrier 2 
 		let res = self.barrier.recv();
-		self.peer_ready.set_readiness(Ready::empty());
+		self.peer_ready.set_readiness(Ready::empty()).unwrap();
 		match res {
 			Ok(PutterwardSignal::BToAAccepted) => {
 				self.peer_ready.set_readiness(Ready::empty()).unwrap(); // say: peer will block!
@@ -137,7 +140,7 @@ impl<T> Putter<T> {
 	pub fn try_put(&mut self, mut datum: T, wait_duration: Option<Duration>) -> Result<(),TryPutErr<T>> {
 		let r: *mut T = &mut datum;
 		unsafe { *self.shared.data.get() = r }; // set contents to datum on my stack
-		self.peer_ready.set_readiness(Ready::readable()); // tentative put
+		self.peer_ready.set_readiness(Ready::readable()).unwrap(); // tentative put
 		/////// Barrier 1 
 		if let Some(dur) = wait_duration {
 			use crossbeam::RecvTimeoutError;
@@ -156,7 +159,7 @@ impl<T> Putter<T> {
 		}
 		/////// Barrier 2
 		let res = self.barrier.recv();
-		self.peer_ready.set_readiness(Ready::empty()); // tentative put
+		self.peer_ready.set_readiness(Ready::empty()).unwrap(); // tentative put
 		match res {
 			Ok(PutterwardSignal::BToAAccepted) => {
 				mem::forget(datum);
@@ -188,20 +191,20 @@ impl<T> Drop for Putter<T> {
 	}
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum WaitResult {
-	Rendezvous,
-	PeerDropped,
-	Timeout,
-}
-impl WaitResult {
-	pub fn was_rendezvous(self) -> bool {
-		match self {
-			WaitResult::Rendezvous => true,
-			_ => false,
-		}
-	}
-}
+// #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+// pub enum WaitResult {
+// 	Rendezvous,
+// 	PeerDropped,
+// 	Timeout,
+// }
+// impl WaitResult {
+// 	pub fn was_rendezvous(self) -> bool {
+// 		match self {
+// 			WaitResult::Rendezvous => true,
+// 			_ => false,
+// 		}
+// 	}
+// }
 
 pub fn new_port<T>() -> (Putter<T>, Getter<T>) {
     let (g_reg, g_red) = mio::Registration::new2();
@@ -237,7 +240,7 @@ pub trait Catcallable {
 
 	// only execute AFTER successful catcall where no peek has been performed
 	// returns true if the putter was successfully released OR the port is dead
-	fn try_release_putter(&mut self) -> bool;
+	fn try_release_putter(&mut self);
 }
 impl<T> Catcallable for Getter<T> {
 	fn catcall(&mut self) -> Result<bool,()> {
@@ -245,7 +248,7 @@ impl<T> Catcallable for Getter<T> {
 		match self.putter_state {
 			PutterState::StateA => match self.barrier.try_send(PutterwardSignal::AToB) {
 				Ok(()) => {
-					self.putter_state = PutterState::StateA;
+					self.putter_state = PutterState::StateBUnpeeked;
 					Ok(true)
 				},
 				Err(TrySendError::Full(_)) => Ok(false),
@@ -255,32 +258,130 @@ impl<T> Catcallable for Getter<T> {
 			PutterState::StateBUnpeeked => return Ok(true),
 		}
 	}
-	fn try_release_putter(&mut self) -> bool {
+	fn try_release_putter(&mut self) {
 		match self.putter_state { 
 			PutterState::StateBUnpeeked => {},
 			wrong_state => panic!("tried to release putter in state {:?}", wrong_state),
 		}
 		use crossbeam::channel::TrySendError;
 		match self.barrier.try_send(PutterwardSignal::BToARefused) {
-			Ok(()) => true,
+			Ok(()) => {},
 			Err(TrySendError::Full(_)) => panic!("try release would block! you promised you catcalled!"),
-			Err(TrySendError::Disconnected(_)) => true, // port is dead. no problem
+			Err(TrySendError::Disconnected(_)) => {}, // port is dead. no problem
 		}
 	}
 }
 
-pub fn catcall_all_or_release<'a, I>(it: I) -> bool
-where I: IntoIterator<Item=&'a mut (dyn Catcallable)> + Clone {
-	let it2 = it.clone().into_iter();
-	for (i, c) in it.into_iter().enumerate() {
-		if !c.catcall().expect("catcall failed!") {
-			// catcall failed. must unroll.
-			for c2 in it2.take(i) {
-				assert!(c2.try_release_putter());
-			}
-			return false;
-		}
-	}
-	true
+
+struct EventedTup {
+    reg: Registration,
+    ready: SetReadiness,
+}
+impl Default for EventedTup {
+    fn default() -> Self {
+        let (reg, ready) = mio::Registration::new2();
+        Self { reg, ready }
+    }
 }
 
+
+
+#[derive(Default)]
+pub struct Memory<T> {
+    shutdown: bool,
+    data: Option<T>,
+    full: EventedTup,
+    empty: EventedTup,
+}
+impl<T> Memory<T> {
+    pub fn shutdown(&mut self) {
+        if !self.shutdown {
+            self.shutdown = true;
+            println!("SHUTTING DOWN");
+            // self.update_ready();
+            let _ = self.empty.ready.set_readiness(Ready::writable());
+            let _ = self.full.ready.set_readiness(Ready::writable());
+        }
+    }
+    pub fn put(&mut self, datum: T) -> Result<(), T> {
+        if self.shutdown {
+            return Err(datum);
+        }
+        match self.data.replace(datum) {
+            None => {
+                // println!("PUT MEM");
+                self.update_ready();
+                Ok(())
+            }
+            Some(x) => Err(x),
+        }
+    }
+    pub fn get(&mut self) -> Result<T, ()> {
+        // TODO check if this is correct. GET with shutdown thingy is OK
+        // UNTIL there is no data waiting
+        // if self.shutdown {
+        //     return Err(PortClosed);
+        // }
+        match self.data.take() {
+            Some(x) => {
+                self.update_ready();
+                Ok(x)
+            }
+            None => Err(()),
+        }
+    }
+    pub fn peek(&self) -> Result<&T, ()> {
+        if self.shutdown {
+            return Err(());
+        }
+        match self.data.as_ref() {
+            Some(x) => Ok(x),
+            None => Err(()),
+        }
+    }
+    pub fn reg_g(&self) -> impl AsRef<Registration> + '_ {
+        RegHandle {
+            reg: &self.full.reg,
+            when_dropped: move || self.update_ready(),
+        }
+    }
+    pub fn reg_p(&self) -> impl AsRef<Registration> + '_ {
+        RegHandle {
+            reg: &self.empty.reg,
+            when_dropped: move || self.update_ready(),
+        }
+    }
+    pub fn update_ready(&self) {
+        if self.data.is_none() {
+            let _ = self.empty.ready.set_readiness(Ready::writable());
+            let _ = self.full.ready.set_readiness(Ready::empty());
+        } else {
+            let _ = self.empty.ready.set_readiness(Ready::empty());
+            let _ = self.full.ready.set_readiness(Ready::writable());
+        }
+    }
+}
+
+struct RegHandle<'a, F>
+where
+    F: Fn(),
+{
+    reg: &'a Registration,
+    when_dropped: F,
+}
+impl<'a, F> Drop for RegHandle<'a, F>
+where
+    F: Fn(),
+{
+    fn drop(&mut self) {
+        (self.when_dropped)()
+    }
+}
+impl<'a, F> AsRef<Registration> for RegHandle<'a, F>
+where
+    F: Fn(),
+{
+    fn as_ref(&self) -> &Registration {
+        &self.reg
+    }
+}

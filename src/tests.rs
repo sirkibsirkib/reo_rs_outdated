@@ -1,10 +1,12 @@
 
+use crate::port_backend::Catcallable;
 use bit_set::BitSet;
 use mio::{Poll, PollOpt, Ready, Token};
+use std::time::Duration;
 // use crate::reo::{self, ClosedErrorable, Component, Getter, Memory, Putter};
-use crate::reo::{Component, Memory};
-use crate::port_backend::{Getter, Putter};
-use crate::protocols::{GuardCmd, ProtoComponent};
+use crate::reo::{Component};
+use crate::port_backend::{Memory, Getter, Putter};
+use crate::protocols::{GuardCmd, ProtoComponent, DiscardableError};
 
 struct Producer {
     p_out: Putter<u32>,
@@ -13,7 +15,7 @@ struct Producer {
 impl Component for Producer {
     fn run(&mut self) {
         for i in 0..3 {
-            self.p_out.put(i + self.offset).unwrap();
+            println!("putter with offset {:?} got result {:?}", self.offset, self.p_out.try_put(i + self.offset, Some(Duration::from_millis(1))));
         }
     }
 }
@@ -45,6 +47,13 @@ impl ProdConsProto {
 
 def_consts![0 => P00G, P01G, P02P, M00G, M00P];
 impl ProtoComponent for ProdConsProto {
+    fn lookup_getter(&mut self, tok: usize) -> Option<&mut (dyn Catcallable)> {
+        Some(match tok {
+            P00G => &mut self.p00g,
+            P01G => &mut self.p01g,
+            _ => return None,
+        })
+    }
     fn get_local_peer_token(&self, token: usize) -> Option<usize> {
         Some(match token {
             M00P => M00G,
@@ -77,8 +86,8 @@ impl Component for ProdConsProto {
                 true
             },
             |me: &mut Self| {
-                me.p02p.put(me.p00g.get()?).closed_err()?;
-                me.m00.put(me.p01g.get()?).closed_err()?;
+                me.p02p.put(me.p00g.get()?).unit_err()?;
+                me.m00.put(me.p01g.get()?).unit_err()?;
                 Ok(())
             }
         );
@@ -88,10 +97,13 @@ impl Component for ProdConsProto {
                 true
             },
             |me: &mut Self| {
-                me.p02p.put(me.m00.get()?).closed_err()?;
+                me.p02p.put(me.m00.get()?).unit_err()?;
                 Ok(())
             }
         );
+        for g in gcmds.iter() {
+            println!("{:?}", g.get_ready_set());
+        }
         self.run_to_termination(&gcmds);
     }
 }
@@ -99,9 +111,10 @@ impl Component for ProdConsProto {
 #[test]
 fn alternator() {
     // create ports
-    let (p00p, p00g) = reo::new_port();
-    let (p01p, p01g) = reo::new_port();
-    let (p02p, p02g) = reo::new_port();
+    use crate::port_backend::new_port;
+    let (p00p, p00g) = new_port();
+    let (p01p, p01g) = new_port();
+    let (p02p, p02g) = new_port();
 
     // spin up threads
     #[rustfmt::skip]

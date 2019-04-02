@@ -187,6 +187,7 @@ impl Default for EventedTup {
         Self { reg, ready }
     }
 }
+
 #[derive(Default)]
 pub struct Memory<T> {
     shutdown: bool,
