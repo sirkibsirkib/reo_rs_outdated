@@ -41,8 +41,8 @@ Thus, un undesirable situation arises if the getter performes PEEK() but never G
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum PutterwardSignal {
 	AToB,
-	BToAAccepted,
-	BToARefused,
+	BToAGot,
+	BToAThaw,
 }
 
 pub struct Shared<T> {
@@ -90,7 +90,7 @@ impl<T> Getter<T> {
 		}
 		let datum = unsafe { mem::replace(&mut **self.shared.data.get(), mem::uninitialized()) };
 		/////// Barrier 2 
-		let _ = self.barrier.send(PutterwardSignal::BToAAccepted);
+		let _ = self.barrier.send(PutterwardSignal::BToAGot);
 		self.peer_ready.set_readiness(Ready::empty()).unwrap();
 		self.putter_state = PutterState::StateA;
 		Ok(datum)
@@ -128,7 +128,7 @@ impl<T> Putter<T> {
 		let res = self.barrier.recv();
 		self.peer_ready.set_readiness(Ready::empty()).unwrap();
 		match res {
-			Ok(PutterwardSignal::BToAAccepted) => {
+			Ok(PutterwardSignal::BToAGot) => {
 				self.peer_ready.set_readiness(Ready::empty()).unwrap(); // say: peer will block!
 				mem::forget(datum);
 				Ok(())
@@ -137,38 +137,51 @@ impl<T> Putter<T> {
 			Err(crossbeam::RecvError) => return Err(datum),
 		}		
 	}
-	pub fn try_put(&mut self, mut datum: T, wait_duration: Option<Duration>) -> Result<(),TryPutErr<T>> {
+	pub fn try_put(&mut self, mut datum: T, mut wait_duration: Option<Duration>) -> Result<(),TryPutErr<T>> {
+		let start = std::time::Instant::now();
 		let r: *mut T = &mut datum;
 		unsafe { *self.shared.data.get() = r }; // set contents to datum on my stack
 		self.peer_ready.set_readiness(Ready::readable()).unwrap(); // tentative put
-		/////// Barrier 1 
-		if let Some(dur) = wait_duration {
-			use crossbeam::RecvTimeoutError;
-			match self.barrier.recv_timeout(dur) {
-				Ok(PutterwardSignal::AToB) => {},
-				Ok(wrong_signal) => panic!("Putter got wrong signal! {:?}", wrong_signal),
-				Err(RecvTimeoutError::Timeout) => return Err(TryPutErr::Timeout(datum)),
-				Err(RecvTimeoutError::Disconnected) => return Err(TryPutErr::PeerDropped(datum)),
+		loop {
+			/////// Barrier 1 
+			if let Some(dur) = wait_duration {
+				use crossbeam::RecvTimeoutError;
+				match self.barrier.recv_timeout(dur) {
+					Ok(PutterwardSignal::AToB) => {},
+					Ok(wrong_signal) => panic!("Putter got wrong signal! {:?}", wrong_signal),
+					Err(RecvTimeoutError::Timeout) => return Err(TryPutErr::Timeout(datum)),
+					Err(RecvTimeoutError::Disconnected) => return Err(TryPutErr::PeerDropped(datum)),
+				}
+			} else {
+				match self.barrier.recv() { 
+					Ok(PutterwardSignal::AToB) => {},
+					Ok(wrong_signal) => panic!("Putter got wrong signal! {:?}", wrong_signal),
+					Err(crossbeam::RecvError) => return Err(TryPutErr::PeerDropped(datum)),
+				}
 			}
-		} else {
-			match self.barrier.recv() { 
-				Ok(PutterwardSignal::AToB) => {},
+			/////// Barrier 2
+			let res = self.barrier.recv();
+			self.peer_ready.set_readiness(Ready::empty()).unwrap(); // tentative put
+			match res {
+				Ok(PutterwardSignal::BToAGot) => {
+					mem::forget(datum);
+					return Ok(())
+				},
+				Ok(PutterwardSignal::BToAThaw) => {
+					println!("THAWED");
+					if let Some(dur) = wait_duration {
+						if let Some(to_wait) = dur.checked_sub(start.elapsed()) {
+							wait_duration = Some(to_wait)
+						} else {
+							return Err(TryPutErr::Timeout(datum))
+						}
+					}
+				},
 				Ok(wrong_signal) => panic!("Putter got wrong signal! {:?}", wrong_signal),
 				Err(crossbeam::RecvError) => return Err(TryPutErr::PeerDropped(datum)),
 			}
 		}
-		/////// Barrier 2
-		let res = self.barrier.recv();
-		self.peer_ready.set_readiness(Ready::empty()).unwrap(); // tentative put
-		match res {
-			Ok(PutterwardSignal::BToAAccepted) => {
-				mem::forget(datum);
-				Ok(())
-			},
-			Ok(PutterwardSignal::BToARefused) => Err(TryPutErr::Timeout(datum)),
-			Ok(wrong_signal) => panic!("Putter got wrong signal! {:?}", wrong_signal),
-			Err(crossbeam::RecvError) => Err(TryPutErr::PeerDropped(datum)),
-		}
+		
 	}
 	pub fn reg(&self) -> &Registration {
 		&self.my_reg
@@ -230,20 +243,20 @@ pub fn new_port<T>() -> (Putter<T>, Getter<T>) {
 }
 
 
-pub trait Catcallable {
+pub trait Freezer {
 	// non-blocking no-value peek
 	// panics if this gotten value has been peeked before
 	// returns Err(()) if the port is dead
-	// returns Ok(true) if the catcall succeeds. the putter locked, peek / get won't block.
-	// returns Ok(false) if catcall fails. putter isn't ready. peek / get may block.
-	fn catcall(&mut self) -> Result<bool,()>;
+	// returns Ok(true) if the freeze succeeds. the putter locked, peek / get won't block.
+	// returns Ok(false) if freeze fails. putter isn't ready. peek / get may block.
+	fn freeze(&mut self) -> Result<bool,()>;
 
-	// only execute AFTER successful catcall where no peek has been performed
-	// returns true if the putter was successfully released OR the port is dead
-	fn try_release_putter(&mut self);
+	// only execute AFTER successful freeze where no peek has been performed
+	// blocks until the putter receives the signal
+	fn thaw(&mut self);
 }
-impl<T> Catcallable for Getter<T> {
-	fn catcall(&mut self) -> Result<bool,()> {
+impl<T> Freezer for Getter<T> {
+	fn freeze(&mut self) -> Result<bool,()> {
 		use crossbeam::channel::TrySendError;
 		match self.putter_state {
 			PutterState::StateA => match self.barrier.try_send(PutterwardSignal::AToB) {
@@ -258,17 +271,13 @@ impl<T> Catcallable for Getter<T> {
 			PutterState::StateBUnpeeked => return Ok(true),
 		}
 	}
-	fn try_release_putter(&mut self) {
+	fn thaw(&mut self) {
 		match self.putter_state { 
 			PutterState::StateBUnpeeked => {},
 			wrong_state => panic!("tried to release putter in state {:?}", wrong_state),
 		}
-		use crossbeam::channel::TrySendError;
-		match self.barrier.try_send(PutterwardSignal::BToARefused) {
-			Ok(()) => {},
-			Err(TrySendError::Full(_)) => panic!("try release would block! you promised you catcalled!"),
-			Err(TrySendError::Disconnected(_)) => {}, // port is dead. no problem
-		}
+		let _ = self.barrier.send(PutterwardSignal::BToAThaw); // either way no problem
+		self.putter_state = PutterState::StateA;
 	}
 }
 

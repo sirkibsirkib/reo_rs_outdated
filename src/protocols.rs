@@ -1,6 +1,6 @@
 
 use mio::Token;
-use crate::port_backend::Catcallable;
+use crate::port_backend::Freezer;
 use mio::{Poll, Events};
 use hashbrown::{HashSet, HashMap};
 // use crate::PortClosed;
@@ -135,7 +135,7 @@ pub trait ProtoComponent: Sized {
     // register all local ports and memory cells with the provided poll instance
     fn register_all(&mut self, poll: &Poll);
 
-    fn lookup_getter(&mut self, tok: usize) -> Option<&mut (dyn Catcallable)>;
+    fn lookup_getter(&mut self, tok: usize) -> Option<&mut (dyn Freezer)>;
 
     /*
     The system runs until termination, where termination is the state where all
@@ -173,40 +173,30 @@ pub trait ProtoComponent: Sized {
             for event in events.iter() { // iter() consumes 1+ stored events.
                 // put the ready flag up `$.0` unwraps the mio::Token, 
                 // exposing the usize (mapping 1-to-1) with bitmap index.
-                println!("EVENT {:?}", &event);
+                let bit = event.token().0;
                 let r = event.readiness(); 
                 if r.is_writable() {
-                    ready_bits.insert(event.token().0);
+                    ready_bits.insert(bit);
                 } else if r.is_readable() {
-                    ready_bits.insert(event.token().0);
-                    tentative_bits.insert(event.token().0);
+                    ready_bits.insert(bit);
+                    tentative_bits.insert(bit);
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
             // check if any guards can be fired
-            /*
-            TODO detect unsatisfiable guard? (eg: data_constraint depends only on
-            values that will never change.
-            */
             for (i, g) in active_gcmds!(gcmds, active_guards) {
                 if g.ready_set.is_superset(&ready_bits) {
-                    let catcall_res = catcall_all_or_release(self, tentative_bits.intersection(g.get_ready_set()));
-                    match catcall_res {
-                        Ok(true) => {},
-                        Ok(false) => {
-                            tentative_bits.difference_with(g.get_ready_set());
+                    match try_lock_all_return_failed(self, g.get_ready_set().intersection(&tentative_bits)) {
+                        Ok(None) => {},
+                        Ok(Some(failed_bit)) => {
+                            ready_bits.remove(failed_bit);
+                            tentative_bits.remove(failed_bit);
                             continue;
-                        },
+                        }, // some bit was FAST
                         Err(()) => {
-                            tentative_bits.difference_with(g.get_ready_set());
                             make_inactive.insert(i);
                             continue;
                         },
                     };
-                    // for bit in g.ready_set.intersection
-                    // if !g.ready_set.intersection(&ready_bits).intersection(&tentative_bits).is_empty() {
-                    //     unimplemented!()
-                    // }
                     if (g.data_constraint)(self) {
                         {
                             // unset the bits that have fired.
@@ -239,18 +229,17 @@ pub trait ProtoComponent: Sized {
 }
 
 
-pub fn catcall_all_or_release<'a, 'b, T: ProtoComponent>(t: &'a mut T, to_catcall: bit_set::Intersection<'b, u32>) -> Result<bool,()> {
-    for bit in to_catcall.clone() {
-        let res = t.lookup_getter(bit).expect("BRANG").catcall()?;
-        if !res {
-            println!("CATCALL FAIL ON {}", bit);
-            for bit2 in to_catcall.take_while(|&x| x != bit) {
-                t.lookup_getter(bit2).expect("BRANG2").try_release_putter();
+pub fn try_lock_all_return_failed<'a, 'b, I, T: ProtoComponent>(t: &'a mut T, it: I) -> Result<Option<usize>,()>
+where I: Iterator<Item=usize> + Clone {
+    for bit in it.clone() {
+        if !t.lookup_getter(bit).expect("BRANG1").freeze()? {
+            for bit2 in it.take_while(|&bit2| bit2 != bit) {
+                t.lookup_getter(bit2).expect("BRANG2").thaw();
             }
-            return Ok(false)
+            return Ok(Some(bit));
         }
     }
-    Ok(true)
+    Ok(None)
 }
 
 

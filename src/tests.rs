@@ -1,5 +1,5 @@
 
-use crate::port_backend::Catcallable;
+use crate::port_backend::Freezer;
 use bit_set::BitSet;
 use mio::{Poll, PollOpt, Ready, Token};
 use std::time::Duration;
@@ -14,8 +14,8 @@ struct Producer {
 }
 impl Component for Producer {
     fn run(&mut self) {
-        for i in 0..3 {
-            println!("putter with offset {:?} got result {:?}", self.offset, self.p_out.try_put(i + self.offset, Some(Duration::from_millis(1))));
+        for i in 0..10 {
+            println!("putter with offset {:?} got result {:?}", self.offset, self.p_out.try_put(i + self.offset, Some(Duration::from_millis(3))));
         }
     }
 }
@@ -47,7 +47,7 @@ impl ProdConsProto {
 
 def_consts![0 => P00G, P01G, P02P, M00G, M00P];
 impl ProtoComponent for ProdConsProto {
-    fn lookup_getter(&mut self, tok: usize) -> Option<&mut (dyn Catcallable)> {
+    fn lookup_getter(&mut self, tok: usize) -> Option<&mut (dyn Freezer)> {
         Some(match tok {
             P00G => &mut self.p00g,
             P01G => &mut self.p01g,
