@@ -1,11 +1,11 @@
 
-use crate::port_backend::Freezer;
+use crate as reo_rs;
+
 use bit_set::BitSet;
 use mio::{Poll, PollOpt, Ready, Token};
 use std::time::Duration;
-use crate::reo::{Component};
-use crate::port_backend::{Memory, PortGetter, PortPutter, Putter, Getter};
-use crate::protocols::{GuardCmd, ProtoComponent, DiscardableError};
+use reo_rs::{Memory, PortGetter, PortPutter, Putter, Getter, Component, Freezer};
+use reo_rs::protocols::{GuardCmd, ProtoComponent, DiscardableError};
 
 struct Producer {
     p_out: PortPutter<u32>,
@@ -110,7 +110,7 @@ impl Component for ProdConsProto {
 #[test]
 fn alternator() {
     // create ports
-    use crate::port_backend::new_port;
+    use reo_rs::new_port;
     let (p00p, p00g) = new_port();
     let (p01p, p01g) = new_port();
     let (p02p, p02g) = new_port();
@@ -137,14 +137,3 @@ fn alternator() {
     })
     .expect("A worker thread panicked!");
 }
-
-
-///////////////////////////////////
-// #[test]
-// fn backendtest() {
-
-// }
-
-// pub fn testy(mut p1: Putter<u32>, mut p2: Putter<u32>, mut g1: PortGetter<u32>, mut g2: PortGetter<u32>) {
-//     let ready_w = BitSet::new();
-// }

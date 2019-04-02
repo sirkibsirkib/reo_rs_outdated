@@ -1,6 +1,4 @@
-
-use crate::reo::Component;
-use crate::port_backend::{Freezer,FreezeOutcome};
+use crate::{Freezer,FreezeOutcome, Component};
 use mio::{Poll, Events};
 use hashbrown::{HashSet, HashMap};
 use bit_set::BitSet;
@@ -222,22 +220,16 @@ pub trait ProtoComponent: Component + Sized {
 pub fn try_lock_all_return_failed<'a, 'b, I, T: ProtoComponent>(t: &'a mut T, it: I) -> Result<Option<usize>,()>
 where I: Iterator<Item=usize> + Clone {
     for bit in it.clone() {
-        match t.lookup_getter(bit).expect("BRANG1").freeze() {
+        let ret = match t.lookup_getter(bit).expect("BRANG1").freeze() {
+            FreezeOutcome::Frozen => continue,
             FreezeOutcome::PutterCommitted => panic!("This putter has committed!"),
-            FreezeOutcome::Frozen => {},
-            FreezeOutcome::PeerNotWaiting => {
-                for bit2 in it.take_while(|&bit2| bit2 != bit) {
-                    t.lookup_getter(bit2).expect("BRANG2").thaw();
-                }
-                return Ok(Some(bit));
-            },
-            FreezeOutcome::PeerDropped => {
-                for bit2 in it.take_while(|&bit2| bit2 != bit) {
-                    t.lookup_getter(bit2).expect("BRANG2").thaw();
-                }
-                return Err(());
-            }
+            FreezeOutcome::PeerNotWaiting => Ok(Some(bit)),
+            FreezeOutcome::PeerDropped => Err(()),
+        };
+        for bit2 in it.take_while(|&bit2| bit2 != bit) {
+            t.lookup_getter(bit2).expect("BRANG2").thaw();
         }
+        return ret;
     }
     Ok(None)
 }
