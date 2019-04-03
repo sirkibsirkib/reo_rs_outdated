@@ -56,6 +56,7 @@ struct ProtoShared {
 	put_ptrs: UnsafeCell<Vec<StackPtr>>,
 	meta_send: Vec<Sender<MetaMsg>>,
 	// TODO id2guards
+	// TODO dead set?
 }
 impl ProtoShared {
 	fn arrive(&self, id: usize) {
