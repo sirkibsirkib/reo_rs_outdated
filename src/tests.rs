@@ -143,12 +143,12 @@ fn alternator() {
 fn threadless_test() {
     use crate::threadless2::*;
 
-    fn prod(mut p: Putter<u32>) {
+    fn prod(mut p: Putter<[u32;32]>) {
         for i in 0..4 {
-            p.put(i).unwrap();
+            p.put([i;32]).unwrap();
         }
     }
-    fn cons(mut g: Getter<u32>) {
+    fn cons(mut g: Getter<[u32;32]>) {
         for _ in 0..4 {
             println!("{:?}", g.get().unwrap());
         }

@@ -5,7 +5,6 @@ use std::cell::UnsafeCell;
 use std::marker::PhantomData;
 use bit_set::BitSet;
 use std::sync::Arc;
-use hashbrown::HashMap;
 
 struct Action {
 	from: usize,
@@ -20,13 +19,6 @@ impl Action {
 	}
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-enum GuardState {
-	NotReady,
-	ReadyButConstFail,
-	Ready,
-}
-
 struct GuardCmd {
 	firing_set: BitSet,
 	data_const: &'static dyn Fn() -> bool,
@@ -39,17 +31,6 @@ impl GuardCmd {
 		actions: Vec<Action>
 	) -> Self {
 		Self { firing_set, data_const, actions }
-	}
-	fn satisfied(&self, ready: &BitSet) -> GuardState {
-		if self.firing_set.is_superset(ready) {
-			if (self.data_const)(/*TODO*/) {
-				GuardState::Ready
-			} else {
-				GuardState::ReadyButConstFail
-			}
-		} else {
-			GuardState::NotReady
-		}
 	}
 }
 
@@ -86,12 +67,12 @@ impl ProtoShared {
 					ready.difference_with(&g.firing_set);
 					for a in g.actions.iter() {
 						let num_getters = a.to.len();
-						self.meta_send[a.from].send(MetaMsg::SetWaitSum(num_getters));
+						self.meta_send[a.from].send(MetaMsg::SetWaitSum(num_getters)).unwrap();
 						for &t in a.to.iter().take(1) {
-							self.meta_send[t].send(MetaMsg::MoveFrom(a.from));
+							self.meta_send[t].send(MetaMsg::MoveFrom(a.from)).unwrap();
 						}
 						for &t in a.to.iter().skip(1) {
-							self.meta_send[t].send(MetaMsg::CloneFrom(a.from));
+							self.meta_send[t].send(MetaMsg::CloneFrom(a.from)).unwrap();
 						}
 					}
 				}
@@ -199,7 +180,7 @@ macro_rules! usize_iter_literal {
 	}
 }
 
-pub fn new_proto() -> (Putter<u32>, Getter<u32>) {
+pub fn new_proto() -> (Putter<[u32;32]>, Getter<[u32;32]>) {
 	const NUM_PORTS: usize = 2;
 	const NUM_PUTTERS: usize = 1;
 	fn guard_0_data_const() -> bool {
