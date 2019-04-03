@@ -9,4 +9,7 @@
 
 # SMALL TODO:
 1. what happens when a putter / getter is DROPPED? 
-	* eg: some putter may be blocking
+2. idea: on DROP invoke i_die() on the protocol object. it has its own bitset and
+	then determines the set of getters / putters that would get stuck and unsticks them?
+1. explore the upper bound of the capacity required for send/recv channelss
+
