@@ -137,3 +137,27 @@ fn alternator() {
     })
     .expect("A worker thread panicked!");
 }
+
+
+#[test]
+fn threadless_test() {
+    use crate::threadless2::*;
+
+    fn prod(mut p: Putter<u32>) {
+        for i in 0..4 {
+            p.put(i).unwrap();
+        }
+    }
+    fn cons(mut g: Getter<u32>) {
+        for _ in 0..4 {
+            println!("{:?}", g.get().unwrap());
+        }
+    }
+
+    let (p, g) = new_proto();
+
+    crossbeam::scope(|s| {
+        s.spawn(|_| prod(p));
+        s.spawn(|_| cons(g)); 
+    }).unwrap();
+}

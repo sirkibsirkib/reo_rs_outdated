@@ -7,6 +7,8 @@ pub mod protocols;
 mod reo;
 pub use reo::*;
 
+mod threadless2;
+
 // unit tests
 #[cfg(test)]
 mod tests;
