@@ -139,18 +139,34 @@ fn alternator() {
 }
 
 
+
 #[test]
 fn threadless_test() {
     use crate::threadless2::*;
+    impl CloneFrom<[u32;32]> for [u32;8] {
+        fn clone_from(t: &[u32;32]) -> Self {
+            let mut ret = [0;8];
+            for i in 0..8 {
+                ret[i] = t[i];
+            }
+            ret
+        }
+    }
 
     fn prod(mut p: Putter<[u32;32]>) {
-        for i in 0..4 {
+        for i in 0..20 {
             p.put([i;32]).unwrap();
         }
     }
     fn cons(mut g: Getter<[u32;32]>) {
-        for _ in 0..4 {
-            println!("{:?}", g.get().unwrap());
+        type Signal = ();
+        for i in 0..20 {
+            match i%3 {
+                0 => println!("{:?}", g.get().unwrap()),
+                1 => println!("{:?}", g.get_weaker::<[u32;8]>().unwrap()),
+                2 => println!("{:?}", g.get_weaker::<Signal>().unwrap()),
+                _ => unreachable!(),
+            }
         }
     }
 

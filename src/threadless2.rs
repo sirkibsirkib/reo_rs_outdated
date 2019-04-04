@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use crossbeam::Sender;
 use parking_lot::Mutex;
 use crossbeam::Receiver;
@@ -88,26 +89,60 @@ struct PortCommon {
 	meta_recv: Receiver<MetaMsg>,
 }
 
-pub struct Getter<T> {
+pub trait TryClone {
+	fn try_clone(&self) -> Self;
+}
+impl<T> TryClone for T where T: Clone {
+	fn try_clone(&self) -> Self {
+		self.clone()
+	}
+}
+
+pub trait CloneFrom<T> {
+	fn clone_from(t: &T) -> Self;
+}
+impl<T> CloneFrom<T> for () {
+	fn clone_from(_t: &T) -> Self {}
+}
+
+pub struct Getter<T> where T: TryClone {
 	port: PortCommon,
 	_port_type: PhantomData<T>,
 }
-impl<T> Getter<T> {
+impl<T> Getter<T> where T: TryClone {
 	fn new(port: PortCommon) -> Self {
 		Self {
 			port,
 			_port_type: PhantomData::default(),
 		}
 	}
+	pub fn get_weaker<X: CloneFrom<T>>(&mut self) -> Result<X,()> {
+		self.port.shared.arrive(self.port.id);
+		Ok(match self.port.meta_recv.recv().unwrap() {
+			MetaMsg::CloneFrom(src_id) |
+			MetaMsg::MoveFrom(src_id) => {
+				let d = self.other_clone_from(src_id);
+				self.port.shared.meta_send[src_id].send(MetaMsg::IClonedIt).unwrap();
+				d
+			},
+			wrong_meta => panic!("getter wasn't expecting {:?}", wrong_meta),
+		})
+	}
 	pub fn get(&mut self) -> Result<T,()> {
 		self.port.shared.arrive(self.port.id);
-		let (src_id, datum) = match self.port.meta_recv.recv().unwrap() {
-			MetaMsg::MoveFrom(src_id) => (src_id, self.move_from(src_id)),
-			MetaMsg::CloneFrom(src_id) => (src_id, self.clone_from(src_id)),
+		Ok(match self.port.meta_recv.recv().unwrap() {
+			MetaMsg::MoveFrom(src_id) => {
+				let d = self.move_from(src_id);
+				self.port.shared.meta_send[src_id].send(MetaMsg::IMovedIt).unwrap();
+				d
+			},
+			MetaMsg::CloneFrom(src_id) => {
+				let d = self.clone_from(src_id);
+				self.port.shared.meta_send[src_id].send(MetaMsg::IClonedIt).unwrap();
+				d
+			},
 			wrong_meta => panic!("getter wasn't expecting {:?}", wrong_meta),
-		};
-		self.port.shared.meta_send[src_id].send(MetaMsg::DecWaitSum).unwrap();
-		Ok(datum)
+		})
 	}
 	#[inline]
 	fn move_from(&self, id: usize) -> T {
@@ -123,11 +158,22 @@ impl<T> Getter<T> {
 
 	#[inline]
 	fn clone_from(&self, id: usize) -> T {
-		// unsafe {unsafe {
-		// 	let r: *mut T = (&*self.shared.data.get()).try_clone()
-		// 	&*r
-		// };}
-		self.move_from(id)
+		let rp: &T = unsafe {
+			let stack_ptr: StackPtr = (*self.port.shared.put_ptrs.get())[id];
+			let p: *mut T = stack_ptr.into();
+			&*p
+		};
+		rp.try_clone()
+	}
+
+	#[inline]
+	fn other_clone_from<X: CloneFrom<T>>(&self, id: usize) -> X {
+		let stack_ptr: StackPtr = unsafe {
+			(*self.port.shared.put_ptrs.get())[id]
+		};
+		let p: *mut T = stack_ptr.into();
+		let rp: &T = unsafe { &*p };
+		CloneFrom::clone_from(rp)
 	}
 }
 
@@ -136,18 +182,19 @@ enum MetaMsg {
 	SetWaitSum(usize),
 	MoveFrom(usize),
 	CloneFrom(usize),
-	DecWaitSum,
+	IMovedIt,
+	IClonedIt,
 }
 
-unsafe impl<T> Send for Putter<T> {}
-unsafe impl<T> Sync for Putter<T> {}
-unsafe impl<T> Send for Getter<T> {}
-unsafe impl<T> Sync for Getter<T> {}
-pub struct Putter<T> {
+unsafe impl<T> Send for Putter<T> where T: TryClone {}
+// unsafe impl<T> Sync for Putter<T> where T: TryClone {}
+unsafe impl<T> Send for Getter<T> where T: TryClone {}
+// unsafe impl<T> Sync for Getter<T> where T: TryClone {}
+pub struct Putter<T> where T: TryClone {
 	port: PortCommon,
 	_port_type: PhantomData<T>,
 }
-impl<T> Putter<T> {
+impl<T> Putter<T> where T: TryClone {
 	fn new(port: PortCommon) -> Self {
 		Self {
 			port,
@@ -160,15 +207,23 @@ impl<T> Putter<T> {
 		unsafe { ( *self.port.shared.put_ptrs.get())[self.port.id] = r.into() };
 		self.port.shared.arrive(self.port.id);
 		let mut decs = 0;
+		let mut was_moved = false;
 		let mut wait_for = std::usize::MAX;
 		while wait_for != decs {
 			match self.port.meta_recv.recv().unwrap() {
 				MetaMsg::SetWaitSum(x) => wait_for = x,
-				MetaMsg::DecWaitSum => decs += 1,
+				MetaMsg::IMovedIt => decs += 1,
+				MetaMsg::IClonedIt => {
+					if was_moved {
+						panic!("two getters moved it!");
+					}
+					was_moved = true;
+					decs += 1;
+				},
 				wrong_meta => panic!("putter wasn't expecting {:?}", wrong_meta),
 			}
 		}
-		if wait_for > 0 {
+		if was_moved {
 			std::mem::forget(datum);
 		}
 		Ok(())
