@@ -1,8 +1,8 @@
-use crate::{Freezer,FreezeOutcome, Component};
-use mio::{Poll, Events};
-use hashbrown::{HashSet, HashMap};
+use crate::{Component, FreezeOutcome, Freezer};
 use bit_set::BitSet;
+use hashbrown::{HashMap, HashSet};
 use indexmap::IndexSet;
+use mio::{Events, Poll};
 
 #[macro_export]
 macro_rules! bitset {
@@ -12,7 +12,6 @@ macro_rules! bitset {
 		s
 	}}
 }
-
 
 #[macro_export]
 macro_rules! def_consts {
@@ -33,7 +32,7 @@ macro_rules! tpk {
             Err(_) => return false,
             Ok(x) => x,
         }
-    }
+    };
 }
 
 #[macro_export]
@@ -58,7 +57,7 @@ macro_rules! map {
 macro_rules! defm {
     () => {
         Memory::default()
-    }
+    };
 }
 
 /*
@@ -79,14 +78,20 @@ macro_rules! guard_cmd {
 
 pub struct GuardCmd<'a, T> {
     ready_set: BitSet,
-    data_constraint: &'a (dyn Fn(&mut T)->bool),
-    action: &'a (dyn Fn(&mut T)->Result<(), ()>),
+    data_constraint: &'a (dyn Fn(&mut T) -> bool),
+    action: &'a (dyn Fn(&mut T) -> Result<(), ()>),
 }
-impl<'a,T> GuardCmd<'a,T> {
-    pub fn new(ready_set: BitSet,
-        data_constraint: &'a (dyn Fn(&mut T)->bool),
-        action: &'a (dyn Fn(&mut T)->Result<(), ()>)) -> Self {
-        Self { ready_set, data_constraint, action}
+impl<'a, T> GuardCmd<'a, T> {
+    pub fn new(
+        ready_set: BitSet,
+        data_constraint: &'a (dyn Fn(&mut T) -> bool),
+        action: &'a (dyn Fn(&mut T) -> Result<(), ()>),
+    ) -> Self {
+        Self {
+            ready_set,
+            data_constraint,
+            action,
+        }
     }
     pub fn get_ready_set(&self) -> &BitSet {
         &self.ready_set
@@ -101,8 +106,11 @@ impl<'a,T> GuardCmd<'a,T> {
 
 macro_rules! active_gcmds {
     ($guards:expr, $active_guards:expr) => {
-        $guards.iter().enumerate().filter(|(i,_)| $active_guards.contains(i))
-    }
+        $guards
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| $active_guards.contains(i))
+    };
 }
 
 /*
@@ -117,7 +125,7 @@ pub trait ProtoComponent: Component + Sized {
     fn get_local_peer_token(&self, token: usize) -> Option<usize>;
 
     // shut down the structure for this token. used to kill memory cells that are unreachable
-    // TODO error handling 
+    // TODO error handling
     fn token_shutdown(&mut self, token: usize);
 
     // register all local ports and memory cells with the provided poll instance
@@ -131,7 +139,7 @@ pub trait ProtoComponent: Component + Sized {
 
     A command becomes INACTIVE if any of the ports in its firing set emit PortClosed error
     when the command executes its ACTION.
-    A port is closed by the protocol itself if it becomes UNREACHABLE, where 
+    A port is closed by the protocol itself if it becomes UNREACHABLE, where
     there are no occurrences of its PEER in the the union of all firing-bitsets for active
     guard-commands. (intuitively: A command relying on port1-getter will never progress
     if there are no remaining )
@@ -139,7 +147,7 @@ pub trait ProtoComponent: Component + Sized {
     // TODO change implementation of Memory cell such that dropping the putter doesn't
     // result in closing the getter until any data inside the memory cell is yielded.
     */
-    fn run_to_termination<'a,'b>(&'a mut self, gcmds: &'b [GuardCmd<Self>]) {
+    fn run_to_termination<'a, 'b>(&'a mut self, gcmds: &'b [GuardCmd<Self>]) {
         // aux data about the provided guard command slice
         let guard_idx_range = 0..gcmds.len();
         let mut active_guards: HashSet<_> = guard_idx_range.collect();
@@ -154,15 +162,16 @@ pub trait ProtoComponent: Component + Sized {
         let mut events = Events::with_capacity(32);
         let poll = Poll::new().unwrap();
         self.register_all(&poll);
-        
+
         while !active_guards.is_empty() {
             // blocking call. resumes when 1+ events are stored inside `events`
             poll.poll(&mut events, None).unwrap();
-            for event in events.iter() { // iter() consumes 1+ stored events.
-                // put the ready flag up `$.0` unwraps the mio::Token, 
+            for event in events.iter() {
+                // iter() consumes 1+ stored events.
+                // put the ready flag up `$.0` unwraps the mio::Token,
                 // exposing the usize (mapping 1-to-1) with bitmap index.
                 let bit = event.token().0;
-                let r = event.readiness(); 
+                let r = event.readiness();
                 if r.is_writable() {
                     ready_bits.insert(bit);
                 } else if r.is_readable() {
@@ -173,17 +182,20 @@ pub trait ProtoComponent: Component + Sized {
             // check if any guards can be fired
             for (i, g) in active_gcmds!(gcmds, active_guards) {
                 if g.ready_set.is_superset(&ready_bits) {
-                    match try_lock_all_return_failed(self, g.get_ready_set().intersection(&tentative_bits)) {
-                        Ok(None) => {},
+                    match try_lock_all_return_failed(
+                        self,
+                        g.get_ready_set().intersection(&tentative_bits),
+                    ) {
+                        Ok(None) => {}
                         Ok(Some(failed_bit)) => {
                             ready_bits.remove(failed_bit);
                             tentative_bits.remove(failed_bit);
                             continue;
-                        }, // some bit was FAST
+                        } // some bit was FAST
                         Err(()) => {
                             make_inactive.insert(i);
                             continue;
-                        },
+                        }
                     };
                     if (g.data_constraint)(self) {
                         {
@@ -216,9 +228,13 @@ pub trait ProtoComponent: Component + Sized {
     }
 }
 
-
-pub fn try_lock_all_return_failed<'a, 'b, I, T: ProtoComponent>(t: &'a mut T, it: I) -> Result<Option<usize>,()>
-where I: Iterator<Item=usize> + Clone {
+pub fn try_lock_all_return_failed<'a, 'b, I, T: ProtoComponent>(
+    t: &'a mut T,
+    it: I,
+) -> Result<Option<usize>, ()>
+where
+    I: Iterator<Item = usize> + Clone,
+{
     for bit in it.clone() {
         let ret = match t.lookup_getter(bit).expect("BRANG1").freeze() {
             FreezeOutcome::Frozen => continue,
@@ -234,7 +250,6 @@ where I: Iterator<Item=usize> + Clone {
     Ok(None)
 }
 
-
 #[derive(Debug)]
 struct TokenCounter {
     // maps from bit-index to refcounts
@@ -243,21 +258,24 @@ struct TokenCounter {
 impl TokenCounter {
     // given some bitsets, count the total references
     // eg: [{011}, {110}] gives counts [1,2,1]
-    fn new<'a>(it: impl Iterator<Item=&'a BitSet>) -> Self {
+    fn new<'a>(it: impl Iterator<Item = &'a BitSet>) -> Self {
         let mut m = HashMap::default();
         for b in it {
             for t in b.iter() {
                 m.entry(t).and_modify(|e| *e += 1).or_insert(1);
             }
         }
-        Self {m}
+        Self { m }
     }
 
     // decrement all refcounts flagged by this bitset by 1.
     // eg: [1,2,1] given {110} results in {0,1,1}
     // the function returns a bitset of indices that have become 0.
     // in the example above, we would return {100}
-    pub fn dec_return_dead<'a,'b: 'a>(&'a mut self, bitset: &'b BitSet) -> impl Iterator<Item=usize> + 'a {
+    pub fn dec_return_dead<'a, 'b: 'a>(
+        &'a mut self,
+        bitset: &'b BitSet,
+    ) -> impl Iterator<Item = usize> + 'a {
         bitset.iter().filter(move |b| {
             let v = self.m.get_mut(b).expect("BAD BITSET");
             *v -= 1;
@@ -265,8 +283,6 @@ impl TokenCounter {
         })
     }
 }
-
-
 
 pub trait DiscardableError<T> {
     fn unit_err(self) -> Result<T, ()>;
@@ -276,4 +292,3 @@ impl<T, E> DiscardableError<T> for Result<T, E> {
         self.map_err(|_| ())
     }
 }
-

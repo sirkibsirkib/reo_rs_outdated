@@ -1,5 +1,4 @@
-
-// useful functions used by the template-generated protocol structures 
+// useful functions used by the template-generated protocol structures
 #[macro_use]
 pub mod protocols;
 
