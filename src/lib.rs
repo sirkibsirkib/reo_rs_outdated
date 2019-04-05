@@ -6,7 +6,10 @@ pub mod protocols;
 mod reo;
 pub use reo::*;
 
+#[macro_use]
 mod threadless2;
+
+mod tokens;
 
 // unit tests
 #[cfg(test)]

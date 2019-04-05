@@ -1,3 +1,4 @@
+
 use crate as reo_rs;
 
 use bit_set::BitSet;
@@ -144,6 +145,59 @@ fn alternator() {
     .expect("A worker thread panicked!");
 }
 
+
+
+
+
+
+
+///////////////////////////////
+
+fn new_proto() -> (crate::threadless2::Putter<[u32; 32]>, crate::threadless2::Getter<[u32; 32]>) {
+    use crate::threadless2::*;
+    const NUM_PORTS: usize = 2;
+    const NUM_PUTTERS: usize = 1;
+    fn guard_0_data_const() -> bool {
+        true
+    }
+    let ready = parking_lot::Mutex::new(BitSet::new());
+    let guards = vec![crate::threadless2::GuardCmd::new(
+        bitset! {0,1},
+        &guard_0_data_const,
+        vec![crate::threadless2::Action::new(0, usize_iter_literal!([1]))],
+    )];
+    let put_ptrs = std::cell::UnsafeCell::new(
+        std::iter::repeat(StackPtr::NULL)
+            .take(NUM_PUTTERS)
+            .collect(),
+    );
+    let mut meta_send = Vec::with_capacity(NUM_PORTS);
+    let mut meta_recv = Vec::with_capacity(NUM_PORTS);
+    for _ in 0..NUM_PORTS {
+        let (s, r) = crossbeam::channel::bounded(NUM_PORTS);
+        meta_send.push(s);
+        meta_recv.push(r);
+    }
+    let shared = std::sync::Arc::new(ProtoShared {
+        ready,
+        guards,
+        put_ptrs,
+        meta_send,
+    });
+    (
+        Putter::new(PortCommon {
+            shared: shared.clone(),
+            id: 0,
+            meta_recv: meta_recv.remove(0), //remove vec head
+        }),
+        Getter::new(PortCommon {
+            shared: shared.clone(),
+            id: 1,
+            meta_recv: meta_recv.remove(0), //remove vec head
+        }),
+    )
+}
+
 #[test]
 fn threadless_test() {
     use crate::threadless2::*;
@@ -186,4 +240,24 @@ fn threadless_test() {
         s.spawn(|_| cons(g));
     })
     .unwrap();
+}
+
+
+#[test]
+fn toks() {
+    let (mut t0, mut p, mut g) = crate::tokens::protowang();
+    crossbeam::scope(|s| {
+        s.spawn(move |_| {
+            loop {
+                let t1 = match p.try_put(t0, 5) {
+                    Ok(t1) => t1,
+                    Err((t1, _rejected_datum)) => {
+                        t1
+                    },
+                };
+                let (temp, _datum) = g.get(t1); // guaranteed to work
+                t0 = temp;
+            }
+        });
+    }).unwrap();
 }

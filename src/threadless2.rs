@@ -8,12 +8,12 @@ use std::cell::UnsafeCell;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-struct Action {
+pub struct Action {
     from: usize,
     to: Vec<usize>,
 }
 impl Action {
-    fn new(from: usize, to: impl Iterator<Item = usize>) -> Self {
+    pub fn new(from: usize, to: impl Iterator<Item = usize>) -> Self {
         Self {
             from,
             to: to.collect(),
@@ -21,13 +21,13 @@ impl Action {
     }
 }
 
-struct GuardCmd {
+pub struct GuardCmd {
     firing_set: BitSet,
     data_const: &'static dyn Fn() -> bool,
     actions: Vec<Action>,
 }
 impl GuardCmd {
-    fn new(
+    pub fn new(
         firing_set: BitSet,
         data_const: &'static dyn Fn() -> bool,
         actions: Vec<Action>,
@@ -41,9 +41,9 @@ impl GuardCmd {
 }
 
 #[derive(Copy, Clone)]
-struct StackPtr(*mut ());
+pub struct StackPtr(*mut ());
 impl StackPtr {
-    const NULL: Self = StackPtr(std::ptr::null_mut());
+    pub const NULL: Self = StackPtr(std::ptr::null_mut());
 }
 impl<T> From<*mut T> for StackPtr {
     fn from(p: *mut T) -> Self {
@@ -56,11 +56,11 @@ impl<T> Into<*mut T> for StackPtr {
     }
 }
 
-struct ProtoShared {
-    ready: Mutex<BitSet>,
-    guards: Vec<GuardCmd>,
-    put_ptrs: UnsafeCell<Vec<StackPtr>>,
-    meta_send: Vec<Sender<MetaMsg>>,
+pub struct ProtoShared {
+    pub ready: Mutex<BitSet>,
+    pub guards: Vec<GuardCmd>,
+    pub put_ptrs: UnsafeCell<Vec<StackPtr>>,
+    pub meta_send: Vec<Sender<MetaMsg>>,
     // TODO id2guards
     // TODO dead set?
 }
@@ -90,10 +90,10 @@ impl ProtoShared {
     }
 }
 
-struct PortCommon {
-    shared: Arc<ProtoShared>,
-    id: usize,
-    meta_recv: Receiver<MetaMsg>,
+pub struct PortCommon {
+    pub shared: Arc<ProtoShared>,
+    pub id: usize,
+    pub meta_recv: Receiver<MetaMsg>,
 }
 
 pub struct Getter<T>
@@ -107,7 +107,7 @@ impl<T> Getter<T>
 where
     T: TryClone,
 {
-    fn new(port: PortCommon) -> Self {
+    pub fn new(port: PortCommon) -> Self {
         Self {
             port,
             _port_type: PhantomData::default(),
@@ -201,7 +201,7 @@ where
 }
 
 #[derive(Debug)]
-enum MetaMsg {
+pub enum MetaMsg {
     SetWaitSum(usize),
     MoveFrom(usize),
     CloneFrom(usize),
@@ -224,7 +224,7 @@ impl<T> Putter<T>
 where
     T: TryClone,
 {
-    fn new(port: PortCommon) -> Self {
+    pub fn new(port: PortCommon) -> Self {
         Self {
             port,
             _port_type: PhantomData::default(),
@@ -268,49 +268,6 @@ macro_rules! usize_iter_literal {
     };
 }
 
-pub fn new_proto() -> (Putter<[u32; 32]>, Getter<[u32; 32]>) {
-    const NUM_PORTS: usize = 2;
-    const NUM_PUTTERS: usize = 1;
-    fn guard_0_data_const() -> bool {
-        true
-    }
-    let ready = Mutex::new(BitSet::new());
-    let guards = vec![GuardCmd::new(
-        bitset! {0,1},
-        &guard_0_data_const,
-        vec![Action::new(0, usize_iter_literal!([1]))],
-    )];
-    let put_ptrs = UnsafeCell::new(
-        std::iter::repeat(StackPtr::NULL)
-            .take(NUM_PUTTERS)
-            .collect(),
-    );
-    let mut meta_send = Vec::with_capacity(NUM_PORTS);
-    let mut meta_recv = Vec::with_capacity(NUM_PORTS);
-    for _ in 0..NUM_PORTS {
-        let (s, r) = crossbeam::channel::bounded(NUM_PORTS);
-        meta_send.push(s);
-        meta_recv.push(r);
-    }
-    let shared = Arc::new(ProtoShared {
-        ready,
-        guards,
-        put_ptrs,
-        meta_send,
-    });
-    (
-        Putter::new(PortCommon {
-            shared: shared.clone(),
-            id: 0,
-            meta_recv: meta_recv.remove(0), //remove vec head
-        }),
-        Getter::new(PortCommon {
-            shared: shared.clone(),
-            id: 1,
-            meta_recv: meta_recv.remove(0), //remove vec head
-        }),
-    )
-}
 
 pub trait TryClone {
     fn try_clone(&self) -> Self;
