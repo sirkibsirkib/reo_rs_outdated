@@ -8,6 +8,11 @@ use std::cell::UnsafeCell;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+
+// pub trait Component {
+//     fn run(&mut self);
+// }
+
 pub struct Action {
     from: usize,
     to: Vec<usize>,

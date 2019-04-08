@@ -1,15 +1,14 @@
 // useful functions used by the template-generated protocol structures
 #[macro_use]
-pub mod protocols;
+pub mod protocols2;
 
 // the primitives for reo such as Ports.
-mod reo;
-pub use reo::*;
+// mod reo;
+// pub use reo::*;
 
 #[macro_use]
 mod threadless2;
-
-mod tokens;
+// pub use threadless2 as reo;
 
 // unit tests
 #[cfg(test)]
