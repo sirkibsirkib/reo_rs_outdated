@@ -127,7 +127,17 @@ pub struct ProtoShared {
 }
 
 /*
-if #getters = 0: data is dropped and NOBODY moves it
+// dropped in circuit if NO getters
+// otherwise, 1 mover and N-1 cloners
+//
+
+1. is the datum DROPPED IN CIRCUIT?
+2. are 1+ port-getters involved?
+3. is the putter a mem or a port?
+
+
+let dropped_in_circ = a.to.is_empty();
+let nonzero_port_getters =
 */
 
 impl ProtoShared {
@@ -139,137 +149,244 @@ impl ProtoShared {
     pub fn is_port_id(&self, id: usize) -> bool {
         id < self.meta_send.len()
     }
+    pub fn mem_id_p2g(&self, id: usize) -> usize {
+        let len = (*self.mem.get()).len();
+        let mem_idx = match id.checked_sub(self.num_ports()) {
+            Some(x) if x < len => x,
+            x => panic!("mem_id_p2g BAD {:?}", x),
+        };
+        mem_idx + len
+    }
+    pub fn mem_id_g2p(&self, id: usize) -> usize {
+        let len = (*self.mem.get()).len();
+        let mem_idx = match id.checked_sub(self.num_ports()) {
+            Some(x) if x < (2 * len) && len <= x => x,
+            x => panic!("mem_id_p2g BAD {:?}", x),
+        };
+        mem_idx - len
+    }
     #[inline]
-    pub fn port_id_to_mem_idx(&self, id: usize) -> Option<usize> {
+    pub fn put_port_to_memslot(&self, id: usize) -> Option<usize> {
         id.checked_sub(self.num_ports())
     }
-    fn arrive(&self, arrive_set_id: usize) {
-        self.arrive_locked(arrive_set_id, &mut self.ready.lock())
+    #[inline]
+    pub fn get_port_to_memslot(&self, id: usize) -> Option<usize> {
+        let len = (*self.mem.get()).len();
+        id.checked_sub(self.num_ports())
+            .and_then(|x| x.checked_sub(len))
     }
-    fn arrive_locked(&self, arrive_set_id: usize, ready: &mut MutexGuard<BitSet>) {
+
+    fn arrive(&self, arrive_set_id: usize) {
+        let mut ready = &mut self.ready.lock();
         ready.insert(arrive_set_id);
-        for g in self.guards.iter() {
-            if ready.is_superset(&g.firing_set) && (g.data_const)() {
-                // condition met. FIRE!
+        'redo: loop {
+            for g in self.guards.iter() {
+                if !ready.is_superset(&g.firing_set) || !(g.data_const)() {
+                    continue;
+                }
 
                 // update ready set
                 ready.difference_with(&g.firing_set);
-
                 for a in g.actions.iter() {
+
+
                     let num_port_getters = a.to.iter().filter(|&&x| self.is_port_id(x)).count();
-                    println!("... num port getters {}", num_port_getters);
-                    if let Some(p_mem_idx) = self.port_id_to_mem_idx(a.from) {
-                        // MEM putter with index mem_idx
-                        println!("... mem putter with memidx {}", p_mem_idx);
-                        if a.to.is_empty() {
-                            // no getters whatsoever. MUST drop this myself
-                            println!("... 0 gets. dropping {}", p_mem_idx);
-                            unsafe {
-                                (*self.mem.get())[p_mem_idx].drop_contents();
-                            }
-                        } else {
-                            // 1+ getters. contents are NOT dropped
-                            println!("... {} gets", a.to.len());
-                            let contents_ptr = unsafe { (*self.mem.get())[p_mem_idx].expose_ptr() };
-                            println!("{} port getters", num_port_getters);
-                            if num_port_getters == 0 {
-                                // 0 getters are Ports. no messaging. one memcell moves
-                                for (is_first, &g_id) in a.to.iter().with_first() {
-                                    let g_mem_idx = self.port_id_to_mem_idx(g_id).unwrap();
-                                    let memcell: &mut MemCell =
-                                        unsafe { &mut (*self.mem.get())[g_mem_idx] };
-                                    if is_first {
-                                        unsafe { memcell.move_from_ptr(contents_ptr) };
-                                    } else {
-                                        unsafe { memcell.clone_from_ptr(contents_ptr) };
-                                    }
-                                    self.arrive_locked(g_id, ready); // RECURSIVE CALL
-                                }
-                            } else {
-                                // 1+ getters are Ports
-                                let mut leader_port_getter = None;
-                                for &g_id in a.to.iter() {
-                                    if let Some(g_mem_idx) = self.port_id_to_mem_idx(g_id) {
-                                        // mem getter. ALWAYS clone
-                                        unsafe {
-                                            (*self.mem.get())[g_mem_idx]
-                                                .clone_from_ptr(contents_ptr);
-                                        }
-                                        self.arrive_locked(g_id, ready); // RECURSIVE CALL
-                                    } else {
-                                        // port getter
-                                        use MetaMsg::*;
-                                        let msg = if let Some(leader_getter) = leader_port_getter {
-                                            // follower port
-                                            MemFollowerClone {
-                                                leader_getter,
-                                                mem_p_id: a.from,
-                                            }
-                                        } else {
-                                            // I am the leader
-                                            leader_port_getter = Some(g_id);
-                                            MemLeaderMove {
-                                                mem_p_id: a.from,
-                                                wait_sum: num_port_getters - 1,
-                                            }
-                                        };
-                                        self.meta_send[g_id].send(msg).unwrap();
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        // PORT putter
-                        println!("{} port putter", num_port_getters);
-                        use MetaMsg::*;
-                        let put_datum_ptr = unsafe {
-                            // for MEMCELL getters
-                            std::mem::transmute((*self.put_ptrs.get())[a.from].0)
-                        };
-                        if num_port_getters == 0 && !a.to.is_empty() {
-                            // a MEMcell is the mover
-                            self.meta_send[a.from].send(PutterWaitFor(1)).unwrap();
-                            self.meta_send[a.from].send(IMovedIt).unwrap();
-                            for (is_first, &g_id) in a.to.iter().with_first() {
-                                let g_mem_idx = self.port_id_to_mem_idx(g_id).unwrap();
-                                let memcell: &mut MemCell =
-                                    unsafe { &mut (*self.mem.get())[g_mem_idx] };
-                                if is_first {
-                                    unsafe { memcell.move_from_ptr(put_datum_ptr) };
-                                } else {
-                                    unsafe { memcell.clone_from_ptr(put_datum_ptr) };
-                                }
-                                self.arrive_locked(g_id, ready); // RECURSIVE CALL
-                            }
-                        } else {
-                            // a PORT is the mover
-                            self.meta_send[a.from].send(PutterWaitFor(num_port_getters)).unwrap();
-                            let mut was_moved = false;
-                            for &g_id in a.to.iter() {
-                                if let Some(g_mem_idx) = self.port_id_to_mem_idx(g_id) {
-                                    // mem getter. ALWAYS clone
-                                    unsafe {
-                                        (*self.mem.get())[g_mem_idx].clone_from_ptr(put_datum_ptr);
-                                    }
-                                    self.arrive_locked(g_id, ready); // RECURSIVE CALL
-                                } else {
-                                    // port getter
-                                    use MetaMsg::*;
-                                    let msg = if was_moved {
-                                        // follower port
-                                        PortClone { src_putter: a.from }
-                                    } else {
-                                        // I am the leader
-                                        was_moved = true;
-                                        PortMove { src_putter: a.from }
-                                    };
-                                    self.meta_send[g_id].send(msg).unwrap();
-                                }
-                            }
-                        }
+                    // let datum_ptr = match self.put_port_to_memslot(a.from) {
+                    //     Some(m) => (*self.mem.get())[m].expose_ptr(),
+                    //     None => (*self.put_ptrs.get())[a.from].0,
+                    // };
+
+                    let maybe_mem_p = self.put_port_to_memslot(a.from);
+                    if let (Some(mem_p_slot), 0) = (maybe_mem_p, num_port_getters) {
+                        // NO LATER CALL
+                        let mover_id = a.to.iter().map(|&x| self.get_port_to_memslot(x).unwrap()).find()
+
+                        continue 'redo;
                     }
+
+
+
+
+                    // if num_port_getters == 0 {
+                    //     // 0 port getters
+                    //     // no leader-getter to do this check later.
+                    //     if let (Some(mem_idx), true) =
+                    //         (self.put_port_to_memslot(a.from), a.to.is_empty())
+                    //     {
+                    //         unsafe { (*self.mem.get())[mem_idx].drop_contents() }
+                    //     }
+                    //     continue 'redo;
+                    // }
+
+                    // // 1+ port getters
+                    //     // TODO
+
+                    //     if let (Some(mem_idx), true) =
+                    //         (self.put_port_to_memslot(a.from), a.to.is_empty())
+                    //     {
+                    //         unsafe { (*self.mem.get())[mem_idx].drop_contents() }
+                    //     }
+                    //     continue 'redo;
+                    // }
+                    // let mover_id: usize = self
+                    //     .put_port_to_memslot(a.from)
+                    //     .and_then(|p_slot| {
+                    //         a.to.iter()
+                    //             .filter_map(|&gid| self.get_port_to_memslot(gid))
+                    //             .find(|&x| x == p_slot)
+                    //     })
+                    //     .or_else(|| a.to.iter().map(|&x| x).next()).unwrap();
+
+                    // for &g_id in a.to.iter() {
+
+                    // }
+
+
+                    // let get_port_leader = a.to.iter().filter(|&&x| self.is_port_id(x)).next();
+                    // for (first, &g_id) in a.to.iter().with_first() {
+                    //     // (is_first, leader-opt, self-slot, put-slot)
+                    //     match (first, get_port_leader, self.get_port_to_memslot(g_id), self.put_port_to_memslot(a.from)) {
+                    //         (true, _, _, None) => {
+
+                    //         }
+                    //         (true, Some(&l), None, Some(get_slot_idx)) if l==g_id => { // move get leader
+                    //             self.meta_send[g_id].send(MetaMsg::MemLeaderMove {
+                    //                 mem_p_id: get_slot_idx,
+                    //                 wait_sum: num_port_getters-1,
+                    //             }).unwrap();
+                    //         }
+                    //         (false, Some(&l), None, Some(get_slot_idx)) if l==g_id => { // clone get leader
+                    //             self.meta_send[g_id].send(MetaMsg::MemLeaderClone {
+                    //                 mem_p_id: get_slot_idx,
+                    //                 wait_sum: num_port_getters-1,
+                    //             }).unwrap();
+                    //         }
+                    //         (true, _, _, Some(get_slot_idx)) => { // mover MEM
+                    //             (*self.mem.get())[get_slot_idx].move_from_ptr(datum_ptr); // TODO self?
+                    //         }
+                    //         (false, _, _, Some(get_slot_idx)) => { // cloner mem
+                    //             (*self.mem.get())[get_slot_idx].clone_from_ptr(datum_ptr); // TODO self?
+                    //         }
+                    //     }
+                    // }
                 }
+
+                // for a in g.actions.iter() {
+                //     let num_port_getters = a.to.iter().filter(|&&x| self.is_port_id(x)).count();
+                //     println!("... num port getters {}", num_port_getters);
+                //     if let Some(p_mem_idx) = self.port_id_to_mem_idx(a.from) {
+                //         // MEM putter with index mem_idx
+                //         println!("... mem putter with memidx {}", p_mem_idx);
+                //         if a.to.is_empty() {
+                //             // no getters whatsoever. MUST drop this myself
+                //             println!("... 0 gets. dropping {}", p_mem_idx);
+                //             unsafe {
+                //                 (*self.mem.get())[p_mem_idx].drop_contents();
+                //             }
+                //         } else {
+                //             // 1+ getters. contents are NOT dropped
+                //             println!("... {} gets", a.to.len());
+                //             let contents_ptr = unsafe { (*self.mem.get())[p_mem_idx].expose_ptr() };
+                //             println!("{} port getters", num_port_getters);
+                //             if num_port_getters == 0 {
+                //                 // 0 getters are Ports. no messaging. one memcell moves
+                //                 for (is_first, &g_id) in a.to.iter().with_first() {
+                //                     let g_mem_idx = self.port_id_to_mem_idx(g_id).unwrap();
+                //                     let memcell: &mut MemCell =
+                //                         unsafe { &mut (*self.mem.get())[g_mem_idx] };
+                //                     if is_first {
+                //                         unsafe { memcell.move_from_ptr(contents_ptr) };
+                //                     } else {
+                //                         unsafe { memcell.clone_from_ptr(contents_ptr) };
+                //                     }
+                //                     self.arrive_locked(g_id, ready); // RECURSIVE CALL
+                //                 }
+                //             } else {
+                //                 // 1+ getters are Ports
+                //                 let mut leader_port_getter = None;
+                //                 for &g_id in a.to.iter() {
+                //                     if let Some(g_mem_idx) = self.port_id_to_mem_idx(g_id) {
+                //                         // mem getter. ALWAYS clone
+                //                         unsafe {
+                //                             (*self.mem.get())[g_mem_idx]
+                //                                 .clone_from_ptr(contents_ptr);
+                //                         }
+                //                         self.arrive_locked(g_id, ready); // RECURSIVE CALL
+                //                     } else {
+                //                         // port getter
+                //                         use MetaMsg::*;
+                //                         let msg = if let Some(leader_getter) = leader_port_getter {
+                //                             // follower port
+                //                             MemFollowerClone {
+                //                                 leader_getter,
+                //                                 mem_p_id: a.from,
+                //                             }
+                //                         } else {
+                //                             // I am the leader
+                //                             leader_port_getter = Some(g_id);
+                //                             MemLeaderMove {
+                //                                 mem_p_id: a.from,
+                //                                 wait_sum: num_port_getters - 1,
+                //                             }
+                //                         };
+                //                         self.meta_send[g_id].send(msg).unwrap();
+                //                     }
+                //                 }
+                //             }
+                //         }
+                //     } else {
+                //         // PORT putter
+                //         println!("{} port putter", num_port_getters);
+                //         use MetaMsg::*;
+                //         let put_datum_ptr = unsafe {
+                //             // for MEMCELL getters
+                //             std::mem::transmute((*self.put_ptrs.get())[a.from].0)
+                //         };
+                //         if num_port_getters == 0 && !a.to.is_empty() {
+                //             // a MEMcell is the mover
+                //             self.meta_send[a.from].send(PutterWaitFor(1)).unwrap();
+                //             self.meta_send[a.from].send(IMovedIt).unwrap();
+                //             for (is_first, &g_id) in a.to.iter().with_first() {
+                //                 let g_mem_idx = self.port_id_to_mem_idx(g_id).unwrap();
+                //                 let memcell: &mut MemCell =
+                //                     unsafe { &mut (*self.mem.get())[g_mem_idx] };
+                //                 if is_first {
+                //                     unsafe { memcell.move_from_ptr(put_datum_ptr) };
+                //                 } else {
+                //                     unsafe { memcell.clone_from_ptr(put_datum_ptr) };
+                //                 }
+                //                 self.arrive_locked(g_id, ready); // RECURSIVE CALL
+                //             }
+                //         } else {
+                //             // a PORT is the mover
+                //             self.meta_send[a.from].send(PutterWaitFor(num_port_getters)).unwrap();
+                //             let mut was_moved = false;
+                //             for &g_id in a.to.iter() {
+                //                 if let Some(g_mem_idx) = self.port_id_to_mem_idx(g_id) {
+                //                     // mem getter. ALWAYS clone
+                //                     unsafe {
+                //                         (*self.mem.get())[g_mem_idx].clone_from_ptr(put_datum_ptr);
+                //                     }
+                //                     self.arrive_locked(g_id, ready); // RECURSIVE CALL
+                //                 } else {
+                //                     // port getter
+                //                     use MetaMsg::*;
+                //                     let msg = if was_moved {
+                //                         // follower port
+                //                         PortClone { src_putter: a.from }
+                //                     } else {
+                //                         // I am the leader
+                //                         was_moved = true;
+                //                         PortMove { src_putter: a.from }
+                //                     };
+                //                     self.meta_send[g_id].send(msg).unwrap();
+                //                 }
+                //             }
+                //         }
+                //     }
+                // }
             }
+            break;
         }
     }
 
@@ -364,7 +481,7 @@ where
                         wrong_meta => panic!("getter leader got {:?}", wrong_meta),
                     }
                 }
-                let mem_idx = self.port.shared.port_id_to_mem_idx(mem_p_id).unwrap();
+                let mem_idx = self.port.shared.put_port_to_memslot(mem_p_id).unwrap();
                 unsafe {
                     let ptr = (*self.port.shared.mem.get())[mem_idx].expose_ptr();
                     let ptr2: *mut T = std::mem::transmute(ptr);
@@ -375,7 +492,7 @@ where
                 mem_p_id,
                 leader_getter,
             } => {
-                let mem_idx = self.port.shared.port_id_to_mem_idx(mem_p_id).unwrap();
+                let mem_idx = self.port.shared.put_port_to_memslot(mem_p_id).unwrap();
                 unsafe {
                     let ptr = (*self.port.shared.mem.get())[mem_idx].expose_ptr();
                     let ptr2: &T = std::mem::transmute(ptr);
@@ -434,6 +551,10 @@ pub enum MetaMsg {
         leader_getter: usize,
         mem_p_id: usize,
     },
+    MemLeaderClone {
+        mem_p_id: usize,
+        wait_sum: usize,
+    },
     MemLeaderMove {
         mem_p_id: usize,
         wait_sum: usize,
@@ -469,28 +590,20 @@ where
         unsafe { (*self.port.shared.put_ptrs.get())[self.port.id] = r.into() };
         self.port.shared.arrive(self.port.id);
         //// GETTERS HAVE ACCESS
-        let mut decs = 0;
-        let mut was_moved = false;
-        let mut wait_for = std::usize::MAX;
-        while wait_for != decs {
-            match self.port.meta_recv.recv().unwrap() {
-                MetaMsg::PutterWaitFor(x) => wait_for = x,
-                MetaMsg::IMovedIt => decs += 1,
-                MetaMsg::IClonedIt => {
-                    if was_moved {
-                        panic!("two getters moved it!");
-                    }
-                    was_moved = true;
-                    decs += 1;
-                }
-                wrong_meta => panic!("putter wasn't expecting {:?}", wrong_meta),
-            }
-        }
+        let mut wait_for = match self.port.meta_recv.recv().unwrap() {
+            MetaMsg::PutterWaitFor(x) => x,
+            wrong_meta => panic!("putter wasn't expecting {:?}", wrong_meta),
+        };
+        let was_moved: bool = (0..wait_for).any(|_| match self.port.meta_recv.recv().unwrap() {
+            MetaMsg::IMovedIt => true,
+            MetaMsg::IClonedIt => false,
+            wrong_meta => panic!("putter wasn't expecting {:?}", wrong_meta),
+        });
         //// PUTTER HAVE ACCESS
         unsafe { (*self.port.shared.put_ptrs.get())[self.port.id] = StackPtr::NULL };
         if was_moved {
             std::mem::forget(datum);
-        }
+        } // else drop at end of func
         Ok(())
     }
 }
