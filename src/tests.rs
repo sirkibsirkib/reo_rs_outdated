@@ -155,20 +155,35 @@ use bit_set::BitSet;
 
 fn new_proto() -> (crate::threadless2::Putter<[u32; 32]>, crate::threadless2::Getter<[u32; 32]>) {
     use crate::threadless2::*;
-    const NUM_PORTS: usize = 2;
-    const NUM_PUTTERS: usize = 1;
+    const NUM_PORT_PUTS: usize = 1;
+    const NUM_PORT_GETS: usize = 1;
+    const NUM_MEMS: usize = 0;
+
+    /* bitspace:
+    [ids~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~]
+    [portputters][portgetters][memputters][memgetters]
+    [port*~~~~~~~~~~~~~~~~~~~] <-for send/recv channels
+    [ptrs~~~~~~~] <- for datum ptrs
+                              [mems~~~~~~] <-memslots
+    */
+
+    // derived
+    const NUM_PORTS: usize = NUM_PORT_PUTS + NUM_PORT_GETS;
+    const NUM_IDS: usize = NUM_PORT_PUTS + NUM_PORT_GETS + 2*(NUM_MEMS);
+
     fn guard_0_data_const() -> bool {
         true
     }
+    // use DataLocation::*;
     let ready = parking_lot::Mutex::new(BitSet::new());
     let guards = vec![crate::threadless2::GuardCmd::new(
         bitset! {0,1},
         &guard_0_data_const,
-        vec![crate::threadless2::Action::new(0, usize_iter_literal!([1]))],
+        vec![crate::threadless2::Action::new(0, iter_literal!([1]))],
     )];
     let put_ptrs = std::cell::UnsafeCell::new(
         std::iter::repeat(StackPtr::NULL)
-            .take(NUM_PUTTERS)
+            .take(NUM_PORT_PUTS)
             .collect(),
     );
     let mut meta_send = Vec::with_capacity(NUM_PORTS);
@@ -178,11 +193,15 @@ fn new_proto() -> (crate::threadless2::Putter<[u32; 32]>, crate::threadless2::Ge
         meta_send.push(s);
         meta_recv.push(r);
     }
+    let mem = std::cell::UnsafeCell::new(vec![
+        // MemCell::new::<u32>(),
+    ]);
     let shared = std::sync::Arc::new(ProtoShared {
         ready,
         guards,
         put_ptrs,
         meta_send,
+        mem,
     });
     (
         Putter::new(PortCommon {
@@ -201,36 +220,15 @@ fn new_proto() -> (crate::threadless2::Putter<[u32; 32]>, crate::threadless2::Ge
 #[test]
 fn threadless_test() {
     use reo_rs::threadless2::*;
-    // impl CloneFrom<[u32; 32]> for [u32; 8] {
-    //     fn clone_from(t: &[u32; 32]) -> Self {
-    //         let mut ret = [0; 8];
-    //         for i in 0..8 {
-    //             ret[i] = t[i];
-    //         }
-    //         ret
-    //     }
-    // }
-
     fn prod(mut p: Putter<[u32; 32]>) {
         for i in 0..20 {
-            p.put([i; 32]).unwrap();
+            p.put([i; 32]).unwrap()
         }
     }
     fn cons(mut g: Getter<[u32; 32]>) {
         type Signal = ();
         for _i in 0..20 {
-            println!("{:?}", g.get_weaker::<Signal>());
-            // match i % 4 {
-            //     0 => println!("{:?}", g.get().unwrap()),
-            //     1 => println!("{:?}", g.get_weaker::<[u32; 8]>().unwrap()),
-            //     2 => println!("{:?}", g.get_weaker::<Signal>().unwrap()),
-            //     3 => {
-            //         let x = g.get_borrowed().unwrap();
-            //         std::thread::sleep(std::time::Duration::from_millis(2000));
-            //         println!("{:?}", x.as_ref());
-            //     },
-            //     _ => unreachable!(),
-            // }
+            println!("{:?}", g.get_weaker::<Signal>())
         }
     }
 
@@ -242,23 +240,3 @@ fn threadless_test() {
     })
     .unwrap();
 }
-
-
-// #[test]
-// fn toks() {
-//     let (mut t0, mut p, mut g) = crate::tokens::protowang();
-//     crossbeam::scope(|s| {
-//         s.spawn(move |_| {
-//             loop {
-//                 let t1 = match p.try_put(t0, 5) {
-//                     Ok(t1) => t1,
-//                     Err((t1, _rejected_datum)) => {
-//                         t1
-//                     },
-//                 };
-//                 let (temp, _datum) = g.get(t1); // guaranteed to work
-//                 t0 = temp;
-//             }
-//         });
-//     }).unwrap();
-// }

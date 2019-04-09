@@ -1,5 +1,6 @@
+use parking_lot::MutexGuard;
 use std::fmt::Debug;
-use std::borrow::Borrow;
+// use std::borrow::Borrow;
 use bit_set::BitSet;
 use crossbeam::Receiver;
 use crossbeam::Sender;
@@ -9,9 +10,6 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 
-// pub trait Component {
-//     fn run(&mut self);
-// }
 
 pub struct Action {
     from: usize,
@@ -61,37 +59,218 @@ impl<T> Into<*mut T> for StackPtr {
     }
 }
 
+
+
+pub struct MemCell {
+    data: Vec<u8>,
+    id: usize,
+    outstanding_gets: Mutex<usize>,
+}
+type VoidPtr = *const ();
+impl MemCell {
+    pub fn new<T: Sized>(id: usize) -> Self {
+        let bytes = std::mem::size_of::<T>();
+        Self {
+            id,
+            data: std::iter::repeat(0).take(bytes).collect(),
+            outstanding_gets: Mutex::new(0),
+        }
+    }
+    pub unsafe fn drop_contents(&self) {
+        unimplemented!()
+    }
+    pub unsafe fn move_from_ptr(&self, src_ptr: VoidPtr) {
+        unimplemented!()
+    }
+    pub unsafe fn clone_from_ptr(&self, src_ptr: VoidPtr) {
+        unimplemented!()
+    }
+    pub unsafe fn expose_ptr(&self) -> VoidPtr {
+        unimplemented!()
+    }
+}
+
+
+trait WithWithFirst<T>: Iterator<Item=T> + Sized {
+    fn with_first(self) -> WithFirst<Self,T> {
+        WithFirst {
+            iter: self,
+            first: true,
+        }
+    }
+}
+impl<I,T> WithWithFirst<T> for I where I: Iterator<Item=T> + Sized {}
+
+pub struct WithFirst<I,T> where I: Iterator<Item=T> + Sized {
+    iter: I,
+    first: bool,
+}
+impl<I,T> Iterator for WithFirst<I,T> where I: Iterator<Item=T> + Sized {
+    type Item=(bool, T);
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.first {
+            self.first = false;
+            self.iter.next().map(|x| (true, x))
+        } else {
+            self.iter.next().map(|x| (false, x))
+        }
+    }
+}
+
 pub struct ProtoShared {
     pub ready: Mutex<BitSet>,
     pub guards: Vec<GuardCmd>,
     pub put_ptrs: UnsafeCell<Vec<StackPtr>>,
     pub meta_send: Vec<Sender<MetaMsg>>,
-    // TODO id2guards
-    // TODO dead set?
+    pub mem: UnsafeCell<Vec<MemCell>>,
 }
+
+
+/*
+let circuit_drop = num_putters == 0;
+if port_putter {
+    //TODO
+} else { // mem_putter
+    let leader = port_putters.iter().next();
+}
+*/
+
 impl ProtoShared {
-    fn arrive(&self, id: usize) {
-        let mut ready = self.ready.lock();
-        ready.insert(id);
+    pub fn mem_p_to_g(&self, id: usize) -> usize {
+        id + unsafe { (*self.mem.get()).len() }
+    } 
+    #[inline]
+    pub fn num_ports(&self) -> usize {
+        self.meta_send.len()
+    }
+    #[inline]
+    pub fn is_port_id(&self, id: usize) -> bool {
+        id < self.meta_send.len()
+    }
+    #[inline]
+    pub fn port_id_to_mem_idx(&self, id: usize) -> Option<usize> {
+        id.checked_sub(self.num_ports())
+    }
+    fn arrive(&self, arrive_set_id: usize) {
+        self.arrive_locked(arrive_set_id, &mut self.ready.lock())
+    }
+    fn arrive_locked(&self, arrive_set_id: usize, ready: &mut MutexGuard<BitSet>) {
+        ready.insert(arrive_set_id);
         for g in self.guards.iter() {
             if ready.is_superset(&g.firing_set) && (g.data_const)() {
-                if (g.data_const)() {
-                    ready.difference_with(&g.firing_set);
-                    for a in g.actions.iter() {
-                        let num_getters = a.to.len();
-                        self.meta_send[a.from]
-                            .send(MetaMsg::SetWaitSum(num_getters))
-                            .unwrap();
-                        for &t in a.to.iter().take(1) {
-                            self.meta_send[t].send(MetaMsg::MoveFrom(a.from)).unwrap();
+                // condition met. FIRE!
+
+                // update ready set
+                ready.difference_with(&g.firing_set);
+
+                for a in g.actions.iter() {
+                    let num_port_getters = a.to.iter().filter(|&&x| self.is_port_id(x)).count();
+                    if let Some(p_mem_idx) = self.port_id_to_mem_idx(a.from) {
+                        // MEM putter with index mem_idx
+                        if a.to.is_empty() {
+                            // no getters whatsoever. 
+                            unsafe {
+                                (*self.mem.get())[p_mem_idx].drop_contents();
+                            }
+                        } else {
+                            // 1+ getters. contents are NOT dropped
+                            let contents_ptr = unsafe { (*self.mem.get())[p_mem_idx].expose_ptr() };
+                            if num_port_getters == 0 {
+                                // 0 getters are Ports. no messaging. one memcell moves
+                                for (is_first, &g_id) in a.to.iter().with_first() {
+                                    let g_mem_idx = self.port_id_to_mem_idx(g_id).unwrap();
+                                    let memcell: &mut MemCell = unsafe {
+                                        &mut (*self.mem.get())[g_mem_idx]
+                                    };
+                                    if is_first {
+                                        unsafe { memcell.move_from_ptr(contents_ptr) };
+                                    } else {
+                                        unsafe { memcell.clone_from_ptr(contents_ptr) };
+                                    }
+                                    self.arrive_locked(g_id, ready); // RECURSIVE CALL
+                                }
+                            } else {
+                                // 1+ getters are Ports
+                                let mut leader_port_getter = None;
+                                for &g_id in a.to.iter() {
+                                    if let Some(g_mem_idx) = self.port_id_to_mem_idx(g_id) {
+                                        // mem getter. ALWAYS clone
+                                        unsafe {
+                                            (*self.mem.get())[g_mem_idx].clone_from_ptr(contents_ptr);
+                                        }
+                                        self.arrive_locked(g_id, ready); // RECURSIVE CALL
+                                    } else {
+                                        // port getter
+                                        use MetaMsg::*;
+                                        let msg = if let Some(leader_getter) = leader_port_getter {
+                                            // follower port
+                                            MemFollowerClone{leader_getter, mem_src: p_mem_idx}
+                                        } else {
+                                            // I am the leader
+                                            leader_port_getter = Some(g_id);
+                                            MemLeaderMove{mem_src: p_mem_idx, wait_sum: num_port_getters-1}
+                                        };
+                                        self.meta_send[g_id].send(msg).unwrap();
+                                    }
+                                }
+                            }
                         }
-                        for &t in a.to.iter().skip(1) {
-                            self.meta_send[t].send(MetaMsg::CloneFrom(a.from)).unwrap();
+                    } else {
+                        // PORT putter
+                        use MetaMsg::*;
+                        let put_datum_ptr = unsafe { // for MEMCELL getters
+                            std::mem::transmute((*self.put_ptrs.get())[a.from].0)
+                        };
+                        if num_port_getters == 0 && !a.to.is_empty() {
+                            // a MEMcell is the mover
+                            self.meta_send[a.from].send(PutterWaitFor(1)).unwrap();
+                            self.meta_send[a.from].send(IMovedIt).unwrap();
+                            for (is_first, &g_id) in a.to.iter().with_first() {
+                                let g_mem_idx = self.port_id_to_mem_idx(g_id).unwrap();
+                                let memcell: &mut MemCell = unsafe {
+                                    &mut (*self.mem.get())[g_mem_idx]
+                                };
+                                if is_first {
+                                    unsafe { memcell.move_from_ptr(put_datum_ptr) };
+                                } else {
+                                    unsafe { memcell.clone_from_ptr(put_datum_ptr) };
+                                }
+                                self.arrive_locked(g_id, ready); // RECURSIVE CALL
+                            }
+                        } else {
+                            // a PORT is the mover
+                            let mut was_moved = false;
+                            for &g_id in a.to.iter() {
+                                if let Some(g_mem_idx) = self.port_id_to_mem_idx(g_id) {
+                                    // mem getter. ALWAYS clone
+                                    unsafe {
+                                        (*self.mem.get())[g_mem_idx].clone_from_ptr(put_datum_ptr);
+                                    }
+                                    self.arrive_locked(g_id, ready); // RECURSIVE CALL
+                                } else {
+                                    // port getter
+                                    use MetaMsg::*;
+                                    let msg = if was_moved {
+                                        // follower port
+                                        PortClone{src_putter: a.from}
+                                    } else {
+                                        // I am the leader
+                                        was_moved = true;
+                                        PortMove{src_putter: a.from}
+                                    };
+                                    self.meta_send[g_id].send(msg).unwrap();
+                                }
+                            }
                         }
                     }
                 }
             }
         }
+    }
+
+    #[inline]
+    fn follow_stack_ptr(&self, id: usize) -> StackPtr {
+        unsafe { (*self.put_ptrs.get())[id] }
     }
 }
 
@@ -123,11 +302,11 @@ where
         self.port.shared.arrive(self.port.id);
         //// GETTERS HAVE ACCESS
         Ok(match self.port.meta_recv.recv().unwrap() {
-            MetaMsg::CloneFrom(src_id) | MetaMsg::MoveFrom(src_id) => {
-                let data = self.ref_from(src_id);
+            MetaMsg::PortMove{src_putter} | MetaMsg::PortClone{src_putter} => {
+                let data = self.ref_from(src_putter);
                 RefHandle {
                     data,
-                    putter_id: src_id,
+                    putter_id: src_putter,
                     getter: self,
                 }
             }
@@ -135,14 +314,14 @@ where
         })
         //// PUTTER HAS ACCESS
     }
-    pub fn get_weaker<X: CloneFrom<T>>(&mut self) -> Result<X, ()> {
+    pub fn get_weaker<X: CloneFromPortPutter<T>>(&mut self) -> Result<X, ()> {
         //// PUTTER HAS ACCESS
         self.port.shared.arrive(self.port.id);
         //// GETTERS HAVE ACCESS
         Ok(match self.port.meta_recv.recv().unwrap() {
-            MetaMsg::CloneFrom(src_id) | MetaMsg::MoveFrom(src_id) => {
-                let d = self.other_clone_from(src_id);
-                self.port.shared.meta_send[src_id]
+            MetaMsg::PortMove{src_putter} | MetaMsg::PortClone{src_putter} => {
+                let d = self.other_clone_from(src_putter);
+                self.port.shared.meta_send[src_putter]
                     .send(MetaMsg::IClonedIt)
                     .unwrap();
                 d
@@ -152,20 +331,21 @@ where
         //// PUTTER HAS ACCESS
     }
     pub fn get(&mut self) -> Result<T, ()> {
+        use MetaMsg::*;
         //// PUTTER HAS ACCESS
         self.port.shared.arrive(self.port.id);
         //// GETTERS HAVE ACCESS
         Ok(match self.port.meta_recv.recv().unwrap() {
-            MetaMsg::MoveFrom(src_id) => {
-                let d = self.move_from(src_id);
-                self.port.shared.meta_send[src_id]
+            PortMove{src_putter} => {
+                let d = self.move_from(src_putter);
+                self.port.shared.meta_send[src_putter]
                     .send(MetaMsg::IMovedIt)
                     .unwrap();
                 d
             }
-            MetaMsg::CloneFrom(src_id) => {
-                let d = self.clone_from(src_id);
-                self.port.shared.meta_send[src_id]
+            MetaMsg::PortClone{src_putter} => {
+                let d = self.clone_from(src_putter);
+                self.port.shared.meta_send[src_putter]
                     .send(MetaMsg::IClonedIt)
                     .unwrap();
                 d
@@ -197,19 +377,21 @@ where
     }
 
     #[inline]
-    fn other_clone_from<X: CloneFrom<T>>(&self, id: usize) -> X {
+    fn other_clone_from<X: CloneFromPortPutter<T>>(&self, id: usize) -> X {
         let stack_ptr: StackPtr = unsafe { (*self.port.shared.put_ptrs.get())[id] };
         let p: *mut T = stack_ptr.into();
         let rp: &T = unsafe { &*p };
-        CloneFrom::clone_from(rp)
+        CloneFromPortPutter::clone_from(rp)
     }
 }
 
 #[derive(Debug)]
 pub enum MetaMsg {
-    SetWaitSum(usize),
-    MoveFrom(usize),
-    CloneFrom(usize),
+    PutterWaitFor(usize),
+    PortMove{ src_putter: usize },
+    PortClone{ src_putter: usize },
+    MemFollowerClone{leader_getter: usize, mem_src: usize}, 
+    MemLeaderMove{mem_src: usize, wait_sum: usize}, 
     IMovedIt,
     IClonedIt,
 }
@@ -246,7 +428,7 @@ where
         let mut wait_for = std::usize::MAX;
         while wait_for != decs {
             match self.port.meta_recv.recv().unwrap() {
-                MetaMsg::SetWaitSum(x) => wait_for = x,
+                MetaMsg::PutterWaitFor(x) => wait_for = x,
                 MetaMsg::IMovedIt => decs += 1,
                 MetaMsg::IClonedIt => {
                     if was_moved {
@@ -267,7 +449,7 @@ where
     }
 }
 
-macro_rules! usize_iter_literal {
+macro_rules! iter_literal {
     ($array:expr) => {
         $array.iter().cloned()
     };
@@ -286,13 +468,13 @@ where
     }
 }
 
-pub trait CloneFrom<T> {
+pub trait CloneFromPortPutter<T> {
     fn clone_from(t: &T) -> Self;
 }
-impl<T> CloneFrom<T> for () {
+impl<T> CloneFromPortPutter<T> for () {
     fn clone_from(_t: &T) -> Self {}
 }
-// impl<T> CloneFrom<T> for T {
+// impl<T> CloneFromPortPutter<T> for T {
 //     fn clone_from(t: &T) -> T { t.clone() }
 // }
 
