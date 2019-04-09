@@ -1,4 +1,3 @@
-
 use crate as reo_rs;
 
 use bit_set::BitSet;
@@ -145,15 +144,12 @@ use bit_set::BitSet;
 //     .expect("A worker thread panicked!");
 // }
 
-
-
-
-
-
-
 // ///////////////////////////////
 
-fn new_proto() -> (crate::threadless2::Putter<[u32; 32]>, crate::threadless2::Getter<[u32; 32]>) {
+fn new_proto() -> (
+    crate::threadless2::Putter<[u32; 32]>,
+    crate::threadless2::Getter<[u32; 32]>,
+) {
     use crate::threadless2::*;
     const NUM_PORT_PUTS: usize = 1;
     const NUM_PORT_GETS: usize = 1;
@@ -169,7 +165,7 @@ fn new_proto() -> (crate::threadless2::Putter<[u32; 32]>, crate::threadless2::Ge
 
     // derived
     const NUM_PORTS: usize = NUM_PORT_PUTS + NUM_PORT_GETS;
-    const NUM_IDS: usize = NUM_PORT_PUTS + NUM_PORT_GETS + 2*(NUM_MEMS);
+    const NUM_IDS: usize = NUM_PORT_PUTS + NUM_PORT_GETS + 2 * (NUM_MEMS);
 
     fn guard_0_data_const() -> bool {
         true
@@ -228,7 +224,7 @@ fn threadless_test() {
     fn cons(mut g: Getter<[u32; 32]>) {
         type Signal = ();
         for _i in 0..20 {
-            println!("{:?}", g.get_weaker::<Signal>())
+            println!("{:?}", g.get())
         }
     }
 
