@@ -157,16 +157,21 @@ impl ProtoShared {
 
                 for a in g.actions.iter() {
                     let num_port_getters = a.to.iter().filter(|&&x| self.is_port_id(x)).count();
+                    println!("... num port getters {}", num_port_getters);
                     if let Some(p_mem_idx) = self.port_id_to_mem_idx(a.from) {
                         // MEM putter with index mem_idx
+                        println!("... mem putter with memidx {}", p_mem_idx);
                         if a.to.is_empty() {
                             // no getters whatsoever. MUST drop this myself
+                            println!("... 0 gets. dropping {}", p_mem_idx);
                             unsafe {
                                 (*self.mem.get())[p_mem_idx].drop_contents();
                             }
                         } else {
                             // 1+ getters. contents are NOT dropped
+                            println!("... {} gets", a.to.len());
                             let contents_ptr = unsafe { (*self.mem.get())[p_mem_idx].expose_ptr() };
+                            println!("{} port getters", num_port_getters);
                             if num_port_getters == 0 {
                                 // 0 getters are Ports. no messaging. one memcell moves
                                 for (is_first, &g_id) in a.to.iter().with_first() {
@@ -215,6 +220,7 @@ impl ProtoShared {
                         }
                     } else {
                         // PORT putter
+                        println!("{} port putter", num_port_getters);
                         use MetaMsg::*;
                         let put_datum_ptr = unsafe {
                             // for MEMCELL getters
@@ -237,6 +243,7 @@ impl ProtoShared {
                             }
                         } else {
                             // a PORT is the mover
+                            self.meta_send[a.from].send(PutterWaitFor(num_port_getters)).unwrap();
                             let mut was_moved = false;
                             for &g_id in a.to.iter() {
                                 if let Some(g_mem_idx) = self.port_id_to_mem_idx(g_id) {
@@ -318,7 +325,7 @@ where
     //     //// GETTERS HAVE ACCESS
     //     Ok(match self.port.meta_recv.recv().unwrap() {
     //         MetaMsg::PortMove{src_putter} | MetaMsg::PortClone{src_putter} => {
-    //             let d = self.other_clone_from(src_putter);
+    //             let d = self.other_clone_from(src_p`utter);
     //             self.port.shared.meta_send[src_putter]
     //                 .send(MetaMsg::IClonedIt)
     //                 .unwrap();
@@ -333,7 +340,9 @@ where
         //// PUTTER HAS ACCESS
         self.port.shared.arrive(self.port.id);
         //// GETTERS HAVE ACCESS
-        Ok(match self.port.meta_recv.recv().unwrap() {
+        let m = self.port.meta_recv.recv().unwrap();
+        println!("get got {:?}", m);
+        Ok(match m {
             PortMove { src_putter } => {
                 let d = self.move_from(src_putter);
                 self.port.shared.meta_send[src_putter]

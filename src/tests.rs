@@ -165,7 +165,7 @@ fn new_proto() -> (
 
     // derived
     const NUM_PORTS: usize = NUM_PORT_PUTS + NUM_PORT_GETS;
-    const NUM_IDS: usize = NUM_PORT_PUTS + NUM_PORT_GETS + 2 * (NUM_MEMS);
+    // const NUM_IDS: usize = NUM_PORT_PUTS + NUM_PORT_GETS + (2 * NUM_MEMS);
 
     fn guard_0_data_const() -> bool {
         true
