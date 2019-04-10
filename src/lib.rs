@@ -1,7 +1,5 @@
-
-mod protocol;
-mod primitives;
 mod bitset;
+mod primitives;
+mod protocol;
 
-pub use primitives::{Putter, Getter};
-
+pub use primitives::{Getter, Putter};
