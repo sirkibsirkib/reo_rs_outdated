@@ -1,0 +1,5 @@
+things to improve:
+* move type checking to glue-time
+* reference downgradnig (and sugnals) 
+	* for rust: the lifetime buggery
+* type inferecne of the contents of treo files

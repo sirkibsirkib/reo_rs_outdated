@@ -1,0 +1,168 @@
+
+pub struct Foo {
+    f: Box<dyn Fn()>,
+}
+
+pub fn check(f: &Foo) {
+    (f.f)();
+}
+
+pub fn build_check() {
+    let f = || println!("eyy");
+    let w = Foo{f:Box::new(f)};
+    check(&w);
+}
+
+--------------
+
+
+example::check:
+        mov     rax, qword ptr [rdi]
+        mov     rcx, qword ptr [rdi + 8]
+        mov     rdi, rax
+        jmp     qword ptr [rcx + 24]
+
+example::build_check:
+        sub     rsp, 56
+        lea     rax, [rip + .L__unnamed_1]
+        mov     qword ptr [rsp + 8], rax
+        mov     qword ptr [rsp + 16], 1
+        mov     qword ptr [rsp + 24], 0
+        lea     rax, [rip + .L__unnamed_2]
+        mov     qword ptr [rsp + 40], rax
+        mov     qword ptr [rsp + 48], 0
+        lea     rdi, [rsp + 8]
+        call    qword ptr [rip + _ZN3std2io5stdio6_print17h1eda47c88ba87aa1E@GOTPCREL]
+        add     rsp, 56
+        ret
+
+.L__unnamed_3:
+        .ascii  "eyy\n"
+
+.L__unnamed_1:
+        .quad   .L__unnamed_3
+        .asciz  "\004\000\000\000\000\000\000"
+
+.L__unnamed_2:
+
+
+--------------------------------------
+core::ops::function::FnOnce::call_once::{{vtable.shim}}:
+        sub     rsp, 56
+        lea     rax, [rip + .L__unnamed_2]
+        mov     qword ptr [rsp + 8], rax
+        mov     qword ptr [rsp + 16], 1
+        mov     qword ptr [rsp + 24], 0
+        lea     rax, [rip + .L__unnamed_3]
+        mov     qword ptr [rsp + 40], rax
+        mov     qword ptr [rsp + 48], 0
+        lea     rdi, [rsp + 8]
+        call    qword ptr [rip + _ZN3std2io5stdio6_print17h1eda47c88ba87aa1E@GOTPCREL]
+        add     rsp, 56
+        ret
+
+core::ptr::real_drop_in_place:
+        push    r14
+        push    rbx
+        push    rax
+        mov     rbx, rdi
+        mov     rdi, qword ptr [rdi]
+        mov     rax, qword ptr [rbx + 8]
+        call    qword ptr [rax]
+        mov     rax, qword ptr [rbx + 8]
+        mov     rsi, qword ptr [rax + 8]
+        test    rsi, rsi
+        je      .LBB1_4
+        mov     rdi, qword ptr [rbx]
+        mov     rdx, qword ptr [rax + 16]
+        add     rsp, 8
+        pop     rbx
+        pop     r14
+        jmp     qword ptr [rip + __rust_dealloc@GOTPCREL]
+.LBB1_4:
+        add     rsp, 8
+        pop     rbx
+        pop     r14
+        ret
+        mov     r14, rax
+        mov     rdi, qword ptr [rbx]
+        mov     rsi, qword ptr [rbx + 8]
+        call    alloc::alloc::box_free
+        mov     rdi, r14
+        call    _Unwind_Resume@PLT
+        ud2
+
+core::ptr::real_drop_in_place:
+        ret
+
+alloc::alloc::box_free:
+        mov     rax, rsi
+        mov     rsi, qword ptr [rsi + 8]
+        test    rsi, rsi
+        je      .LBB3_1
+        mov     rdx, qword ptr [rax + 16]
+        jmp     qword ptr [rip + __rust_dealloc@GOTPCREL]
+.LBB3_1:
+        ret
+
+example::check:
+        mov     rax, qword ptr [rdi]
+        mov     rcx, qword ptr [rdi + 8]
+        mov     rdi, rax
+        jmp     qword ptr [rcx + 24]
+
+example::build_check:
+        push    rbx
+        sub     rsp, 64
+        mov     qword ptr [rsp], 1
+        lea     rax, [rip + .L__unnamed_1]
+        mov     qword ptr [rsp + 8], rax
+        lea     rax, [rip + .L__unnamed_2]
+        mov     qword ptr [rsp + 16], rax
+        mov     qword ptr [rsp + 24], 1
+        mov     qword ptr [rsp + 32], 0
+        lea     rax, [rip + .L__unnamed_3]
+        mov     qword ptr [rsp + 48], rax
+        mov     qword ptr [rsp + 56], 0
+        lea     rdi, [rsp + 16]
+        call    qword ptr [rip + _ZN3std2io5stdio6_print17h1eda47c88ba87aa1E@GOTPCREL]
+        add     rsp, 64
+        pop     rbx
+        ret
+        mov     rbx, rax
+        mov     rdi, rsp
+        call    core::ptr::real_drop_in_place
+        mov     rdi, rbx
+        call    _Unwind_Resume@PLT
+        ud2
+
+example::build_check::{{closure}}:
+        sub     rsp, 56
+        lea     rax, [rip + .L__unnamed_2]
+        mov     qword ptr [rsp + 8], rax
+        mov     qword ptr [rsp + 16], 1
+        mov     qword ptr [rsp + 24], 0
+        lea     rax, [rip + .L__unnamed_3]
+        mov     qword ptr [rsp + 40], rax
+        mov     qword ptr [rsp + 48], 0
+        lea     rdi, [rsp + 8]
+        call    qword ptr [rip + _ZN3std2io5stdio6_print17h1eda47c88ba87aa1E@GOTPCREL]
+        add     rsp, 56
+        ret
+
+.L__unnamed_1:
+        .quad   core::ptr::real_drop_in_place
+        .quad   0
+        .quad   1
+        .quad   example::build_check::{{closure}}
+        .quad   example::build_check::{{closure}}
+        .quad   core::ops::function::FnOnce::call_once::{{vtable.shim}}
+
+.L__unnamed_4:
+        .ascii  "eyy\n"
+
+.L__unnamed_2:
+        .quad   .L__unnamed_4
+        .asciz  "\004\000\000\000\000\000\000"
+
+.L__unnamed_3:

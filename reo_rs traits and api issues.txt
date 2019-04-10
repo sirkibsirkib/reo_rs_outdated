@@ -1,0 +1,44 @@
+things we need:
+Putters / Getters have no static generic for proto / state
+- how is the action defined?
+- memorycells?
+
+So clearly doing this the threadless way involves several case distinctions and things. we need to treat MEMCELLS and stuff like that in a particular way.
+
+I have at least figured out how to layer traits JUST RIGHT so that there is only ~one dynamic dispatch per get / put without the putter / getter needing to know the particular storage type of the protocol object.
+
+The trouble is unifying the two worlds:
+getters / putters have just a port ID as their clue.
+in the world of the concrete proto I need to either:
+	hardcode functions which access particular accessor fields
+	(pro for readability and for speed maybe???) but the translation to the weird case distinction stuff is quite prickly. The trouble is that I want to minimize the code-as-data stuff so that the reification doesnt need to be performed over and over, yet i want the generic code to be readable.
+	maybe a nice middleground would then again be macros? 
+	the macro text would read something like:
+	action: make_action![@MEM; p1 => p2, p3, p4, p5]
+	but under the hood it would boil away to the concrete sends and recvs?
+	is this even an issue? 
+	
+ASSUME we don't mind representing the operation as a data thingy so like:
+Action {from: Id, to: Vec<>
+
+another nice idea would be to actually type-distinguish MemId, PutterId, GetterId since they are so distinct and just use offsets in the bitmap? that would make code a lot more intuitive and would avoid some silly matching for nothing. the more i think about it the more I like it.
+small hiccup: the reo compiler draws these from the same index set but my templates can collapse this again I guess? 
+
+maybe a better solution: We make them strictly different types (for readability) but their inner usizes dont overlap (then theres a more trivial mapping to the bitset at least. primary reason for this would be just to avoid this ugliness:
+ports: vec![putter1, getter1] makes it look like they are the same port when really they are entirely unrelated.
+ok that's settled. we NEED separate putters and getters in the types and they have (mostly) non-overlapping domains. even better we can have MemPutter and MemGetter and treat them the same. bitmaps REALLY are 1-to-1 then.
+Then the ONLY exception is MemGetter -> MemSlot. Easy, that can just be represented as a function that uses an offset.
+I like it.
+We need:
+Gmi(usize)
+Pmi(usize)
+Gpi(usize)
+Ppi(usize)
+
+so clearly we have Putter() and Getter() which invokes get / put on the shared object (using a vtable ONCE for this invocation, to disambiguate the PROTOCOL MEM TYPE which may require different storage sizes. I think this is easy to argue for being worth it.)
+
+at this layer, we need an object that sends and receives messages and all that stuff.
+the tricky bit is determining how we want to represent the CONCRETE protocols.
+Ideally, it looks as much like the java code as possible (spelled out) but the issue with this is that there are no "real" ports.
+
+this is the main thing I need to think about at this stage

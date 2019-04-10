@@ -1,0 +1,17 @@
+the following needs to hold in general:
+1. every ADDED ready-bit needs to be followed by a check of all guards. (may have become ready)
+2. a putter's datum must be moved or dropped before it may put again
+3. a putter's datum cannot be altered before all readers are done reading it
+
+
+
+threadless without memory:
+ready bitset has only two kinds of bit:
+1. putter is ready
+2. getter is ready
+
+PUTTER:
+1. updates their datum.
+2. invokes ARRIVE
+3. waits in a loop
+getter arrives. C

@@ -1,0 +1,261 @@
+prev 
+
+main(S) ::= <<
+/**
+ * Generated from <S.file> by Reo 1.0.
+ * Omitting '$' in \interpret\connectors\links.java
+ */
+
+use bit_set::BitSet;
+use hashbrown::HashSet;
+use mio::{Events, Poll, PollOpt, Ready, Token};
+use crate::reo::{self, Putter, Getter, Component};
+
+<S.components:newComponent(); separator="\n\n">
+
+fn main() {
+    // create ports
+    <S.ports:newPortPair(); separator="\n">
+
+    // spin up threads
+    crossbeam::scope(|s| {
+        <S.components:runComponent(); separator="\n">
+    })
+    .expect("A worker thread panicked!");
+}
+>>
+
+
+
+
+newComponent(c) ::= <<
+struct <c.name> {
+    <c.ports:{p | p<p.name><if(p.input)>g: Getter<else>p: Putter<endif>\<<p:typetag()>\>,}; separator="\n">
+}
+<if(c.atomic)><else><c:protoTokenModule()><endif>
+impl Component for <c.name> {
+    fn run(&mut self) {
+        <if(c.atomic)><c:atomicComponentRun()><else><c:protoComponentRun()><endif>
+    }
+}
+>>
+
+typetag(p) ::= <<
+<if(p.typeTag)><p.typeTag><else>T<endif>
+>>
+
+protoTokenModule(c) ::= <<
+mod bits_<c.name> {
+    <c.ports:protoTokenModuleDef(); separator="\n">
+}
+>>
+
+protoTokenModuleDef(p) ::= <<
+pub const <p:portToken()>: usize = <p.name>*2<if(p.input)> + 1<endif>;
+>>
+
+newPortPair(p) ::= <<
+let (p<p.name>p, p<p.name>g) = reo::new_port();
+>>
+
+portVarName(p) ::= <<
+p<p.name><if(p.input)>g<else>p<endif>
+>>
+
+portToken(p) ::= <<
+USIZE_P<p.name><if(p.input)>G<else>P<endif>
+>>
+
+runComponent(c) ::= <<
+s.builder()
+    .name("<c.name>".into())
+    .spawn(move |_| <c.name> {
+        <c.ports:portVarName(); separator=", ">
+     }
+     .run())
+     .unwrap();
+>>
+
+
+atomicComponentRun(c) ::= <<
+// TODO: main work for component "<c.name>"
+>>
+
+protoComponentRun(c) ::= <<
+use bits_prod_cons_proto::*;
+
+// make memory cells
+<c:memorycell(); separator="\n">
+
+let poll = Poll::new().unwrap();
+let mut events = Events::with_capacity(32);
+let a = Ready::all();
+let edge = PollOpt::edge();
+
+// register ports with poll object.
+<c.ports:registerPortTok();separator="\n">
+
+// define the guards
+let mut guards = vec![];
+<c.transitions:trans(); separator="\n">
+let mut active_guards: HashSet\<_> = (0..guards.len()).collect();
+
+// loop
+let mut ready = BitSet::new();
+while !active_guards.is_empty() {
+    poll.poll(&mut events, None).unwrap();
+    for event in events.iter() {
+        ready.insert(event.token().0);
+    }
+    for (guard_idx, g) in guards.iter().enumerate() {
+        if active_guards.contains(&guard_idx) // guard is active
+        && ready.is_superset(&g.0) // firing constraint
+        && (g.1)(self) // data constraint
+        {
+            ready.difference_with(&g.0); // remove fired ports from ready set
+            if (g.2)(self).is_err() {
+                // apply change and make guard inactive if any port dies
+                active_guards.remove(&guard_idx);
+            };
+        }
+    }
+}
+>>
+
+memorycell(c) ::= <<
+<c.initial.keys:{m | let mem_<m.name>: <if(m.type)><m.type><else>T<endif> = <if(c.initial.(m))><c.initial.(m).value><else>None<endif>; }; separator = "\n">
+>>
+
+registerPortTok(p) ::= <<
+poll.register(&self.<portVarName(p); wrap, anchor>, Token(<portToken(p); wrap, anchor>), a, edge).unwrap();
+>>
+
+trans(t) ::= <<
+guard_cmd!(guards,
+    bitset!{<t:trans_bitset()>},
+    |_me: &mut Self| {
+        <t:data_constraint()>
+    },
+    |me: &mut Self| {
+        <t:action()>
+    }
+);
+>>
+
+
+trans_bitset(t) ::= <<
+<t.output.keys:{p | <if(!t.output.(p).isnull)><p:portToken()>, <endif>}; separator=""><!
+!><t.input.keys:{p | <if(!t.input.(p).isnull)><p:portToken()>, <endif>}; separator=""><!
+!><t.guard:formula_bitset()>
+>>
+formula_bitset(f) ::= <<
+<if(f.negation)><f.formula:formula_bitset()><!
+!><elseif(f.equality)><f:two_term_bitset()><!
+!><elseif(f.relation)><f:relation_bitset()><!
+!><elseif(f.conjunction)><f:mul_bitset()><!
+!><elseif(f.disjunction)><f:mul_bitset()><!
+!><endif>
+>>
+mul_bitset(f) ::= <<
+<f.clauses:formula_bitset(); separator="">
+>>
+two_term_bitset(f) ::= <<
+<f.LHS:term_bitset()><f.RHS:term_bitset()>
+>>
+relation_bitset(t) ::=<<
+:REL:
+>>
+term_bitset(t) ::= <<
+<if(t.constant)>[cons]<!
+!><elseif(t.node)><t:portToken()>, <!
+!><elseif(t.memory)>[mem]<!
+!><elseif(t.isnull)><!
+!><elseif(t.function)>[termfn (<t:function_bitset()>)]<!
+!><else>[elset]<endif>
+>>
+function_bitset(t) ::=<<
+:FN:
+>>
+
+
+data_constraint(t) ::= <<
+<t.guard:formula_check()>
+>>
+formula_check(f) ::= <<
+<if(f.negation)>!(<f.formula:formula_check()>)<!
+!><elseif(f.equality)><f:eq_check()><!
+!><elseif(f.relation)><f:relation_check()><!
+!><elseif(f.conjunction)>(<f:con_check()>)<!
+!><elseif(f.disjunction)>(<f:dis_check()>)<!
+!><endif>
+>>
+con_check(f) ::= <<
+<f.clauses:formula_check(); separator=" && ">
+>>
+dis_check(f) ::= <<
+<f.clauses:formula_check(); separator=" || ">
+>>
+eq_check(f) ::= <<
+<f.LHS:term_check()> == <f.RHS:term_check()>
+>>
+relation_check(t) ::=<<
+:REL:
+>>
+term_check(t) ::= <<
+<if(t.constant)>Ok(<t.name>)<!
+!><elseif(t.node)>me.<t:portVarName()>.peek()<!
+!><elseif(t.memory)>[mem]<!
+!><elseif(t.isnull)>Err(())<!
+!><elseif(t.function)>[termfn (<t:function_check()>)]<!
+!><else>[elset]<endif>
+>>
+function_check(t) ::=<<
+:FN:
+>>
+
+
+action(t) ::= <<
+<t.input:{p | <p:input()>}; separator="\n">
+<t:output(); separator="\n">
+<t:memoryUpdateNonNull(); separator="\n">
+<t:memoryUpdateNull(); separator="\n">
+>>
+
+
+output(a) ::= <<
+<a.output.keys:{p | <if(!a.output.(p).isnull)>me.<p:portVarName()>.put(<a.output.(p):term_out()>).map_err(discard!());<else>/*out*/<endif>}; separator="\n">
+>>
+term_out(t) ::= <<
+<if(t.constant)>[Tcons]<!
+!><elseif(t.node)>val_<t.name><!
+!><elseif(t.memory)>[Tmem]<!
+!><elseif(t.isnull)>[Tnul]<!
+!><elseif(t.function)>[Ttermfn (<t:function_bitset()>)]<!
+!><else>[Telset]<endif>
+>>
+
+memory(m) ::= <<
+<m.memory.keys:{p | <p.name> = <m.memory.(p):term_mem()>;}; separator="\n">
+>>
+term_mem(t) ::= <<
+<if(t.constant)>[Tcons]<!
+!><elseif(t.node)>MEM_<t.name><!
+!><elseif(t.memory)>[Tmem]<!
+!><elseif(t.isnull)>[Tnul]<!
+!><elseif(t.function)>[Ttermfn (<t:function_bitset()>)]<!
+!><else>[Telset]<endif>
+>>
+
+memoryUpdateNonNull(m) ::= <<
+<m.memory.keys:{p | <if(!m.memory.(p).isnull)><p.name> = <m.memory.(p):term_mem()>;<else>/*munn*/<endif>}; separator="\n">
+>>
+
+memoryUpdateNull(m) ::= <<
+<m.memory.keys:{p | <if(m.memory.(p).isnull)><p.name> = <m.memory.(p):term_mem()>;<else>/*mun*/<endif>}; separator="\n">
+>>
+
+input(p) ::= <<
+let val_<p.name> = me.<p:portVarName()>.get()?;
+>>
+
+

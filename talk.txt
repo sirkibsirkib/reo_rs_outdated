@@ -1,0 +1,73 @@
+Reo-lized protocols:
+GOAL: from the compiler's internal representation, generate Rust code that, when RUN in combintion with other components, realizes the expected Reo protocol.
+A compiler already exists for Java. We want to do the same for Rust/C/C++.
+* Can call other languages but these cases are particularly attractive for their speed.
+
+What we want: Treo, Compiler, Target Src, Application
+
+ASSUMPTION: no two adjacent procols
+Let's approach the current implementation.
+
+# design 1: threaded protocols
+each component has a thread
+components coordinate with PORTS as the critical region.
+example: how to move data between two threads: two barrier approach
+(similar to a rendezvous channel, 0-capacity spsc channel etc.)
+in this world, a replicator would look something like:
+	// let x = 0.get()
+	// 1.put(x);
+	// 2.put(x);
+two (related) problems:
+	// synchrony may not emerge! arbitrary delay between 1.put and 2.put
+	// what if we have several options? eg: 1.put(0.get) OR 2.put(0.get))
+	// what about data constraints (even with just 1 transition we cannot know ahead of time whether its thr right time to GET.
+		eg: double-sync channel	
+We seem to be stuck. what do we do? 
+First: we need the ability to perform a non-destructive get
+	"peek" or "read". only perform when you COULD perform a get to avoid blocking.
+	these can be sandwiched between NOTIFICATIONS and ACTION.
+One more observation:
+	the protocol can be idle until data must flow. 
+	if data cannot flow in time X, and can flow in time X+1, then SOME PUT/GET happened to change the state of the system at X+1 (or inbetween depending on how you look at it)
+Introduce wakeup signals. The protocol can sleep. getters and putters can wake them up.
+severely reduce busy waiting
+Now we are at the point of the current reo compiler:
+1. limited busy waiting
+2. put, get, peek
+3. protocol thread
+
+Problems:
+1. check every guard for every wakeup
+2. class-lock. every put, get and protocol check acquires the class lock (limits parallelism)
+3. can only pass heap-allocated data (Java "objects")
+	* no specialization for stack-primitives
+4. not safe for arbitrary objects.
+	* no care is taken to mutable aliasing. 
+	* atomic protocols would have to specialize their interactions with Reo depending on whether types are thread safe && what is done with it in the circuit.
+		// MIXING OF COORDINATION & COMPUTATION
+
+sidebar: FAT pointers vs vtabled objects
+
+a solution: monitor state without blocking: peer-notification & select loop:
+PUT on a port needs to send the GETTER a notification & vice versa
+then the protocol just listens to notifications, _implictly_ knowing when puts and gets do not block.
+
+a gear in the works: data constraints: non-destructive get() "peek" AKA "read"
+
+// sidetrack: timeouts
+we are able to facilitate timeouts BEFORE barrier 1
+the protocol must thus respond to this possibility by using FREEZE and THAW operations to turn tentative puts into definitive puts.
+// didn't investigate get-timeouts, but it would be similar.	
+
+
+but need to avoid this inside protocols (need to )
+solution: peer-get and peer-put notifications:
+	MIO has a nice API for this
+
+PROBLEM: protocol composition isn't always possible!
+// surface reason: protocols are passive
+// underlying reason: data-flow is now a function of distributed state
+
+ASSUME: no protocols can be connected in series:
+
+design 2: threadless protocols
