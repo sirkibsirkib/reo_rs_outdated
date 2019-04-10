@@ -1,3 +1,4 @@
+use parking_lot::MutexGuard;
 use std::cell::UnsafeCell;
 use parking_lot::Mutex;
 use crossbeam::{Sender, Receiver};
@@ -42,9 +43,9 @@ enum MetaMsg {
 	WaitFor{getter_count: usize},
 	// proto -> getters
 	GetFromPutter{putter_id: Id, move_allowed: bool},
-	GetFromMem_A{mem_id: Id, move_allowed: bool},
-	BeLeader_B{follower_count: usize},
-	BeFollower_B{leader: Id},
+	GetFromMem{mem_id: Id, move_allowed: bool},
+	BeLeader{follower_count: usize},
+	BeFollower{leader: Id},
 }
 
 impl<T, P: ProtoMemory> GenShared<T> for Shared<P> {
@@ -52,7 +53,12 @@ impl<T, P: ProtoMemory> GenShared<T> for Shared<P> {
 	fn get(&self, common: &PortCommon<T>) -> Result<T,()> {
 		use MetaMsg::*;
 		// 1. wait at barrier
-		self.arrive(Some(common.id));
+		self.yield_to_proto({
+			let mut r = self.ready_lock();
+			r.set(common.id);
+			r
+		});
+
 		let datum = match common.get_msg() {
 			GetFromPutter{putter_id, move_allowed} => {
 				let p = self.get_putter_ptr(putter_id);
@@ -65,7 +71,7 @@ impl<T, P: ProtoMemory> GenShared<T> for Shared<P> {
 				self.senders[putter_id].send(msg).unwrap();
 				datum
 			}
-			GetFromMem_A{mem_id, move_allowed} => {
+			GetFromMem{mem_id, move_allowed} => {
 				// ok need 2nd message to determine leader
 				let p = self.get_mem_ptr(mem_id);
 				let datum = if move_allowed {
@@ -74,27 +80,27 @@ impl<T, P: ProtoMemory> GenShared<T> for Shared<P> {
 					Self::clone_from(p)
 				};
 				match common.get_msg() {
-					BeLeader_B{follower_count} => {
+					BeLeader{follower_count} => {
+						let mut was_moved = move_allowed;
 						for _ in 0..follower_count {
-							let mut was_moved = move_allowed;
 							match common.get_msg() {
 								CountMe{i_moved: true} if was_moved => panic!("L DOUBLE MOVE!"),
 								CountMe{i_moved: true} => was_moved=true,
 								CountMe{..} => {},
 								wrong_msg => panic!("WRONG GETTER LOOP MSG {:?}", wrong_msg),
 							}
-							self.arrive_for_mem_free(mem_id); // yield control once again
+							self.leader_clearing_mem(mem_id); // yield control once again
 						}
 					},
-					BeFollower_B{leader} => {
+					BeFollower{leader} => {
 						let msg = CountMe{i_moved: move_allowed};
 						self.senders[leader].send(msg).unwrap();
 					},
-					wrong_msg => panic!("B TYPE WRONG"),
+					wrong_msg => panic!("B TYPE WRONG {:?}", wrong_msg),
 				}
 				datum
 			}
-			wrong_msg => panic!("A type wrong!"),
+			wrong_msg => panic!("A type wrong! {:?}", wrong_msg),
 		};
 		Ok(datum)
 	}
@@ -106,7 +112,11 @@ impl<T, P: ProtoMemory> GenShared<T> for Shared<P> {
 			self.set_putter_ptr(common.id, p);
 		}
 		// 2. wait at barrier
-		self.arrive(Some(common.id));
+		self.yield_to_proto({
+			let mut r = self.ready_lock();
+			r.set(common.id);
+			r
+		});
 		// 3. receive message. possibly return value
 		let wait_count = match common.receiver.recv().unwrap() {
 			WaitFor{getter_count} => getter_count,
@@ -141,9 +151,11 @@ impl<P: ProtoMemory> Shared<P> {
 		unimplemented!()
 	}
 	fn get_mem_ptr(&self, _mem_id: Id) -> DatumPtr {
+		// TODO can verify that it belongs to a mem
 		unimplemented!()
 	}
 	fn get_putter_ptr(&self, putter_id: Id) -> DatumPtr {
+		// TODO can verify that belongs to a putter
 		unsafe {
 			(*self.p_stack_ptrs.get())[putter_id]
 		}
@@ -153,14 +165,15 @@ impl<P: ProtoMemory> Shared<P> {
 			(*self.p_stack_ptrs.get())[putter_id] = ptr;
 		}
 	}
-	fn arrive_for_mem_free(&self, mem_id: Id) {
-		unimplemented!()
+	#[inline]
+	fn ready_lock(&self) -> MutexGuard<BitSet> {
+		self.ready.lock()
 	}
-	fn arrive(&self, set_ready: Option<Id>) {
-		let mut ready = self.ready.lock();
-		if let Some(id) = set_ready {
-			ready.set(id);
-		}
+	fn leader_clearing_mem(&self, mem_id: Id) {
+		// USE CAREFULLY
+	}
+	fn yield_to_proto(&self, mut ready: MutexGuard<BitSet>) {
+		unimplemented!()
 	}
 }
 ///////////////////////////
