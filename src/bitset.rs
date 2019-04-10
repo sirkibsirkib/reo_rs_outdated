@@ -5,7 +5,7 @@ impl BitSet {
     const BYTES_PER_CHUNK: usize = std::mem::size_of::<usize>();
     const BITS_PER_CHUNK: usize = Self::BYTES_PER_CHUNK * 8;
 
-    pub fn new(min_capacity: usize) -> Self {
+    pub fn with_capacity(min_capacity: usize) -> Self {
         Self { data: vec![] }
     }
     pub fn capacity(&self) -> usize {
@@ -32,7 +32,7 @@ impl BitSet {
         }
         true
     }
-    pub fn try_difference_with(&mut self, other: &Self) {
+    pub fn difference_with(&mut self, other: &Self) {
         for (s, &o) in self.data.iter_mut().zip(other.data.iter()) {
             *s &= o
         }
@@ -45,4 +45,22 @@ impl BitSet {
             }
         }
     }
+}
+
+#[macro_export]
+macro_rules! bitset {
+    (@single $($x:tt)*) => (());
+    (@count $($rest:expr),*) => (<[()]>::len(&[$(bitset!(@single $rest)),*]));
+
+    ($($value:expr,)+) => { bitset!($($value),+) };
+    ($($value:expr),*) => {
+        {
+            let _countcap = bitset!(@count $($value),*);
+            let mut _the_bitset = BitSet::with_capacity(_countcap);
+            $(
+                let _ = _the_bitset.set($value);
+            )*
+            _the_bitset
+        }
+    };
 }

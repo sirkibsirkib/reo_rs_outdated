@@ -6,14 +6,26 @@ use std::cell::UnsafeCell;
 use std::marker::PhantomData;
 use std::mem;
 use std::sync::Arc;
-type Id = usize;
-type DatumPtr = *const ();
-const NullDatumPtr: DatumPtr = std::ptr::null();
+// use std::any::TypeId;
 
-struct Guard<P: ProtoMemory> {
+type Id = usize;
+
+
+#[derive(Debug, Copy, Clone)]
+pub struct DatumPtr(*const ());
+impl DatumPtr {
+    const NULL: Self = Self(std::ptr::null());
+}
+impl Default for DatumPtr {
+    fn default() -> Self {
+        Self::NULL
+    }
+}
+
+pub struct Guard<P: ProtoMemory> {
     must_be_ready: BitSet,
-    data_constraint: Vec<fn(&P) -> bool>,
-    fire_actions: Vec<fn(&mut P)>,
+    data_constraint: fn(&P) -> bool,
+    fire_action: fn(&P),
 }
 
 struct Shared<P: ProtoMemory> {
@@ -21,10 +33,97 @@ struct Shared<P: ProtoMemory> {
     p_stack_ptrs: UnsafeCell<Vec<DatumPtr>>,
     senders: Vec<Sender<MetaMsg>>,
     _proto_state: PhantomData<*const P>,
+    proto_mem: P,
 }
 
 // differs per
-pub trait ProtoMemory: Default {}
+pub trait ProtoMemory: Default {
+    type Memory;
+    type Ptrs;
+    fn get_guards(&self) -> &[Guard<Self>];
+    fn putter_write(&self, id: Id, ptr: DatumPtr);
+    fn write_mem(&self, id: Id, src: DatumPtr);
+    fn empty_mem(&self, id: Id);
+    fn mem_ptr(&self, id: Id) -> DatumPtr;
+}
+
+#[derive(Debug)]
+struct MemCell<T> {
+    datum: Option<T>,
+    get_empty_bit: usize,
+    get_full_bit: usize,
+}
+impl<T> MemCell<T> {
+    fn new(init: Option<T>, get_empty_bit: usize, get_full_bit: usize) -> Self {
+        Self {
+            datum: init, get_empty_bit, get_full_bit,
+        }
+    }
+}
+struct EgProto {
+    memory: <Self as ProtoMemory>::Memory,
+    ptrs: <Self as ProtoMemory>::Ptrs,
+    guards: [Guard<Self>; 2],
+}
+impl Default for EgProto {
+    fn default() -> Self {
+        Self {
+            ptrs: Default::default(),
+            memory: Default::default(),
+            guards: [
+                Guard {
+                    must_be_ready: bitset!{0,1},
+                    data_constraint: |_| true,
+                    fire_action: |_| {
+
+                    },
+                },
+                Guard {
+                    must_be_ready: bitset!{1,1},
+                    data_constraint: |_| true,
+                    fire_action: |_| {
+
+                    },
+                },
+            ]
+        }
+    }
+}
+#[derive(Debug, Default)]
+struct EgProtoPtrs {
+    datum_0: DatumPtr,
+}
+#[derive(Debug)]
+struct EgProtoMemory {
+    mem_0: MemCell<u32>,
+}
+impl Default for EgProtoMemory {
+    fn default() -> Self {
+        Self {
+            mem_0: MemCell::new(None, 1, 2),
+        }
+    }
+}
+impl ProtoMemory for EgProto {
+    type Memory = EgProtoMemory;
+    type Ptrs = EgProtoMemory;
+    fn get_guards(&self) -> &[Guard<Self>] {
+        unimplemented!()
+    }
+    fn putter_write(&self, id: Id, ptr: DatumPtr) {
+        unimplemented!()
+    }
+
+    fn write_mem(&self, id: Id, src: DatumPtr) {
+        unimplemented!()
+    }
+    fn empty_mem(&self, id: Id) {
+        unimplemented!()
+    }
+    fn mem_ptr(&self, id: Id) -> DatumPtr {
+        unimplemented!()
+    }
+}
 
 // only one implementor, but used so we can be generic over ProtoMemory
 // pub trait GenShared {
@@ -179,6 +278,14 @@ impl<P: ProtoMemory> Shared<P> {
         unimplemented!()
     }
     fn yield_to_proto(&self, mut ready: MutexGuard<BitSet>) {
+        //1 
+        for g in self.proto_mem.get_guards().iter() {
+            if g.must_be_ready.is_subset(&ready) && (g.data_constraint)(&self.proto_mem) {
+                // unset bits
+                ready.difference_with(&g.must_be_ready);
+                (g.fire_action)(&self.proto_mem)
+            }
+        }
         unimplemented!()
     }
 }
