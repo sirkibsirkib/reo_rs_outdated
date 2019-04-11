@@ -42,3 +42,16 @@ the tricky bit is determining how we want to represent the CONCRETE protocols.
 Ideally, it looks as much like the java code as possible (spelled out) but the issue with this is that there are no "real" ports.
 
 this is the main thing I need to think about at this stage
+
+-----------------------------------
+
+OK so I'm thinking for the sake of ease for Drop and sized memcells and the like,
+I really should do almost what I'm doing. we have objects that represent Option<T>
+which are Some if and only if they are logically occupied
+not sure this is necessary? because the thing is not supposed to panic... anyway.
+
+TODO do we need to care? we will never panic inside the proto.
+
+still we need to consider the case:
+say 2 dudes share a proto and then immediately return.
+the thing needs to call DROP as intended
