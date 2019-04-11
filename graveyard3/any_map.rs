@@ -75,7 +75,7 @@ impl ProtoBuilder {
 		self.mem.entries.insert(key, (self.mem.storage.len() as isize, tid));
 		match init {
 			Some(x) => {
-
+				
 			},
 			None => {},
 		}

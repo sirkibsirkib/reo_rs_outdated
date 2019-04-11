@@ -1,3 +1,4 @@
+#[derive(Default)]
 pub struct BitSet {
     data: Vec<usize>,
 }
@@ -6,7 +7,12 @@ impl BitSet {
     const BITS_PER_CHUNK: usize = Self::BYTES_PER_CHUNK * 8;
 
     pub fn with_capacity(min_capacity: usize) -> Self {
-        Self { data: vec![] }
+        let chunks = if min_capacity.is_power_of_two() {
+            min_capacity
+        } else  {
+            min_capacity + 1
+        } / 64;
+        Self { data: std::iter::repeat(0).take(chunks).collect() }
     }
     pub fn capacity(&self) -> usize {
         self.data.capacity() * Self::BITS_PER_CHUNK
@@ -18,6 +24,14 @@ impl BitSet {
             self.data.push(0);
         }
         self.data[chunk_idx] |= mask;
+    }
+    pub fn test(&self, idx: usize) -> bool {
+        let mask = idx % Self::BITS_PER_CHUNK;
+        let chunk_idx = idx / Self::BITS_PER_CHUNK;
+        match self.data.get(chunk_idx) {
+            Some(chunk) => chunk & mask != 0,
+            None => false,
+        }
     }
     pub fn is_subset(&self, other: &Self) -> bool {
         if self.data.len() < other.data.len() {
@@ -61,6 +75,24 @@ macro_rules! bitset {
                 let _ = _the_bitset.set($value);
             )*
             _the_bitset
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! map {
+    (@single $($x:tt)*) => (());
+    (@count $($rest:expr),*) => (<[()]>::len(&[$(map!(@single $rest)),*]));
+
+    ($($key:expr => $value:expr,)+) => { map!($($key => $value),+) };
+    ($($key:expr => $value:expr),*) => {
+        {
+            let _cap = map!(@count $($key),*);
+            let mut _map = HashMap::with_capacity(_cap);
+            $(
+                let _ = _map.insert($key, $value);
+            )*
+            _map
         }
     };
 }

@@ -1,6 +1,6 @@
 
-// #[macro_use]
-// mod bitset;
+#[macro_use]
+mod bitset;
 // mod primitives;
 // mod protocol;
 // mod threadless3;

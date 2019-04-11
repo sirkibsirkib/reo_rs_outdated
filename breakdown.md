@@ -10,3 +10,5 @@ we want:
 2. crossbeam message channels as barriers
 3. pointer passing
 4. variable-size state
+
+problem: can't interact with drop functions directly. Can't trick the compiler with that stuff
