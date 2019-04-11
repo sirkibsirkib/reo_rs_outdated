@@ -11,14 +11,14 @@ use std::marker::PhantomData;
 type Ptr = *const ();
 type Id = usize;
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 enum OutMessage {
 	PutAwait{count: usize},
 	GetNotify{ptr: Ptr, notify: Id},
 	Notification{},
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 enum InMessage {
 	PutReq{id: Id, ptr: Ptr},
 	GetReq{id: Id},
@@ -128,9 +128,7 @@ pub trait TryClone: Sized {
 
 macro_rules! id_iter {
 	($($id:expr),*) => {
-        [{
-            $id, 
-        }].iter().cloned()
+        [$( $id, )*].iter().cloned()
     };
 }
 
@@ -158,9 +156,12 @@ impl Default for SyncProto {
 					action: |m, w| {
 						let putter_id = 0;
 						let ptr = *m.put.get(&putter_id).unwrap();
-						let msg = OutMessage::GetNotify{ptr, notify: putter_id};
-						for getter in id_iter![1] {
-							w.out_message(getter, msg);
+						let getter_id_iter = id_iter![1];
+						let p_msg = OutMessage::PutAwait{count: getter_id_iter.clone().count()};
+						w.out_message(putter_id, p_msg);
+						let g_msg = OutMessage::GetNotify{ptr, notify: putter_id};
+						for getter_id in getter_id_iter {
+							w.out_message(getter_id, g_msg);
 						}
 					},
 				}
@@ -182,15 +183,12 @@ impl Proto for SyncProto {
 	fn advance_state(&mut self, w: &SharedCommunications) {
 		'redo: loop {
 			for g in self.guards.iter() {
-				if !g.min_ready.is_subset(&self.ready) {
-					continue;
+				if g.min_ready.is_subset(&self.ready) {
+					if (g.constraint)(self) {
+						(g.action)(self, w);
+						continue 'redo; // re-check!
+					}
 				}
-				if !(g.constraint)(self) {
-					continue;
-				}
-				// FIRE!
-				(g.action)(self, w);
-				continue 'redo;
 			}
 			break; // no call to REDO
 		}
