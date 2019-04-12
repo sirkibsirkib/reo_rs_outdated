@@ -8,7 +8,53 @@ use crossbeam::Sender;
 use std::sync::Arc;
 use std::marker::PhantomData;
 
-type Ptr = *const ();
+// points to the putter's stack
+// TODO remove all indirection when SIZEOF<T> <= sizeof Ptr
+#[derive(Debug, Copy, Clone)]
+struct Ptr { raw: *const () }
+impl Ptr {
+	fn produce<T>(t: &T) -> Self {
+		unsafe {
+			if std::mem::size_of::<T>() <= std::mem::size_of::<Ptr>() {
+				// DIRECT VALUE
+				let mut ret: Ptr = std::mem::uninitialized();
+				let dest: *mut T = std::mem::transmute(&mut ret);
+				std::ptr::copy_nonoverlapping(t, dest, 1);
+				println!("DIRECT {:p}", ret.raw);
+				ret
+
+			} else {
+				// INDIRECT VALUE
+				std::mem::transmute(t)
+			}
+		}
+	}
+	fn consume_cloning<T: Clone>(self) -> T {
+		unsafe { 
+			let p: &T = std::mem::transmute(self);
+			p.clone()
+		}
+	}
+	fn consume_moving<T>(self) -> T {
+		unsafe {
+			if std::mem::size_of::<T>() <= std::mem::size_of::<Ptr>() {
+				let src: *const T = std::mem::transmute(&self);
+				let mut ret: T = std::mem::uninitialized();
+				std::ptr::copy_nonoverlapping(src, &mut ret, 1);
+				ret
+				// DIRECT VALUE
+			} else {
+				// INDIRECT VALUE
+				let src: *const T = std::mem::transmute(self);
+				let mut dest: T = std::mem::uninitialized();
+				std::ptr::copy_nonoverlapping(src, &mut dest, 1);
+				dest
+			}
+		}
+	}
+}
+
+// associated with putter OR getter OR mem-in OR mem-out
 type Id = usize;
 
 #[derive(Debug, Copy, Clone)]
@@ -127,8 +173,7 @@ impl<P:Proto,T:TryClone> ProtoCommonTrait<T> for ProtoCommon<P> {
 		use OutMessage::*;
 		match pc.r_out.recv().expect("LEL") {
 			GetNotify{ptr, notify} => {
-				let r: &T = unsafe{ mem::transmute(ptr) };
-				let datum = r.try_clone();
+				let datum = ptr.consume_moving();
 				self.readable.out_message(notify, OutMessage::Notification{});
 				datum
 			},
@@ -137,7 +182,7 @@ impl<P:Proto,T:TryClone> ProtoCommonTrait<T> for ProtoCommon<P> {
 	}
 	fn put(&self, pc: &PortCommon<T>, datum: T) {
 		println!("{:?} entering...", pc.id);
-		let ptr = unsafe { mem::transmute(&datum) };
+		let ptr = Ptr::produce(&datum);
 		println!("{:?} finished putting", pc.id);
 		{
 			let mut cra = self.cra.lock();
@@ -210,7 +255,7 @@ struct SyncProto {
 }
 
 impl Proto for SyncProto {
-	type Interface = (Putter<u32>, Getter<u32>);
+	type Interface = (Putter<String>, Getter<String>);
 	// type Memory = ();
 
 	fn interface_ids() -> &'static [Id] {
@@ -239,7 +284,7 @@ impl Proto for SyncProto {
 
 	fn instantiate() -> <Self as Proto>::Interface {
 		let proto = Self {
-			
+
 		};
 		let (proto_common, mut r_out) = ProtoCommon::new(proto);
 		let proto_common = Arc::new(proto_common);
@@ -276,12 +321,12 @@ pub fn test() {
 	println!("INITIALIZED");
 	crossbeam::scope(|s| {
 		s.spawn(move |_| {
-			for i in 0..1 {
-				p.put(i);
+			for i in 0..10 {
+				p.put(format!("HEY {}", i));
 			}
 		});
 		s.spawn(move |_| {
-			for i in 0..1 {
+			for i in 0..10 {
 				let i2 = g.get();
 				println!("{:?}", (i, i2));
 			}
