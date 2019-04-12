@@ -27,6 +27,7 @@ impl BitSet {
         } else  {
             min_capacity + 1
         } / 64;
+        // let chunks = min_capacity + 1
         Self { data: std::iter::repeat(0).take(chunks).collect() }
     }
     pub fn capacity(&self) -> usize {
