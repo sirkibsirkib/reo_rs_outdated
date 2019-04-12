@@ -18,15 +18,9 @@ enum OutMessage {
 	Notification{},
 }
 
-#[derive(Debug, Copy, Clone)]
-enum InMessage {
-	PutReq{id: Id, ptr: Ptr},
-	GetReq{id: Id},
-}
-
 pub trait Proto: Sized + 'static {
 	type Interface;
-	type Memory;
+	// type Memory;
 
 	fn instantiate() -> Self::Interface;
 	fn interface_ids() -> &'static [Id];
@@ -83,7 +77,6 @@ impl<P: Proto> ProtoCrAll<P> {
 
 struct ProtoReadable<P:Proto> {
 	s_out: HashMap<Id, Sender<OutMessage>>,
-	r_in: Receiver<InMessage>,
 	guards: Vec<Guard<P>>,
 }
 impl<P: Proto> ProtoReadable<P> {
@@ -97,7 +90,7 @@ struct ProtoCommon<P: Proto> {
 	cra: Mutex<ProtoCrAll<P>>,
 }
 impl<P: Proto> ProtoCommon<P> {
-	pub fn new(specific: P) -> (Self, Sender<InMessage>, HashMap<Id, Receiver<OutMessage>>) {
+	pub fn new(specific: P) -> (Self, HashMap<Id, Receiver<OutMessage>>) {
 		let ids = <P as Proto>::interface_ids();
 		let num_ids = ids.len();
 		let mut s_out = HashMap::with_capacity(num_ids);
@@ -107,13 +100,12 @@ impl<P: Proto> ProtoCommon<P> {
 			s_out.insert(id, s);
 			r_out.insert(id, r);
 		}
-		let (s_in, r_in) = crossbeam::channel::bounded(0);
 		let inner = ProtoCr { generic: ProtoCrGen::default(), specific };
 		let cra = ProtoCrAll { inner, ready: BitSet::default() };
 		let guards = <P as Proto>::build_guards();
-		let readable = ProtoReadable { s_out, r_in, guards };
+		let readable = ProtoReadable { s_out, guards };
 		let common = ProtoCommon { readable, cra: Mutex::new(cra) };
-		(common, s_in, r_out)
+		(common, r_out)
 	}
 }
 
@@ -163,9 +155,8 @@ impl<P:Proto,T:TryClone> ProtoCommonTrait<T> for ProtoCommon<P> {
 						wrong => panic!("WRONG {:?}", wrong),
 					}
 				}
-
 				mem::forget(datum);
-				// return
+				//return
 			},
 			wrong => panic!("WRONG {:?}", wrong),
 		}
@@ -177,7 +168,6 @@ unsafe impl<T> Sync for PortCommon<T> {}
 struct PortCommon<T> {
 	id: Id,
 	phantom: PhantomData<*const T>,
-	s_in: Sender<InMessage>,
 	r_out: Receiver<OutMessage>,
 	proto_common: Arc<dyn ProtoCommonTrait<T>>,
 }
@@ -216,13 +206,12 @@ macro_rules! id_iter {
 }
 
 struct SyncProto {
-	memory: <Self as Proto>::Memory,
-}
 
+}
 
 impl Proto for SyncProto {
 	type Interface = (Putter<u32>, Getter<u32>);
-	type Memory = ();
+	// type Memory = ();
 
 	fn interface_ids() -> &'static [Id] {
 		&[0, 1]
@@ -250,16 +239,15 @@ impl Proto for SyncProto {
 
 	fn instantiate() -> <Self as Proto>::Interface {
 		let proto = Self {
-			memory: (),
+			
 		};
-		let (proto_common, s_in, mut r_out) = ProtoCommon::new(proto);
+		let (proto_common, mut r_out) = ProtoCommon::new(proto);
 		let proto_common = Arc::new(proto_common);
 		let c0 = {
 			let id = 0;
 			PortCommon {
 				id,
 				r_out: r_out.remove(&id).expect("oo"),
-				s_in: s_in.clone(),
 				proto_common: proto_common.clone(),
 				phantom: PhantomData::default(),
 			}
@@ -270,20 +258,12 @@ impl Proto for SyncProto {
 			PortCommon {
 				id,
 				r_out: r_out.remove(&id).expect("www"),
-				s_in: s_in.clone(),
 				proto_common: proto_common.clone(),
 				phantom: PhantomData::default(),
 			}
 		};
 		(Putter(c0), Getter(c1))
 	}
-
-	// fn destructure(&mut self) -> (&mut BitSet, &mut HashMap<Id, Ptr>, &mut Self::Memory, &[Guard<Self>]) {
-	// 	(&mut self.ready, &mut self.put, &mut self.memory, &self.guards)
-	// }
-	// fn get_ready_bitset(&mut self) -> &mut BitSet {
-	// 	&mut self.ready
-	// }
 }
 
 impl<T: Clone> TryClone for T {
