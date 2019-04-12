@@ -1,6 +1,21 @@
+use std::fmt;
+
 #[derive(Default)]
 pub struct BitSet {
     data: Vec<usize>,
+}
+
+impl fmt::Debug for BitSet {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "bitset: [")?;
+        for b in self.data.iter().take(1) {
+            write!(f, "{:064b}", b)?;
+        }
+        for b in self.data.iter().skip(1) {
+            write!(f, ".{:064b}", b)?;
+        }
+        write!(f, "]")
+    }
 }
 impl BitSet {
     const BYTES_PER_CHUNK: usize = std::mem::size_of::<usize>();
@@ -17,7 +32,8 @@ impl BitSet {
     pub fn capacity(&self) -> usize {
         self.data.capacity() * Self::BITS_PER_CHUNK
     }
-    pub fn set(&mut self, idx: usize) {
+    pub fn set(&mut self, mut idx: usize) {
+        idx += 1;
         let mask = idx % Self::BITS_PER_CHUNK;
         let chunk_idx = idx / Self::BITS_PER_CHUNK;
         while self.data.len() <= chunk_idx {
@@ -25,7 +41,8 @@ impl BitSet {
         }
         self.data[chunk_idx] |= mask;
     }
-    pub fn test(&self, idx: usize) -> bool {
+    pub fn test(&self, mut idx: usize) -> bool {
+        idx += 1;
         let mask = idx % Self::BITS_PER_CHUNK;
         let chunk_idx = idx / Self::BITS_PER_CHUNK;
         match self.data.get(chunk_idx) {
@@ -33,7 +50,7 @@ impl BitSet {
             None => false,
         }
     }
-    pub fn is_subset(&self, other: &Self) -> bool {
+    pub fn is_superset(&self, other: &Self) -> bool {
         if self.data.len() < other.data.len() {
             return false; // INVARIANT: NO TRAILING ZERO CHUNKS
         }

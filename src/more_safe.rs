@@ -24,23 +24,42 @@ enum InMessage {
 	GetReq{id: Id},
 }
 
+
+
 pub trait Proto {
-	fn getter_ready(&mut self, id: Id);
-	fn putter_ready(&mut self, id: Id, ptr: Ptr);
-	fn get_guards(&self) -> &[Guard<Self>];
-	fn get_ready_bitset(&self) -> &BitSet;
+	type Interface;
+	type Memory;
+
+	fn initialize() -> Self::Interface;
+	fn destructure(&mut self) -> (&mut BitSet, &mut HashMap<Id, Ptr>, &mut Self::Memory, &[Guard<Self>]);
+	fn get_ready_bitset(&mut self) -> &mut BitSet;
+	fn getter_ready(&mut self, id: Id) {
+		self.get_ready_bitset().set(id);
+	}
+	fn putter_ready(&mut self, id: Id, ptr: Ptr) {
+		let (r, m, _, _) = self.destructure();
+		r.set(id);
+		m.insert(id, ptr);
+	}
+	// fn get_guards(&self) -> &[Guard<Self>];
+	// fn get_ready_bitset(&self) -> &BitSet;
 	fn advance_state(&mut self, w: &SharedCommunications) {
+		let (ready, put, memory, guards) = self.destructure();
 		'redo: loop {
-			for g in self.get_guards() {
-				if g.min_ready.is_subset(self.get_ready_bitset()) {
-					if (g.constraint)(self) {
-						(g.action)(self, w);
+			println!("READY: {:?}", ready);
+			for (i,g) in guards.iter().enumerate() {
+				if ready.is_superset(&g.min_ready) {
+					if (g.constraint)(put, memory) {
+						println!("GUARD {} FIRING", i);
+						(g.action)(put, memory, w);
+						ready.difference_with(&g.min_ready);
 						continue 'redo; // re-check!
 					}
 				}
 			}
 			break; // no call to REDO
 		}
+		println!("ADVANCE STATE OVER");
 	}
 } 
 
@@ -60,13 +79,16 @@ trait SharedTrait<T> {
 
 impl<P:Proto,T:TryClone> SharedTrait<T> for Shared<P> {
 	fn get(&self, pc: &PortCommon<T>) -> T {
-		let mut p = self.proto.lock();
+		println!("{:?} entering...", pc.id);
 		{
+			let mut p = self.proto.lock();
+			println!("{:?} got lock", pc.id);
 			p.getter_ready(pc.id);
 			p.advance_state(&self.comm);
+			println!("{:?} dropping lock", pc.id);
 		}
 		use OutMessage::*;
-		match pc.r_out.recv().unwrap() {
+		match pc.r_out.recv().expect("LEL") {
 			GetNotify{ptr, notify} => {
 				let r: &T = unsafe{ mem::transmute(ptr) };
 				let datum = r.try_clone();
@@ -77,21 +99,26 @@ impl<P:Proto,T:TryClone> SharedTrait<T> for Shared<P> {
 		}
 	}
 	fn put(&self, pc: &PortCommon<T>, datum: T) {
+		println!("{:?} entering...", pc.id);
 		let ptr = unsafe { mem::transmute(&datum) };
+		println!("{:?} finished putting", pc.id);
 		{
 			let mut p = self.proto.lock();
+			println!("{:?} got lock", pc.id);
 			p.putter_ready(pc.id, ptr);
 			p.advance_state(&self.comm);
+			println!("{:?} dropping lock", pc.id);
 		}
 		use OutMessage::*;
-		match pc.r_out.recv().unwrap() {
+		match pc.r_out.recv().expect("HUAA") {
 			PutAwait{count} => {
 				for _ in 0..count {
-					match pc.r_out.recv().unwrap() {
+					match pc.r_out.recv().expect("HEE") {
 						Notification{} => {},
 						wrong => panic!("WRONG {:?}", wrong),
 					}
 				}
+
 				mem::forget(datum);
 				// return
 			},
@@ -105,10 +132,12 @@ impl SharedCommunications {
 	}
 }
 
+unsafe impl<T> Send for PortCommon<T> {}
+unsafe impl<T> Sync for PortCommon<T> {}
 struct PortCommon<T> {
 	id: Id,
 	phantom: PhantomData<*const T>,
-	s_in: Sender<OutMessage>,
+	s_in: Sender<InMessage>,
 	r_out: Receiver<OutMessage>,
 	shared: Arc<dyn SharedTrait<T>>,
 }
@@ -126,10 +155,10 @@ impl<T> Putter<T> {
 	}
 } 
 
-pub struct Guard<P: ?Sized> {
+pub struct Guard<P: Proto + ?Sized> {
 	min_ready: BitSet,
-	constraint: fn(&P) -> bool,
-	action: fn(&mut P, &SharedCommunications),
+	constraint: fn(&mut HashMap<Id, Ptr>, & P::Memory) -> bool,
+	action: fn(&mut HashMap<Id, Ptr>, &mut P::Memory, &SharedCommunications),
 }
 
 pub trait TryClone: Sized {
@@ -152,12 +181,16 @@ struct SyncProto {
 	// checking ^
 	ready: BitSet,
 	put: HashMap<Id, Ptr>,
-	memory: (),
+	memory: <Self as Proto>::Memory,
 	guards: [Guard<Self>; 1],
 }
-impl Default for SyncProto {
-	fn default() -> Self {
-		Self {
+impl Proto for SyncProto {
+	type Interface = (Putter<u32>, Getter<u32>);
+	type Memory = ();
+
+
+	fn initialize() -> <Self as Proto>::Interface {
+		let proto = Self {
 			ready: BitSet::with_capacity(2),
 			putter_ids: bitset!{0},
 			getter_ids: bitset!{1},
@@ -166,10 +199,10 @@ impl Default for SyncProto {
 			guards: [
 				Guard {
 					min_ready: bitset!{0,1},
-					constraint: |_x| true,
-					action: |m, w| {
+					constraint: |_x, _y| true,
+					action: |p, m, w| {
 						let putter_id = 0;
-						let ptr = *m.put.get(&putter_id).unwrap();
+						let ptr = *p.get(&putter_id).expect("HARK");
 						let getter_id_iter = id_iter![1];
 						let p_msg = OutMessage::PutAwait{count: getter_id_iter.clone().count()};
 						w.out_message(putter_id, p_msg);
@@ -180,42 +213,89 @@ impl Default for SyncProto {
 					},
 				}
 			],
+		};
+		println!("{:?}", &proto.ready);
+		println!("{:?}", &proto.putter_ids);
+		println!("{:?}", &proto.getter_ids);
+
+		let (s_in, r_in) = crossbeam::channel::bounded(0);
+		let mut s_out = HashMap::default();
+		let mut r_out = HashMap::<Id, Receiver<OutMessage>>::default();
+		for id in id_iter![0,1] {
+			let (s, r) = crossbeam::channel::bounded(5);
+			s_out.insert(id, s);
+			r_out.insert(id, r);
 		}
-	}
-}
-impl Proto for SyncProto {
-	fn getter_ready(&mut self, id: Id) {
-		assert!(self.getter_ids.test(id));
-		self.ready.set(id);
-	}
-	fn putter_ready(&mut self, id: Id, ptr: Ptr) {
-		assert!(self.putter_ids.test(id));
-		if let Some(_) = self.put.insert(id, ptr) {
-			panic!("PUT ptr where there was already one");
-		}
-	}
-	fn get_guards(&self) -> &[Guard<Self>] {
-		&self.guards
-	}
-	fn get_ready_bitset(&self) -> &BitSet {
-		&self.ready
-	}
-	fn advance_state(&mut self, w: &SharedCommunications) {
-		'redo: loop {
-			for g in self.get_guards() {
-				if g.min_ready.is_subset(&self.ready) {
-					if (g.constraint)(self) {
-						(g.action)(self, w);
-						continue 'redo; // re-check!
-					}
-				}
+
+		let comm = SharedCommunications { s_out, r_in };
+		let shared = Arc::new(Shared { comm, proto: Mutex::new(proto) });
+
+		let c0 = {
+			let id = 0;
+			PortCommon {
+				id,
+				r_out: r_out.remove(&id).expect("oo"),
+				s_in: s_in.clone(),
+				shared: shared.clone(),
+				phantom: PhantomData::default(),
 			}
-			break; // no call to REDO
-		}
+		};
+
+		let c1 = {
+			let id = 1;
+			PortCommon {
+				id,
+				r_out: r_out.remove(&id).expect("www"),
+				s_in: s_in.clone(),
+				shared: shared.clone(),
+				phantom: PhantomData::default(),
+			}
+		};
+		(Putter(c0), Getter(c1))
+	}
+
+	fn destructure(&mut self) -> (&mut BitSet, &mut HashMap<Id, Ptr>, &mut Self::Memory, &[Guard<Self>]) {
+		(&mut self.ready, &mut self.put, &mut self.memory, &self.guards)
+	}
+	// fn getter_ready(&mut self, id: Id) {
+	// 	println!("GETTER {} ready", id);
+	// 	assert!(self.getter_ids.test(id));
+	// 	self.ready.set(id);
+	// }
+	// fn putter_ready(&mut self, id: Id, ptr: Ptr) {
+	// 	println!("PUTTER {} ready", id);
+	// 	assert!(!self.ready.test(id));
+	// 	self.ready.set(id);
+	// 	assert!(self.putter_ids.test(id));
+	// 	self.put.insert(id, ptr); // overwrite ptr
+	// }
+	// fn get_guards(&self) -> &[Guard<Self>] {
+	// 	&self.guards
+	// }
+	fn get_ready_bitset(&mut self) -> &mut BitSet {
+		&mut self.ready
 	}
 }
+
+impl<T: Clone> TryClone for T {
+	fn try_clone(&self) -> Self { self.clone() }
+} 
 
 #[test]
 pub fn test() {
-
+	let (p, g) = SyncProto::initialize();
+	println!("INITIALIZED");
+	crossbeam::scope(|s| {
+		s.spawn(move |_| {
+			for i in 0..10 {
+				p.put(i);
+			}
+		});
+		s.spawn(move |_| {
+			for i in 0..10 {
+				let i2 = g.get();
+				println!("{:?}", (i, i2));
+			}
+		});
+	}).expect("Fale");
 }
