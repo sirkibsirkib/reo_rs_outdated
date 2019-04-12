@@ -3,6 +3,7 @@ use std::any::Any;
 use std::marker::PhantomData;
 use crossbeam::sync::ShardedLock;
 use std::sync::Arc;
+use std::borrow::Borrow;
 
 trait Trait: Any {
 	fn say(&self);
@@ -14,14 +15,14 @@ struct Reader {
 	x: Arc<dyn Trait>,
 }
 struct Writer<T: Trait> {
-	x: Arc<dyn Trait>,
+	x: Arc<dyn Any>,
 	// type is actually Arc<ShardedLock<Box<T>>>
 	phantom: PhantomData<*const T>,
 }
 impl<T: 'static +  Trait> Writer<T> {
 	pub fn new(innermost: T) -> Self {
 		let inner: ShardedLock<Box<dyn Trait>> = ShardedLock::new(Box::new(innermost));
-		let outer: Arc<dyn Trait> = Arc::new(inner);
+		let outer: Arc<dyn Any> = Arc::new(inner);
 		Writer {
 			x: outer,
 			phantom: PhantomData::default(),
@@ -30,11 +31,14 @@ impl<T: 'static +  Trait> Writer<T> {
 	}
 
 	pub fn inner(&self) -> &Arc<dyn Trait> {
-		&self.x
+		// &self.x
+		unimplemented!()
 	}
 
 	pub fn alter<Q: 'static +  Trait>(self: Self, q: Q) -> Writer<Q> {
-		if let Some(x) = Any::downcast_ref::<ShardedLock<Box<dyn Trait>>>(&self.x) {
+
+		if let Some(x) = Any::downcast_ref::<ShardedLock<Box<dyn Trait>>>(self.x.borrow()) {
+		// if let Some(x) = self.x.downcast_ref::<ShardedLock<Box<dyn Trait>>>() { // WORKS??
 			let mut locked = x.write().expect("POIS");
 			let mut new: Box<dyn Trait> = Box::new(q);
 			let old: &mut Box<dyn Trait> = &mut locked;
@@ -72,11 +76,8 @@ impl Trait for B {
 #[test]
 fn foo() {
 	let w = Writer::new(A);
-	let r = Reader {x: w.inner().clone() };
 
-	r.x.say();
 	w.alter(B);
-	r.x.say();
 }
 
 impl<T: Trait> Trait for ShardedLock<Box<T>> {
