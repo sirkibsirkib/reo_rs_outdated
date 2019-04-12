@@ -27,10 +27,24 @@ enum InMessage {
 pub trait Proto {
 	fn getter_ready(&mut self, id: Id);
 	fn putter_ready(&mut self, id: Id, ptr: Ptr);
-	fn advance_state(&mut self, w: &SharedCommunications);
+	fn get_guards(&self) -> &[Guard<Self>];
+	fn get_ready_bitset(&self) -> &BitSet;
+	fn advance_state(&mut self, w: &SharedCommunications) {
+		'redo: loop {
+			for g in self.get_guards() {
+				if g.min_ready.is_subset(self.get_ready_bitset()) {
+					if (g.constraint)(self) {
+						(g.action)(self, w);
+						continue 'redo; // re-check!
+					}
+				}
+			}
+			break; // no call to REDO
+		}
+	}
 } 
 
-struct SharedCommunications {
+pub struct SharedCommunications {
 	s_out: HashMap<Id, Sender<OutMessage>>,
 	r_in: Receiver<InMessage>,
 }
@@ -63,7 +77,7 @@ impl<P:Proto,T:TryClone> SharedTrait<T> for Shared<P> {
 		}
 	}
 	fn put(&self, pc: &PortCommon<T>, datum: T) {
-		let ptr = mem::transmute(&datum);
+		let ptr = unsafe { mem::transmute(&datum) };
 		{
 			let mut p = self.proto.lock();
 			p.putter_ready(pc.id, ptr);
@@ -77,9 +91,9 @@ impl<P:Proto,T:TryClone> SharedTrait<T> for Shared<P> {
 						Notification{} => {},
 						wrong => panic!("WRONG {:?}", wrong),
 					}
-					mem::forget(datum);
-					// return
 				}
+				mem::forget(datum);
+				// return
 			},
 			wrong => panic!("WRONG {:?}", wrong),
 		}
@@ -112,7 +126,7 @@ impl<T> Putter<T> {
 	}
 } 
 
-struct Guard<P> {
+pub struct Guard<P: ?Sized> {
 	min_ready: BitSet,
 	constraint: fn(&P) -> bool,
 	action: fn(&mut P, &SharedCommunications),
@@ -180,9 +194,15 @@ impl Proto for SyncProto {
 			panic!("PUT ptr where there was already one");
 		}
 	}
+	fn get_guards(&self) -> &[Guard<Self>] {
+		&self.guards
+	}
+	fn get_ready_bitset(&self) -> &BitSet {
+		&self.ready
+	}
 	fn advance_state(&mut self, w: &SharedCommunications) {
 		'redo: loop {
-			for g in self.guards.iter() {
+			for g in self.get_guards() {
 				if g.min_ready.is_subset(&self.ready) {
 					if (g.constraint)(self) {
 						(g.action)(self, w);
