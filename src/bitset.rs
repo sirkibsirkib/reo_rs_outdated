@@ -24,11 +24,13 @@ impl BitSet {
     pub fn with_capacity(min_capacity: usize) -> Self {
         let chunks = if min_capacity.is_power_of_two() {
             min_capacity
-        } else  {
+        } else {
             min_capacity + 1
         } / 64;
         // let chunks = min_capacity + 1
-        Self { data: std::iter::repeat(0).take(chunks).collect() }
+        Self {
+            data: std::iter::repeat(0).take(chunks).collect(),
+        }
     }
     pub fn capacity(&self) -> usize {
         self.data.capacity() * Self::BITS_PER_CHUNK
