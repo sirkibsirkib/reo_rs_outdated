@@ -8,11 +8,11 @@ pub struct BitSet {
 impl fmt::Debug for BitSet {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "bitset: [")?;
-        for b in self.data.iter().take(1) {
-            write!(f, "{:064b}", b)?;
+        for b in self.data.iter().rev().take(1) {
+            write!(f, "{:b}", b)?;
         }
-        for b in self.data.iter().skip(1) {
-            write!(f, ".{:064b}", b)?;
+        for b in self.data.iter().rev().skip(1) {
+            write!(f, ".{:b}", b)?;
         }
         write!(f, "]")
     }
