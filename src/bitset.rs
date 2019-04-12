@@ -65,7 +65,7 @@ impl BitSet {
     }
     pub fn difference_with(&mut self, other: &Self) {
         for (s, &o) in self.data.iter_mut().zip(other.data.iter()) {
-            *s &= o
+            *s &= !o
         }
         // restore invariant
         while let Some(x) = self.data.pop() {

@@ -41,8 +41,6 @@ pub trait Proto {
 		r.set(id);
 		m.insert(id, ptr);
 	}
-	// fn get_guards(&self) -> &[Guard<Self>];
-	// fn get_ready_bitset(&self) -> &BitSet;
 	fn advance_state(&mut self, w: &SharedCommunications) {
 		let (ready, put, memory, guards) = self.destructure();
 		'redo: loop {
@@ -50,9 +48,12 @@ pub trait Proto {
 			for (i,g) in guards.iter().enumerate() {
 				if ready.is_superset(&g.min_ready) {
 					if (g.constraint)(put, memory) {
-						println!("GUARD {} FIRING", i);
+						println!("GUARD {} FIRING START", i);
 						(g.action)(put, memory, w);
+						println!("GUARD {} FIRING END", i);
+						println!("BEFORE DIFFERENCE {:?} and {:?}", ready, &g.min_ready);
 						ready.difference_with(&g.min_ready);
+						println!("AFTER  DIFFERENCE {:?} and {:?}", ready, &g.min_ready);
 						continue 'redo; // re-check!
 					}
 				}
@@ -200,7 +201,7 @@ impl Proto for SyncProto {
 				Guard {
 					min_ready: bitset!{0,1},
 					constraint: |_x, _y| true,
-					action: |p, m, w| {
+					action: |p, _m, w| {
 						let putter_id = 0;
 						let ptr = *p.get(&putter_id).expect("HARK");
 						let getter_id_iter = id_iter![1];
@@ -257,21 +258,6 @@ impl Proto for SyncProto {
 	fn destructure(&mut self) -> (&mut BitSet, &mut HashMap<Id, Ptr>, &mut Self::Memory, &[Guard<Self>]) {
 		(&mut self.ready, &mut self.put, &mut self.memory, &self.guards)
 	}
-	// fn getter_ready(&mut self, id: Id) {
-	// 	println!("GETTER {} ready", id);
-	// 	assert!(self.getter_ids.test(id));
-	// 	self.ready.set(id);
-	// }
-	// fn putter_ready(&mut self, id: Id, ptr: Ptr) {
-	// 	println!("PUTTER {} ready", id);
-	// 	assert!(!self.ready.test(id));
-	// 	self.ready.set(id);
-	// 	assert!(self.putter_ids.test(id));
-	// 	self.put.insert(id, ptr); // overwrite ptr
-	// }
-	// fn get_guards(&self) -> &[Guard<Self>] {
-	// 	&self.guards
-	// }
 	fn get_ready_bitset(&mut self) -> &mut BitSet {
 		&mut self.ready
 	}
@@ -287,12 +273,12 @@ pub fn test() {
 	println!("INITIALIZED");
 	crossbeam::scope(|s| {
 		s.spawn(move |_| {
-			for i in 0..10 {
+			for i in 0..1 {
 				p.put(i);
 			}
 		});
 		s.spawn(move |_| {
-			for i in 0..10 {
+			for i in 0..1 {
 				let i2 = g.get();
 				println!("{:?}", (i, i2));
 			}
