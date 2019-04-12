@@ -1,3 +1,4 @@
+use crossbeam::sync::ShardedLock;
 use crate::bitset::BitSet;
 use crossbeam::Receiver;
 use crossbeam::Sender;
@@ -184,6 +185,15 @@ trait ProtoCommonTrait<T> {
     fn put(&self, pc: &PortCommon<T>, datum: T);
 }
 
+impl<S,T> ProtoCommonTrait<T> for ShardedLock<S> where S: ProtoCommonTrait<T> {
+    fn get(&self, pc: &PortCommon<T>) -> T {
+        self.read().expect("POISONED").get(pc)
+    }
+    fn put(&self, pc: &PortCommon<T>, datum: T) {
+        self.read().expect("POISONED").put(pc, datum)
+    }
+}
+
 impl<P: Proto, T: TryClone> ProtoCommonTrait<T> for ProtoCommon<P> {
     fn get(&self, pc: &PortCommon<T>) -> T {
         // println!("{:?} entering...", pc.id);
@@ -266,6 +276,23 @@ pub trait TryClone: Sized {
         panic!("Don't know how to clone this!")
     }
 }
+
+// struct ProtoMutator<P: Proto> {
+//     l: ShardedLock<ProtoCommon<P>>,
+// }
+// impl<P: Proto> ProtoMutator<P> {
+//     pub fn mutate<F,Q>(self, change_fn: F) -> ProtoMutator<Q>
+//     where
+//         F: Fn(ProtoCommon<P>) -> ProtoCommon<Q>,
+//         Q: Proto {
+//         let old_common: ProtoCommon<P> = self.l.into_inner().expect("POIS");
+//         let new_common: ProtoCommon<Q> = change_fn(old_common);
+
+//         ProtoMutator {
+//             l: new_common,
+//         }
+//     }
+// }
 
 ////////////// EXAMPLE concrete ///////////////
 
