@@ -5,7 +5,7 @@ use crossbeam::sync::ShardedLock;
 use std::sync::Arc;
 use std::borrow::Borrow;
 
-trait Trait: Any {
+trait Trait {
 	fn say(&self);
 }
 
@@ -16,14 +16,14 @@ struct Reader {
 	x: Arc<dyn Trait>,
 }
 struct Writer<T: Trait> {
-	x: Arc<dyn Any>,
+	x: Arc<dyn Trait>,
 	// type is actually Arc<ShardedLock<Box<T>>>
 	phantom: PhantomData<*const T>,
 }
 impl<T: 'static +  Trait> Writer<T> {
 	pub fn new(innermost: T) -> Self {
 		let inner: ShardedLock<Box<dyn Trait>> = ShardedLock::new(Box::new(innermost));
-		let outer: Arc<dyn Any> = Arc::new(inner);
+		let outer: Arc<dyn Trait> = Arc::new(inner);
 		Writer {
 			x: outer,
 			phantom: PhantomData::default(),
@@ -37,24 +37,38 @@ impl<T: 'static +  Trait> Writer<T> {
 	}
 
 	pub fn alter<Q: 'static +  Trait>(self: Self, q: Q) -> Writer<Q> {
-		let t = Any::downcast_ref::<ShardedLock<Box<dyn Trait>>>;
-		t == ();
-		// l
-		let y = self.x.borrow();
-		if let Some(x) = Any::downcast_ref::<ShardedLock<Box<dyn Trait>>>(y) {
-		// if let Some(x) = self.x.downcast_ref::<ShardedLock<Box<dyn Trait>>>() { // WORKS??
-			let mut locked = x.write().expect("POIS");
-			let mut new: Box<dyn Trait> = Box::new(q);
-			let old: &mut Box<dyn Trait> = &mut locked;
-			let _prev = std::mem::swap(old, &mut new);
-			//prev dropped
 
-		} else {
-			panic!("DIDNT WORK")
-		}
 		unsafe {
-			std::mem::transmute(self)
+			let y = self.x.borrow();
+			let x = &*(y as *const dyn Trait as *const ShardedLock<Box<dyn Trait>>);
+			let mut z = x.write().expect("HUAEY");
+			let new: Box<dyn Trait> = Box::new(q);
+			z.say();
+			let prev = std::mem::replace(&mut *z, new);
+			// *z = new;
+			z.say();
+			// x == ();
 		}
+
+		unimplemented!()
+		// let t = Any::downcast_ref::<ShardedLock<Box<dyn Trait>>>;
+		// t == ();
+		// l
+		// let y = self.x.borrow();
+		// if let Some(x) = Any::downcast_ref::<ShardedLock<Box<dyn Trait>>>(y) {
+		// if let Some(x) = self.x.downcast_ref::<ShardedLock<Box<dyn Trait>>>() { // WORKS??
+		// 	let mut locked = x.write().expect("POIS");
+		// 	let mut new: Box<dyn Trait> = Box::new(q);
+		// 	let old: &mut Box<dyn Trait> = &mut locked;
+		// 	let _prev = std::mem::swap(old, &mut new);
+		// 	//prev dropped
+
+		// } else {
+		// 	panic!("DIDNT WORK")
+		// }
+		// unsafe {
+		// 	std::mem::transmute(self)
+		// }
 	}
 }
 
