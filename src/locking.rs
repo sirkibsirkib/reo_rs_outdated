@@ -69,22 +69,22 @@ impl Trait for ShardedLock<Box<dyn Trait>> {
 		self.read().unwrap().say()
 	}
 }
-struct A;
+struct A(u32);
 impl Trait for A {
 	fn say(&self) {
-		println!("A");
+		println!("A:{}", self.0);
 	}
 }
-struct B;
+struct B(&'static str);
 impl Trait for B {
 	fn say(&self) {
-		println!("B");
+		println!("B:{}", self.0);
 	}
 }
 
 #[test]
 fn foo() {
-	let w = Writer::new(Box::new(A));
+	let w = Writer::new(Box::new(A(4)));
 	let r = Reader{x: w.inner().clone()};
 
 	crossbeam::scope(|s| {
@@ -94,7 +94,7 @@ fn foo() {
 		});
 		s.spawn(move |_| {
 			std::thread::sleep(std::time::Duration::from_millis(3000));
-			w.alter(|_| Box::new(B));
+			w.alter(|_| Box::new(B("BATCH")));
 		});
 	}).unwrap();
 }
