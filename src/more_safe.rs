@@ -1,12 +1,9 @@
-use crossbeam::sync::ShardedLock;
+
+use crossbeam::{Receiver, Sender, sync::ShardedLock};
+use std::{mem, sync::Arc, marker::PhantomData};
 use crate::bitset::BitSet;
-use crossbeam::Receiver;
-use crossbeam::Sender;
 use hashbrown::HashMap;
 use parking_lot::Mutex;
-use std::marker::PhantomData;
-use std::mem;
-use std::sync::Arc;
 
 /*
 Represents a putters PUT value in no more than |usize| bytes (pointer size).
@@ -78,6 +75,7 @@ enum OutMessage {
     Notification {},
 }
 
+// the trait that constrains the properties of specific protocol structures
 pub trait Proto: Sized + 'static {
     type Interface;
     fn instantiate() -> Self::Interface;
@@ -85,17 +83,20 @@ pub trait Proto: Sized + 'static {
     fn build_guards() -> Vec<Guard<Self>>;
 }
 
+// this is NOT generic over P, but is passed to the protocol
 #[derive(Debug, Default)]
 pub struct ProtoCrGen {
     put: HashMap<Id, Ptr>,
 }
 
+// part of the Cr that is provided as argument to the Proto-trait implementor
 #[derive(Debug)]
 pub struct ProtoCr<P: Proto> {
     generic: ProtoCrGen,
     specific: P,
 }
 
+// writable component: locking needed
 #[derive(Debug)]
 pub struct ProtoCrAll<P: Proto> {
     ready: BitSet,
@@ -131,8 +132,7 @@ impl<P: Proto> ProtoCrAll<P> {
     }
 }
 
-/// above this line is &mut (inside the lock)
-
+// read-only component: no locking needed
 struct ProtoReadable<P: Proto> {
     s_out: HashMap<Id, Sender<OutMessage>>,
     guards: Vec<Guard<P>>,
@@ -147,9 +147,10 @@ impl<P: Proto> ProtoReadable<P> {
     }
 }
 
+// the "shared" concrete protocol object 
 struct ProtoCommon<P: Proto> {
-    readable: ProtoReadable<P>,
-    cra: Mutex<ProtoCrAll<P>>,
+    readable: ProtoReadable<P>, 
+    cra: Mutex<ProtoCrAll<P>>, 
 }
 impl<P: Proto> ProtoCommon<P> {
     pub fn new(specific: P) -> (Self, HashMap<Id, Receiver<OutMessage>>) {
@@ -183,15 +184,6 @@ impl<P: Proto> ProtoCommon<P> {
 trait ProtoCommonTrait<T> {
     fn get(&self, pc: &PortCommon<T>) -> T;
     fn put(&self, pc: &PortCommon<T>, datum: T);
-}
-
-impl<S,T> ProtoCommonTrait<T> for ShardedLock<S> where S: ProtoCommonTrait<T> {
-    fn get(&self, pc: &PortCommon<T>) -> T {
-        self.read().expect("POISONED").get(pc)
-    }
-    fn put(&self, pc: &PortCommon<T>, datum: T) {
-        self.read().expect("POISONED").put(pc, datum)
-    }
 }
 
 impl<P: Proto, T: TryClone> ProtoCommonTrait<T> for ProtoCommon<P> {
@@ -243,22 +235,24 @@ impl<P: Proto, T: TryClone> ProtoCommonTrait<T> for ProtoCommon<P> {
     }
 }
 
-unsafe impl<T> Send for PortCommon<T> {}
-unsafe impl<T> Sync for PortCommon<T> {}
+// common to Putter and to Getter to minimize boilerplate
 struct PortCommon<T> {
     id: Id,
     phantom: PhantomData<*const T>,
     r_out: Receiver<OutMessage>,
     proto_common: Arc<dyn ProtoCommonTrait<T>>,
 }
+unsafe impl<T> Send for PortCommon<T> {}
+unsafe impl<T> Sync for PortCommon<T> {}
 
-struct Getter<T>(PortCommon<T>);
+// get and put invocations cross the dynamic dispatch barrier here
+pub struct Getter<T>(PortCommon<T>);
 impl<T> Getter<T> {
     fn get(&self) -> T {
         self.0.proto_common.get(&self.0)
     }
 }
-struct Putter<T>(PortCommon<T>);
+pub struct Putter<T>(PortCommon<T>);
 impl<T> Putter<T> {
     fn put(&self, datum: T) {
         self.0.proto_common.put(&self.0, datum)
@@ -277,22 +271,6 @@ pub trait TryClone: Sized {
     }
 }
 
-// struct ProtoMutator<P: Proto> {
-//     l: ShardedLock<ProtoCommon<P>>,
-// }
-// impl<P: Proto> ProtoMutator<P> {
-//     pub fn mutate<F,Q>(self, change_fn: F) -> ProtoMutator<Q>
-//     where
-//         F: Fn(ProtoCommon<P>) -> ProtoCommon<Q>,
-//         Q: Proto {
-//         let old_common: ProtoCommon<P> = self.l.into_inner().expect("POIS");
-//         let new_common: ProtoCommon<Q> = change_fn(old_common);
-
-//         ProtoMutator {
-//             l: new_common,
-//         }
-//     }
-// }
 
 ////////////// EXAMPLE concrete ///////////////
 
@@ -312,6 +290,7 @@ macro_rules! finalize_ports {
  	}
 }
 
+// concrete proto. implements Proto trait
 struct SyncProto {}
 impl Proto for SyncProto {
     type Interface = (Putter<String>, Getter<String>);
@@ -381,3 +360,16 @@ pub fn test() {
     })
     .expect("Fail");
 }
+
+
+//////////////////////////////
+
+impl<S,T> ProtoCommonTrait<T> for ShardedLock<S> where S: ProtoCommonTrait<T> {
+    fn get(&self, pc: &PortCommon<T>) -> T {
+        self.read().expect("POISONED").get(pc)
+    }
+    fn put(&self, pc: &PortCommon<T>, datum: T) {
+        self.read().expect("POISONED").put(pc, datum)
+    }
+}
+

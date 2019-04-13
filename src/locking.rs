@@ -9,6 +9,7 @@ trait Trait: Any {
 	fn say(&self);
 }
 
+
 // trait AnyTrait: Any + Trait {}
 
 struct Reader {
@@ -36,8 +37,11 @@ impl<T: 'static +  Trait> Writer<T> {
 	}
 
 	pub fn alter<Q: 'static +  Trait>(self: Self, q: Q) -> Writer<Q> {
-
-		if let Some(x) = Any::downcast_ref::<ShardedLock<Box<dyn Trait>>>(self.x.borrow()) {
+		let t = Any::downcast_ref::<ShardedLock<Box<dyn Trait>>>;
+		t == ();
+		// l
+		let y = self.x.borrow();
+		if let Some(x) = Any::downcast_ref::<ShardedLock<Box<dyn Trait>>>(y) {
 		// if let Some(x) = self.x.downcast_ref::<ShardedLock<Box<dyn Trait>>>() { // WORKS??
 			let mut locked = x.write().expect("POIS");
 			let mut new: Box<dyn Trait> = Box::new(q);
