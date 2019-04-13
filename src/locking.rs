@@ -43,31 +43,31 @@ impl<T: 'static +  Trait> Writer<T> {
 	pub fn hotswap<Q: 'static +  Trait, F>(self: Self, swap_fn: F) -> Writer<Q>
 	where F: Fn(Box<T>) -> Box<Q> {
 		use std::mem::{transmute, replace};
-		unsafe {
-			// 1. downcast the Arc<dyn Trait> to the shardedlock you know it to be
-			let lockref = self.x.borrow();
-			let concrete_lockref = &*(lockref as *const dyn Trait as *const ShardedLock<Box<dyn Trait>>);
-			// 2. lock it using a WRITER lock
-			let mut locked = concrete_lockref.write().expect("WRITER POISONED");
-			let trait_obj_here: &mut Box<dyn Trait> = &mut locked;
-			// 3. use mem::replace to remove the current trait object and leave a
-			//    temp Trait object in place (in case the closure panics).
-			struct Temp;
-			impl Trait for Temp {
-				fn say(&self){}
-			}
-			let temp_trait_obj = Box::new(Temp) as Box<dyn Trait>;
-			let old_trait_obj: Box<dyn Trait> = replace(trait_obj_here, temp_trait_obj);
-			// 4. extract Box<T:Trait> from Box<dyn Trait>. vptr is static so safe to discard
-			let (boxt, _vtbl): (Box<T>, *const ()) = transmute(old_trait_obj);
-			
-			// 5. call the user-provided swap fn to get the new Box<Q>
-			let boxq = swap_fn(boxt);
-			let _temp_box = replace(trait_obj_here, boxq as Box<dyn Trait>);
-			// 6. drop temp box
-			// 7. transmute to Memory<Q> (only 0-byte PhantomData differs)
-			transmute(self)
+		// 1. downcast the Arc<dyn Trait> to the shardedlock you know it to be
+		let lockref = self.x.borrow();
+		let concrete_lockref = unsafe {
+			&*(lockref as *const dyn Trait as *const ShardedLock<Box<dyn Trait>>)
+		};
+		// 2. lock it using a WRITER lock
+		let mut locked = concrete_lockref.write().expect("WRITER POISONED");
+		let trait_obj_here: &mut Box<dyn Trait> = &mut locked;
+		// 3. use mem::replace to remove the current trait object and leave a
+		//    temp Trait object in place (in case the closure panics).
+		struct Temp;
+		impl Trait for Temp {
+			fn say(&self){}
 		}
+		let temp_trait_obj = Box::new(Temp) as Box<dyn Trait>;
+		let old_trait_obj: Box<dyn Trait> = replace(trait_obj_here, temp_trait_obj);
+		// 4. extract Box<T:Trait> from Box<dyn Trait>. vptr is static so safe to discard
+		let (boxt, _vtbl): (Box<T>, *const ()) = unsafe { transmute(old_trait_obj) };
+		
+		// 5. call the user-provided swap fn to get the new Box<Q>
+		let boxq = swap_fn(boxt);
+		let _temp_box = replace(trait_obj_here, boxq as Box<dyn Trait>);
+		// 6. drop temp box
+		// 7. transmute to Memory<Q> (only 0-byte PhantomData differs)
+		unsafe { transmute(self) }
 	}
 }
 
