@@ -1,9 +1,8 @@
-
-use crossbeam::{Receiver, Sender, sync::ShardedLock};
-use std::{mem, sync::Arc, marker::PhantomData};
 use crate::bitset::BitSet;
+use crossbeam::{sync::ShardedLock, Receiver, Sender};
 use hashbrown::HashMap;
 use parking_lot::Mutex;
+use std::{marker::PhantomData, mem, sync::Arc};
 
 /*
 Represents a putters PUT value in no more than |usize| bytes (pointer size).
@@ -147,10 +146,10 @@ impl<P: Proto> ProtoReadable<P> {
     }
 }
 
-// the "shared" concrete protocol object 
+// the "shared" concrete protocol object
 struct ProtoCommon<P: Proto> {
-    readable: ProtoReadable<P>, 
-    cra: Mutex<ProtoCrAll<P>>, 
+    readable: ProtoReadable<P>,
+    cra: Mutex<ProtoCrAll<P>>,
 }
 impl<P: Proto> ProtoCommon<P> {
     pub fn new(specific: P) -> (Self, HashMap<Id, Receiver<OutMessage>>) {
@@ -271,7 +270,6 @@ pub trait TryClone: Sized {
     }
 }
 
-
 ////////////// EXAMPLE concrete ///////////////
 
 macro_rules! id_iter {
@@ -361,10 +359,12 @@ pub fn test() {
     .expect("Fail");
 }
 
-
 //////////////////////////////
 
-impl<S,T> ProtoCommonTrait<T> for ShardedLock<S> where S: ProtoCommonTrait<T> {
+impl<S, T> ProtoCommonTrait<T> for ShardedLock<S>
+where
+    S: ProtoCommonTrait<T>,
+{
     fn get(&self, pc: &PortCommon<T>) -> T {
         self.read().expect("POISONED").get(pc)
     }
@@ -372,4 +372,3 @@ impl<S,T> ProtoCommonTrait<T> for ShardedLock<S> where S: ProtoCommonTrait<T> {
         self.read().expect("POISONED").put(pc, datum)
     }
 }
-
