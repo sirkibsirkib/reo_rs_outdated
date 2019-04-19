@@ -76,9 +76,10 @@ next instead.
 
 ## algorithm
 take a set of guarded commands ("rules") in the form []=>[].
-1. 
+
 
 ---------------- EXPERIMENTATION ----------
+
 ```
 notation:
 {m}	m must be SOME
@@ -119,3 +120,35 @@ start state {~m}
 (~m) ---1+•--> (m)
      <---2&•---
 ```
+
+# IDEA
+RBA and CA are two extremes on a continuum between runtime and compile time information.
+RBAs dont implicitly track the progress through the automaton, so they remember 
+changes by manipulating logical variables (V and !V are interpreted
+as memory cell V is full and empty respectively).
+full rule-based form is therefore a degenerate automaton with 1 state. guards check states of memory cells.
+one could freely change between RBA and CA by representing memory cells
+in state space or vice versa. state-space requires 2^N states, memory
+cells require N spaces.
+we start with RBA. first we project onto the local port set. next, we perform
+hiding. let 
+while ??:
+1. select memory variable M (pick one we DO want to distinguish)
+2. partition transitions on every state X into new states {X, X'} where
+	all with M go to X and all with !M go X'.
+	Repeat as desired.
+3. hide all remaining memory variables and coalesce with + operators.
+4. bob's your uncle.
+
+## Two representations
+### ONE
+Guard = (BeSub)
+Ready set has `P + (M * 2)` bits
+memory cells have a cell for their COMPLEMENT
+>>> take care: always UNFLIP a memory bit when you FLIP the other 
+
+### TWO
+Guard = (Mask, BeMatch)
+Ready set has `P + M` bits
+>>> take care: don't accidentally express "port must NOT be ready".
+Instead of subsets, guard must be an exact match, and irrelevant bits are masked to 0 first.
