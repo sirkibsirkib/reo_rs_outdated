@@ -12,8 +12,8 @@ STATE tokens represent being in a state of the automaton and not yet knowing
 which branch will be taken. the user must invoke ADVANCE to collapse the sum type into
 a concrete COUPON<_,P,S>. This coupon is only usable on port P (for Get or Put)
 to generate the next state token State<_,S>.
-
 */
+use std::fmt::Debug;
 use std::marker::PhantomData;
 
 /*
@@ -42,6 +42,7 @@ impl<E, S> State<E, S> {
     }
 }
 
+// natural numbers as represented at compile-time
 mod nums {
     pub struct N0;
     pub struct N1;
@@ -50,16 +51,22 @@ mod nums {
 }
 use nums::*;
 
-pub trait RawPort<D> {
-    fn put(&mut self, datum: D);
+
+struct Putter<D: Debug> {
+    phantom: PhantomData<D>,
+}
+impl<D: Debug> Putter<D> {
+    pub fn put(&mut self, datum: D) {
+        println!("PUT {:?}", datum);
+    }
 }
 
-struct Port<E, P, D> {
-    raw_port: Box<dyn RawPort<D>>,
+struct Port<E, P, D: Debug> {
+    raw_port: Putter<D>,
     phantom: PhantomData<(E, P, D)>,
 }
-impl<E, P, D> Port<E, P, D> {
-    fn new(raw_port: Box<dyn RawPort<D>>) -> Self {
+impl<E, P, D: Debug> Port<E, P, D> {
+    pub(crate) fn new(raw_port: Putter<D>) -> Self {
         Self {
             phantom: PhantomData::default(),
             raw_port,
@@ -68,6 +75,7 @@ impl<E, P, D> Port<E, P, D> {
     pub fn put<N>(&mut self, datum: D, coupon: Coupon<E, P, N>) -> State<E, N> {
         let _ = datum;
         let _ = coupon;
+        self.raw_port.put(datum);
         State::fresh()
     }
 }
@@ -81,14 +89,6 @@ pub struct Env {
     port1: Port<Self, N1, u32>,
 }
 
-pub fn main(a: Box<dyn RawPort<u32>>, b: Box<dyn RawPort<u32>>) {
-    let env = Env {
-        port0: Port::new(a),
-        port1: Port::new(b),
-    };
-    // Reo-stitcher will only accept an "atomic function" with the expected signature
-    atomic(env, State::fresh());
-}
 
 pub trait HasBranches {
     type Branches: From<RuntimeDeliberation>;
@@ -96,19 +96,34 @@ pub trait HasBranches {
 
 pub trait Deliberator {
     fn deliberate(&mut self) -> RuntimeDeliberation;
-} 
+}
 
-impl<E, N> State<E, N> where State<E, N>: HasBranches {
-    fn advance<D: Deliberator,R>(
+impl<E, N> State<E, N>
+where
+    State<E, N>: HasBranches,
+{
+    fn advance<D: Deliberator, R>(
         self,
         deliberator: &mut D,
-        handler: impl FnOnce(&mut D, <State<E, N> as HasBranches>::Branches) -> State<E, R>,
-    ) -> State<E, R> {
-        let deliberation = deliberator.deliberate();
+        handler: impl FnOnce(&mut D, <State<E, N> as HasBranches>::Branches) -> R,
+    ) -> R {
+        let deliberation = if std::mem::size_of::<<State<E, N> as HasBranches>::Branches>() == 0 {
+            // branch with no data (0 or 1 variants)
+            unsafe {std::mem::uninitialized()}
+        } else {
+            // branch with 2+ variants. ask the deliberator
+            deliberator.deliberate()
+        };
         let opt = deliberation.into();
         handler(deliberator, opt)
     }
 }
+
+pub struct RuntimeDeliberation {
+    port: u32,
+    new_state: u32,
+}
+
 
 // this is the part that Reo must generate for the concrete automaton
 impl HasBranches for State<Env, N0> {
@@ -125,8 +140,8 @@ impl From<RuntimeDeliberation> for Opts0 {
     fn from(r: RuntimeDeliberation) -> Self {
         use Opts0::*;
         match [r.port, r.new_state] {
-            [0,1] => P0S1(Coupon::fresh()),
-            [1,0] => P1S0(Coupon::fresh()),
+            [0, 1] => P0S1(Coupon::fresh()),
+            [1, 0] => P1S0(Coupon::fresh()),
             _ => panic!("BAD DELIBERATION"),
         }
     }
@@ -139,35 +154,45 @@ impl From<RuntimeDeliberation> for Opts1 {
     fn from(r: RuntimeDeliberation) -> Self {
         use Opts1::*;
         match [r.port, r.new_state] {
-            [1,0] => P1S0(Coupon::fresh()),
+            [1, 0] => P1S0(Coupon::fresh()),
             _ => panic!("BAD DELIBERATION"),
         }
     }
 }
 
-pub struct RuntimeDeliberation {
-    port: u32,
-    new_state: u32,
-}
-
 impl Deliberator for Env {
     fn deliberate(&mut self) -> RuntimeDeliberation {
-        unimplemented!()
+        println!("DELIBERATE!");
+        RuntimeDeliberation {
+            port: 0,
+            new_state: 1,
+        }
     }
+}
+
+
+#[test]
+fn tryit() {
+    let env = Env {
+        port0: Port::new(Putter{phantom: PhantomData::default()}),
+        port1: Port::new(Putter{phantom: PhantomData::default()}),
+    };
+    atomic(env, State::fresh())
 }
 
 // This is the part that the user must implement
 pub fn atomic(mut env: Env, mut s0: State<Env, N0>) -> ! {
     let env = &mut env;
-    loop {
+    for i in 0.. {
         s0 = s0.advance(env, |env, opts| match opts {
             Opts0::P0S1(c) => {
-                let s1 = env.port0.put(5, c);
+                let s1 = env.port0.put(i, c);
                 s1.advance(env, |env, opts| match opts {
-                    Opts1::P1S0(c) => env.port1.put(5, c),
+                    Opts1::P1S0(c) => env.port1.put(2, c),
                 })
             }
-            Opts0::P1S0(c) => env.port1.put(5, c),
+            Opts0::P1S0(c) => env.port1.put(3, c),
         })
     }
+    unreachable!()
 }
