@@ -22,26 +22,27 @@ use std::marker::PhantomData;
 Coupon<E,P> is a token consumed by port P to return Receipt<E> where E is
 the environment of P.
 */
-pub struct Coupon<E,P> {
-    phantom: PhantomData<(E,P)>,
+pub struct Coupon<E,P,N> {
+    phantom: PhantomData<(E,P,N)>,
 }
-impl<E,P> Coupon<E,P> {
+impl<E,P,N> Coupon<E,P,N> {
     pub(crate) fn fresh() -> Self {
         Self { phantom: PhantomData::default() }
     }
 }
 
+
 /*
 Receipt<E> is provided by some port with label P when provided Coupon<E,P>.
 */
-pub struct Receipt<E> {
-    phantom: PhantomData<E>,
-}
-impl<E> Receipt<E> {
-    pub(crate) fn fresh() -> Self {
-        Self { phantom: PhantomData::default() }
-    }
-}
+// pub struct Receipt<E> {
+//     phantom: PhantomData<E>,
+// }
+// impl<E> Receipt<E> {
+//     pub(crate) fn fresh() -> Self {
+//         Self { phantom: PhantomData::default() }
+//     }
+// }
 
 
 pub struct State<E,S> {
@@ -80,27 +81,37 @@ impl<E,P,D> Port<E,P,D> {
             phantom: PhantomData::default(), raw_port,
         }
     }
-    pub fn put(&mut self, datum: D, coupon: Coupon<E,P>) -> Receipt<E> {
+    pub fn put<N>(&mut self, datum: D, coupon: Coupon<E,P,N>) -> State<E,N> {
         let _ = datum;
         let _ = coupon;
-        Receipt::fresh()
+        State::fresh()
     }
 }
 
-mod opts {
-    use super::{Coupon, Receipt, nums::*};
-    pub enum S0i<E> {
-        Port0(Coupon<E, N0>),
-        Idle(Receipt<E>),
-    }
-    pub enum S1<E> {
-        Port1(Coupon<E, N1>),
-    }
+// mod opts {
+//     use super::{Coupon, nums::*};
+//     pub enum S0i<E> {
+//         Port0(Coupon<E, N0>, State<E, >),
+//         Port1(Receipt<E>),
+//     }
+//     pub enum S1<E> {
+//         Port1(Coupon<E, N1>),
+//     }
+// }
+
+
+pub enum Opts0 {
+    P0S1(Coupon<Env, N0, N1>),
+    P1S0(Coupon<Env, N1, N0>),
+}
+
+pub enum Opts1 {
+    P1S0(Coupon<Env, N1, N0>),
 }
 
 // State "U" may require the atomic to do either {A, nothing}
 // this structure gives you a coupon for precisely one action
-pub type Vopts<E> = opts::S1<E>;
+// pub type Vopts<E> = opts::S1<E>;
 
 pub struct Env {
     port0: Port<Self, N0, u32>,
@@ -108,19 +119,17 @@ pub struct Env {
 }
 
 impl Env {
-    fn advance_0(&mut self, state: State<Self,N0>, handler: impl FnOnce(&mut Self, opts::S0i<Self>) -> Receipt<Self>) -> State<Self,N1> {
+    fn advance_0<R>(&mut self, state: State<Self,N0>, handler: impl FnOnce(&mut Self, Opts0) -> R) -> R {
         let _ = state;
         let coupon = Coupon::fresh();
-        let opts = opts::S0i::Port0(coupon);
-        let _done = handler(self, opts);
-        State::fresh()
+        let opts = Opts0::P0S1(coupon);
+        handler(self, opts)
     }
-    fn advance_1(&mut self, state: State<Self,N1>, handler: impl FnOnce(&mut Self, opts::S1<Self>) -> Receipt<Self>) -> State<Self,N0> {
+    fn advance_1<R>(&mut self, state: State<Self,N1>, handler: impl FnOnce(&mut Self, Opts1) -> R) -> R {
         let _ = state;
         let coupon = Coupon::fresh();
-        let opts = opts::S1::Port1(coupon);
-        let _done = handler(self, opts);
-        State::fresh()
+        let opts = Opts1::P1S0(coupon);
+        handler(self, opts)
     }
 }
 
@@ -133,19 +142,40 @@ pub fn main(a: Box<dyn RawPort<u32>>, b: Box<dyn RawPort<u32>>) {
     atomic(env, State::fresh());
 }
 
+pub trait HasBranches {
+    type Branches;
+}
+
+impl<E,N> State<E,N> where State<E,N>: HasBranches {
+    fn advance<R>(
+        self,
+        handler: impl FnOnce(<State<E,N> as HasBranches>::Branches) -> R
+    ) -> R {
+        let opts = unsafe { std::mem::uninitialized() };
+        handler(opts)
+    }
+}
+impl HasBranches for State<Env, N0> {
+    type Branches = Opts0;
+}
+impl HasBranches for State<Env, N1> {
+    type Branches = Opts1;
+}
+
 
 /*
 THIS is the only part the user must implement
 */
-pub fn atomic(mut env: Env, mut u: State<Env,N0>) -> ! {
+pub fn atomic(mut env: Env, mut s0: State<Env,N0>) -> ! {
     loop {
-        use opts::{S0i::*, S1::*};
-        let v = env.advance_0(u, |env, opts| match opts {
-            Port0(coupon) => env.port0.put(5, coupon),
-            Idle(receipt) => receipt,
-        });
-        u = env.advance_1(v, |env, opts| match opts {
-            Port1(coupon) => env.port1.put(3, coupon),
+        s0 = s0.advance(|opts| match opts {
+            Opts0::P0S1(coupon) => {
+                let s1 = env.port0.put(5, coupon);
+                s1.advance(|opts| match opts {
+                    Opts1::P1S0(coupon) => env.port1.put(5, coupon)
+                })
+            },
+            Opts0::P1S0(coupon) => env.port1.put(5, coupon),
         });
     }
 }
