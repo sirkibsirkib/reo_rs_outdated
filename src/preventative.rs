@@ -91,22 +91,22 @@ pub fn main(a: Box<dyn RawPort<u32>>, b: Box<dyn RawPort<u32>>) {
 }
 
 pub trait HasBranches {
-    type Branches;
+    type Branches: From<RuntimeDeliberation>;
 }
 
-pub trait Deliberator<T> {
-    fn deliberate(&mut self) -> T;
+pub trait Deliberator {
+    fn deliberate(&mut self) -> RuntimeDeliberation;
 } 
 
 impl<E, N> State<E, N> where State<E, N>: HasBranches {
-    fn advance<D,R>(
+    fn advance<D: Deliberator,R>(
         self,
         deliberator: &mut D,
         handler: impl FnOnce(&mut D, <State<E, N> as HasBranches>::Branches) -> State<E, R>,
-    ) -> State<E, R>
-    where D: Deliberator<<State<E, N> as HasBranches>::Branches> {
-        let opts = deliberator.deliberate();
-        handler(deliberator, opts)
+    ) -> State<E, R> {
+        let deliberation = deliberator.deliberate();
+        let opt = deliberation.into();
+        handler(deliberator, opt)
     }
 }
 
@@ -121,18 +121,37 @@ pub enum Opts0 {
     P0S1(Coupon<Env, N0, N1>),
     P1S0(Coupon<Env, N1, N0>),
 }
+impl From<RuntimeDeliberation> for Opts0 {
+    fn from(r: RuntimeDeliberation) -> Self {
+        use Opts0::*;
+        match [r.port, r.new_state] {
+            [0,1] => P0S1(Coupon::fresh()),
+            [1,0] => P1S0(Coupon::fresh()),
+            _ => panic!("BAD DELIBERATION"),
+        }
+    }
+}
 
 pub enum Opts1 {
     P1S0(Coupon<Env, N1, N0>),
 }
-
-impl Deliberator<Opts0> for Env {
-    fn deliberate(&mut self) -> Opts0 {
-        unimplemented!()
+impl From<RuntimeDeliberation> for Opts1 {
+    fn from(r: RuntimeDeliberation) -> Self {
+        use Opts1::*;
+        match [r.port, r.new_state] {
+            [1,0] => P1S0(Coupon::fresh()),
+            _ => panic!("BAD DELIBERATION"),
+        }
     }
 }
-impl Deliberator<Opts1> for Env {
-    fn deliberate(&mut self) -> Opts1 {
+
+pub struct RuntimeDeliberation {
+    port: u32,
+    new_state: u32,
+}
+
+impl Deliberator for Env {
+    fn deliberate(&mut self) -> RuntimeDeliberation {
         unimplemented!()
     }
 }
