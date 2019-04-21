@@ -43,7 +43,14 @@ Done correctly, an atomic will:
 2. be able to exercise choice insofar as it is expressed by the protocol.
 
 ###  Token Encoding (general to CA and RBA)
-
+1. There are two "kinds" of affine token:
+	* "State": representing the state of the automaton. associated with a SET
+	of possible next actions, the concrete option of which has not yet been determined.
+	* "Coupon": corresponding to a transition. Gives permission to interact with a port and
+	acquire the next State token.
+2. Some affine type is used to represent the state of the automaton.
+3. The atomic's "main" function is invoked given the start token.
+4. The atomic's function is provided a signature that prohibits returning: `fn foo() -> !`.
 
 # CA
 ## Representation Specifics
