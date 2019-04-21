@@ -85,23 +85,66 @@ implicit: the automaton state and which transitions are possible next.
 explicit: state of memory cells
 
 ## Idea
-abandon the idea of state tokens. Instead, we mimick the memory cell space by
-defining generic token T (with instantiations `T<True>`, `T<False>`, and
-`T<Unknown>`) for every memory cell "T".
+Where before, we had specific state tokens that followed along with the protocol,
+we rather focus on which transitions are POSSIBLE at any moment.
+Tokens are now represented as tuples of the form (x1,x2, ... xN) for N logical variables
+and x* is in {True, False, Either}. In this context, "True" would mean the atomic
+can be certain that the variable is and will remain true until the next interaction
+with a local port (at least). "Either" means the atomic cannot know whether the value
+is true or false.
 
-For example, let us consider a system with memory cells {T,U}.
-At any moment, the atomic has exactlyl one variant of each token in {T,U}.
-The user has access to functions of the form:
+As before, the atomic must reason about which of its ports to interact with next.
+if the atomic cannot determine the port concretely (2+ are possible), then it has
+no choice but to ASK the protocol for the decision.
 
-fn advance(T<?>, U<?>, FnOnce(X) -> (T<?>, U<?>)) -> (T<?>, U<?>) {
-	
-}
+The trick is determining which values the atomic can know for certain after certain
+port interactions.
 
 
+
+
+abandon the idea of state tokens. What we do is very similar with a crucial difference.
+We define  State tokens with a known arity (equal to the number of logical variables).
+For example:
+```rust
+pub struct Mem2<K1, K2> {...}
+```
+
+Fomr  the CA, we still have the idea of states being associated with an `advance`
+call. Now, states are represented by Mem2 instantiations.
+As before, the game involves coupons and states. Now, however, the behaviour
+is defined for particular instances of Mem2, representing a _constraint_ on
+the known information of the system. This is a very natural representation,
+as the user is fully able to relax their known information as desired.
+
+In a sense, atomic X does not care which other atomics are in the system; only
+which new states the protocol may move to from the current one.
 
 
 ## algorithm
-
+create "single state" RBA with transitions annotated in the form:
+* {a,?b} =={1,2}==> {a,!b}
+This can be read:
+"a must be true, then ports 1 and 2 interact and at the end a is true and b is false".
+We consider the generation of an API for some component X with "local ports":
+1. if any transition involves 2+ distinct ports from "local ports", return ERROR
+	(this atomic would need synchronous firing!)
+1. partition transition set into sets {Y,N}:
+	* those involving 1 port from "local ports" ==> Y
+	* those involving 0 ports from "local ports" ==> N
+2. let set V be all variables x or !x in the OUTPUT of transitions in set Y.
+3. remove v from V if either:
+	* v is true in some transition in N, but false in the output
+	* v is false in some transition in N, but true in the output
+4. for transition y in Y, for output variable o in O:
+	if o is not in V, change the value of o to "EITHER" in y (not true or false).
+5. create OPTION_SET for every conceivable permutation of {true, false, either} for 
+	binary variables, called its REQ.
+6. for every option set O, for every transition t, add t to o IF t "possible given o.REQ"
+	where a variable set X is possible given variable set Y if, for every pairwise cmp of
+	variables in position i, EITHER: 
+	* X[i] == Y[i]
+	* Y[i] == unknown
 
 ---------------- EXPERIMENTATION ----------
 
