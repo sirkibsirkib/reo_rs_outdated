@@ -196,3 +196,76 @@ pub fn atomic(mut env: Env, mut s0: State<Env, N0>) -> ! {
     }
     unreachable!()
 }
+
+
+///////////////////////////////////////////////
+
+mod rba {
+    use std::marker::PhantomData;
+
+    pub struct Unknown;
+    pub struct True;
+    pub struct False;
+
+    pub struct Payment<N, Z> {
+        phantom: PhantomData<(N, Z)>
+    }
+
+    pub struct Mem2<K1, K2> {
+        phantom: PhantomData<(K1, K2)>
+    }
+    impl<K1,K2> Mem2<K1,K2> {
+        pub(crate) fn fresh() -> Self {
+            Mem2 {
+                phantom: PhantomData::default()
+            }
+        }
+        pub fn weaken_1(self) -> Mem2<Unknown, K2> {
+            Mem2::fresh()
+        }
+        pub fn weaken_2(self) -> Mem2<K1, Unknown> {
+            Mem2::fresh()
+        }
+    }
+
+    pub struct Porty<N, T> {
+        phantom: PhantomData<(N,T)>,
+    }
+    impl<N,T> Porty<N,T> {
+        pub fn put<K1,K2>(&mut self, payment: Payment<N, Mem2<K1,K2>>, datum: T) -> Mem2<K1,K2> {
+            Mem2::fresh()
+        }
+    }
+}
+
+pub fn rba_like() {
+    use rba::*;
+
+
+
+    enum Whee {
+        P0Vff(Payment<N0, Mem2<False, False>>),
+        P0Vft(Payment<N0, Mem2<False, True>>),
+        P0Vuu(Payment<N0, Mem2<Unknown, Unknown>>),
+    }
+
+    fn op0<F, R>(mem: Mem2<Unknown, Unknown>, handler: F) -> R
+    where F: FnOnce(Whee) -> R
+    {
+        unimplemented!()
+    }
+
+
+    fn atomic(start: Mem2<True, Unknown>, mut porty: Porty<N0, u32>) -> ! {
+        let mut m = start.weaken_1();
+        loop {
+            m = op0(m.weaken_1(), |opts| match opts {
+                Whee::P0Vff(payment) => porty.put(payment, 1).weaken_1().weaken_2(),
+                Whee::P0Vft(payment) => porty.put(payment, 2).weaken_1().weaken_2(),
+                Whee::P0Vuu(payment) => porty.put(payment, 3),
+            });
+        }
+    }
+
+    // let (t0, t1): () = 
+}

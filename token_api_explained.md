@@ -7,6 +7,21 @@ API for an atomic given those ports such that IF the atomic performs blocking
 gets and puts as allowed by the API, the entire system will never livelock or 
 deadlock "inside the circuit".
 
+# Assumptions & views
+1. the protocol defines, for every state of the global system, a set of permitted
+	actions available to atomic components.
+2. atomics make no assumptions about the actions of other atomics (aside from
+	knowing that they adhere to the protocol). the only way to alter the knowledge
+	one atomic has of the behaviour of another, is to alter the protocol.
+2. atomics may only COMMIT to an action if they are certain that the decision
+	will succeed. (ie. will not be contradicted by another atomic's commit).
+Derived:
+1. an atomic can safely commit to action a if the set of possible actions in
+	the current state is {a}.
+2. if the set of possible actions in the current state is {a, b, ...}, the atomic
+	is unable to commit to either without outside help. Thus, we introduce an
+	operation that effectively ASKS the protocol which one to commit to.
+
 ----------------------------
 # CA token API
 ## Info representation
@@ -70,12 +85,22 @@ implicit: the automaton state and which transitions are possible next.
 explicit: state of memory cells
 
 ## Idea
-let X and Y be ports in the "local ports" where X != Y.
-The API should prohibit X if, based on the current state, Y might be required 
-next instead.
+abandon the idea of state tokens. Instead, we mimick the memory cell space by
+defining generic token T (with instantiations `T<True>`, `T<False>`, and
+`T<Unknown>`) for every memory cell "T".
+
+For example, let us consider a system with memory cells {T,U}.
+At any moment, the atomic has exactlyl one variant of each token in {T,U}.
+The user has access to functions of the form:
+
+fn advance(T<?>, U<?>, FnOnce(X) -> (T<?>, U<?>)) -> (T<?>, U<?>) {
+	
+}
+
+
+
 
 ## algorithm
-take a set of guarded commands ("rules") in the form []=>[].
 
 
 ---------------- EXPERIMENTATION ----------
@@ -123,10 +148,11 @@ start state {~m}
 
 # IDEA
 RBA and CA are two extremes on a continuum between runtime and compile time information.
+(actually: state-space and guard-predicate-space information)
 RBAs dont implicitly track the progress through the automaton, so they remember 
 changes by manipulating logical variables (V and !V are interpreted
 as memory cell V is full and empty respectively).
-full rule-based form is therefore a degenerate automaton with 1 state. guards check states of memory cells.
+full rule-based form is therefore a degenerate automaton with 1 state. guards check states of memory cells and perform transitions that alter logical variables.
 one could freely change between RBA and CA by representing memory cells
 in state space or vice versa. state-space requires 2^N states, memory
 cells require N spaces.
