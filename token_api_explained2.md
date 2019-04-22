@@ -52,14 +52,18 @@ Done correctly, an atomic will:
 3. The atomic's "main" function is invoked given the start token.
 4. The atomic's function is provided a signature that prohibits returning: `fn foo() -> !`.
 
-# CA
-## Representation Specifics
+## CA vs RBA distinction
+
+### CA
 1. The global state is coalesced into a concrete name
 2. states are annotated with the precise set of transitions, of which one will be next.
 
-
-# RBA
-## Representation Specifics
+### RBA
 1. The global state is represented as a tuple of (binary) logical variables.
 2. the set of transitions available next is not trivially determined; it is the
 	set of transitions for which the current state SATISFIES a guard predicate.
+
+## Preference
+The system as outlined above will ensure that every branch in the automaton is
+available for the protocol to "choose from". with all branches potentially becoming 
+available at once.
