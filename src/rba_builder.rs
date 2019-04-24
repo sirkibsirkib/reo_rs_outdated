@@ -260,11 +260,11 @@ fn internal_close(state: &ConcretePred, rules: &[Rule]) -> HashSet<ConcretePred>
 	res
 }
 
-fn project(proto_rba: &ProtoRba, atomic_ports: &HashSet<PortId>) -> Vec<Vec<Branch>> {
-	let mut hash_2_name: HashMap<u64, ConcretePred> = HashMap::default();
-	let mut state: HashSet<u64> = HashSet::default();
+// fn project(proto_rba: &ProtoRba, atomic_ports: &HashSet<PortId>) -> Vec<Vec<Branch>> {
+// 	let mut hash_2_name: HashMap<u64, ConcretePred> = HashMap::default();
+// 	let mut state: HashSet<u64> = HashSet::default();
 
 
 
-	unimplemented!()
-}
+// 	unimplemented!()
+// }

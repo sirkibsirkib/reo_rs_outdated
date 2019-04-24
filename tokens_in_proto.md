@@ -229,8 +229,11 @@ S1 : {a, !b, !c}
 S2 : {a, b, !c}
 
 
-## Test 4
-what if the conditional flip is more complex?
-1. {a}={1}=>{b}
-2. {c,!d}={ }=>{!b,d}
-2. {c,!d}={ }=>{!b}
+# Observations:
+1. the deeper I dig, the more this degenerates to full enumeration a la CA.
+2. the resulting CA is also in a sense not minimal either, as we ultimately don't 
+	want to distinguish states which differ only in memory cells. really what 
+	matters is which ports can fire and which states are reachable with which transitions.
+
+
+	
