@@ -15,6 +15,7 @@ to generate the next state token State<_,S>.
 */
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use crate::decimal::*;
 
 /*
 This coupon can be spent on a port with type Port<E,P> to create token
@@ -41,16 +42,6 @@ impl<E, S> State<E, S> {
         }
     }
 }
-
-// natural numbers as represented at compile-time
-mod nums {
-    pub struct N0;
-    pub struct N1;
-    pub struct N2;
-    pub struct N3;
-}
-use nums::*;
-
 
 struct Putter<D: Debug> {
     phantom: PhantomData<D>,
@@ -183,19 +174,22 @@ fn tryit() {
 // This is the part that the user must implement
 pub fn atomic(mut env: Env, mut s0: State<Env, N0>) -> ! {
     let env = &mut env;
-    for i in 0.. {
+    loop {
         s0 = s0.advance(env, |env, opts| match opts {
             Opts0::P0S1(c) => {
-                let s1 = env.port0.put(i, c);
+                let s1 = env.port0.put(5, c);
                 s1.advance(env, |env, opts| match opts {
                     Opts1::P1S0(c) => env.port1.put(2, c),
                 })
             }
             Opts0::P1S0(c) => env.port1.put(3, c),
         })
+
     }
-    unreachable!()
 }
 
 
+
+
 ///////////////////////////////////////////////
+// TODO: sugar for 1-variant matches 

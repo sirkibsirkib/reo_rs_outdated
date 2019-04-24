@@ -1,9 +1,4 @@
-
-mod num {
-	pub struct N0;
-	// ...
-}
-use num::*;
+use crate::decimal::*;
 
 use std::marker::PhantomData;
 
@@ -12,6 +7,12 @@ trait Var: Sized {}
 
 pub struct Tru; impl Var for Tru {}
 pub struct Fal; impl Var for Fal {}
+impl Into<Unk> for Tru {
+    fn into(self) -> Unk {Unk}
+}
+impl Into<Unk> for Fal {
+    fn into(self) -> Unk {Unk}
+}
 
 pub struct Coupon<N, Z> {
     phantom: PhantomData<(N, Z)>
@@ -20,7 +21,8 @@ impl<N,Z> Coupon<N,Z> {
     pub(crate) fn fresh() -> Self {
         Self { phantom: PhantomData::default() }
     }
-} 
+}
+
 
 pub struct Mem2<K1, K2> {
     phantom: PhantomData<(K1, K2)>
@@ -109,3 +111,11 @@ fn atomic(start: Mem2<Tru, Unk>, mut porty: Porty<N0, u32>) -> ! {
         });
     }
 }
+
+// pub fn whee() {
+// 	let x = 6;
+// 	match x {
+// 		6 => println!("hey"),
+// 		_ => {},
+// 	}
+// }
