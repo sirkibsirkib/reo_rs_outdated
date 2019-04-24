@@ -120,10 +120,9 @@ impl Gcmd {
 	}
 }
 
-#[derive(Debug)]
+#[derive(Debug, Hash, Eq, Clone, PartialEq)]
 struct Branch {
 	port: PortId,
-	// dest: Pred,
 	dest: ConcretePred,
 }
 
@@ -170,12 +169,12 @@ fn rba_build() {
 	use AssignVal::*;
 	let mut states = set!{concrete!{A=>false, B=>false, C=>false}};
 	let mut states_todo = vec![states.iter().next().unwrap().clone()];
-	let mut opts: HashMap<ConcretePred, Vec<Branch>> = HashMap::default();
+	let mut opts: HashMap<ConcretePred, HashSet<Branch>> = HashMap::default();
 
 	//input: gcmds and starting state.
 	//output: map state->Vec<Branch>
 	let gcmd = vec![
-		Gcmd::new(concrete!{A=>true, C=>false}, 1, symbolic!{B=>U}),
+		Gcmd::new(concrete!{A=>true, C=>true}, 1, symbolic!{B=>U}),
 		Gcmd::new(concrete!{A=>true, C=>false}, 1, symbolic!{B=>T}),
 		Gcmd::new(concrete!{B=>false}, 2, symbolic!{A=>T}),
 		Gcmd::new(concrete!{C=>true}, 2, symbolic!{A=>T}),
@@ -183,7 +182,7 @@ fn rba_build() {
 	];
 	while let Some(state) = states_todo.pop() {
 		println!("\n~~~~~~~~~~ processing: {:?}", state);
-		let mut o = vec![];
+		let mut o = HashSet::default();
 		for (gid, g) in gcmd.iter().enumerate() {
 			if g.input.compatible(&state) {
 				let new_state = g.output.apply_to(&state);
@@ -192,7 +191,7 @@ fn rba_build() {
 					states_todo.push(new_state.clone());
 					states.insert(new_state.clone());
 				}
-				o.push(Branch{
+				o.insert(Branch{
 					port: g.involved,
 					dest: new_state,
 				});
@@ -208,7 +207,7 @@ fn rba_build() {
 	for (src, opts) in opts.iter() {
 		print!("{:?}: {{", src);
 		for b in opts.iter() {
-			print!("={}=> {:?}, ", b.port, &b.dest);
+			print!("={}=> {:?},\t", b.port, &b.dest);
 		}
 		print!("}}\n");
 	}
