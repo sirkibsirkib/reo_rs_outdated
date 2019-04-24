@@ -4,7 +4,6 @@ use std::cmp::Ordering;
 use std::fmt;
 
 type PortId = u32;
-type StateId = usize;
 
 
 const A: usize = 0;
@@ -216,47 +215,56 @@ fn rba_build() {
 
 //////////////////////////// STEP 1 ///////////////////
 
-// struct ProtoRba {
-// 	rules: Vec<Rule>,
-// }
-// struct Rule {
-// 	guard: Pred,
-// 	ports: HashSet<PortId>,
-// 	action: Pred,
-// }
+struct StateId(usize);
 
-// struct ProjectionError {
-// 	rba_rule_idx: usize,
-// 	synchronous: [PortId;2],
-// }
+struct ProtoRba {
+	start_state: ConcretePred,
+	rules: Vec<Rule>,
+}
+struct Rule {
+	guard: ConcretePred,
+	ports: HashSet<PortId>,
+	action: SymbolicPred,
+}
 
-// type ValId = usize;
-// struct ConditionalFlip {
-// 	condition: (ValId, Val),
-// 	flip: (ValId, Val),
-// }
+struct ProjectionError {
+	rba_rule_idx: usize,
+	synchronous: [PortId;2],
+}
 
-// fn project(proto_rba: &ProtoRba, atomic_ports: &HashSet<PortId>) ->Result<Vec<Gcmd>, ProjectionError> {
-// 	//1 check that we can do this at all
-// 	for (rid, rule) in proto_rba.rules.iter().enumerate() {
-// 		let intersection = rule.ports.intersection(atomic_ports);
-// 		if intersection.count() >= 2 {
-// 			return Err(ProjectionError {
-// 				rba_rule_idx: rid,
-// 				synchronous: [0,0],
-// 			});
-// 		}
-// 	}
-// 	//2 classify rules according to whether they are participating
-// 	let mut participating = proto_rba.rules.iter().filter(|rule| rule.ports.intersection(atomic_ports).next().is_some());
-// 	let mut non_participating = proto_rba.rules.iter().filter(|rule| rule.ports.intersection(atomic_ports).next().is_none());
-// 	let mut flips: Vec<ConditionalFlip> = vec![];
-// 	unimplemented!()
-// }
+struct Opty {
+	branches: Vec<Branch>,
+}
+
+struct Branchy {
+	dest: StateId,
+	port: PortId,
+}
 
 
-// #[test]
-// fn rba_atomize() {
-// 	println!("{:?}", std::mem::size_of::<Option<bool>>());
-// 	// let 
-// }
+fn internal_close(state: &ConcretePred, rules: &[Rule]) -> HashSet<ConcretePred> {
+	let mut res = HashSet::default();
+	let mut todo = set!{state.clone()};
+	while let Some(state) = todo.iter().cloned().next() {
+		todo.remove(&state);
+		for r in rules.iter() {
+			if state.compatible(&r.guard) {
+				let new_state = r.action.apply_to(&state);
+				if !res.contains(&new_state) {
+					res.insert(new_state.clone());
+					todo.insert(new_state);
+				}
+			}
+		}
+	}
+	res
+}
+
+fn project(proto_rba: &ProtoRba, atomic_ports: &HashSet<PortId>) -> Vec<Vec<Branch>> {
+	let mut hash_2_name: HashMap<u64, ConcretePred> = HashMap::default();
+	let mut state: HashSet<u64> = HashSet::default();
+
+
+
+	unimplemented!()
+}

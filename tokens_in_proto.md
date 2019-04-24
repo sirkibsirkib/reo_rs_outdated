@@ -228,6 +228,9 @@ S0 : {!a, !b, !c}
 S1 : {a, !b, !c}
 S2 : {a, b, !c}
 
-enum OptsS0 {
-	R
-}
+
+## Test 4
+what if the conditional flip is more complex?
+1. {a}={1}=>{b}
+2. {c,!d}={ }=>{!b,d}
+2. {c,!d}={ }=>{!b}
