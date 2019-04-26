@@ -14,5 +14,6 @@ mod more_safe;
 // mod token_eg;
 // mod preventative;
 // mod preventative_rba;
-// pub mod decimal;
-mod rba_builder;
+pub mod decimal;
+// mod rba_builder;
+mod rba_api_w_roy;

@@ -1,6 +1,8 @@
 
+use std::marker::PhantomData;
 use hashbrown::{HashSet,HashMap};
 use std::cmp::Ordering;
+use crate::decimal::*;
 use std::fmt;
 
 type PortId = u32;
@@ -260,11 +262,57 @@ fn internal_close(state: &ConcretePred, rules: &[Rule]) -> HashSet<ConcretePred>
 	res
 }
 
-// fn project(proto_rba: &ProtoRba, atomic_ports: &HashSet<PortId>) -> Vec<Vec<Branch>> {
-// 	let mut hash_2_name: HashMap<u64, ConcretePred> = HashMap::default();
-// 	let mut state: HashSet<u64> = HashSet::default();
+
+// struct Repper<A: NoData, B: NoData> {
+// 	phantom: PhantomData<(A,B)>,
+// }
+
+// pub enum Reps<A: NoData, B: NoData, C: NoData> {
+// 	More(A, Rep<A,B,C>),
+// 	End(C),
+// }
 
 
+// pub trait NoData: Sized {
+// 	fn new() -> Self;
+// }
 
-// 	unimplemented!()
+// pub struct Rep<A: NoData, B: NoData, C: NoData> {
+// 	remaining: usize,
+// 	phantom: PhantomData<(A,B,C)>,
+// }
+// impl<A: NoData, B: NoData, C: NoData> Rep<A,B,C> {
+// 	fn new(reps: usize) -> Self {
+// 		Rep { remaining: reps, phantom: PhantomData::default() }
+// 	}
+// 	pub fn next(self) -> Reps<A,B,C> {
+// 		match self.remaining {
+// 			0 => Reps::End(C::new()),
+// 			x => Reps::More(A::new(), Self::new(x-1)),
+// 		}
+// 	}
+// 	pub fn until<F>(self, mut work: F) -> C where F: FnMut(A, usize)->B {
+// 		let mut r = self;
+// 		loop {
+// 	        match r.next() {
+// 	            Reps::More(a, next) => {
+// 	                r = next;
+// 	                work(a);
+// 	            },
+// 	            Reps::End(c) => break c,
+// 	        }
+// 	    }
+// 	}
+// }
+
+
+// pub struct State<T>(PhantomData<T>);
+// impl<T> NoData for State<T> {fn new() -> Self {State(PhantomData::default())}}
+// #[test]
+// pub fn repetition() {
+// 	let work = |_n0: State<N0>| {
+// 		println!("YAH");
+// 		State::<N1>::new()
+// 	};
+//     let _c: State<N2> = Rep::new(11).until(work);
 // }
