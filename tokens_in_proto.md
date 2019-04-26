@@ -442,3 +442,17 @@ questions:
 3. !! no clear way to represent silent transitions !!
 4. shows memory cells to user (ugly)
 5. 
+
+
+--------------------------
+
+new idea: use the Token<A,B,C> representation. treat it like a TRS.
+avoid silent transitions by preprocessing the ruleset ahead of time to get rid of them.
+
+new problem: we need to ensure that the user covers only the rules that they need to.
+solutions:
+1. one enum def with a variant for every rule.
+    
+2. powerset of RULES. you are given a unique descrimenant for every rule set, with one branch per rule that tneds up being applied
+
+3. powerset of PORTS, but with DEST states being represented as SETS.
