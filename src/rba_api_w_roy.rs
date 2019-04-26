@@ -79,12 +79,73 @@ impl Tern for T {}
 impl Tern for F {}
 impl Tern for X {}
 
+trait UnifyTern {
+	type Out: Tern;
+}
+impl UnifyTern for (F, X) {
+	type Out = X;
+}
+impl<A: FX> UnifyTern for (T, A) {
+	type Out = X;
+}
+impl UnifyTern for (X, F) {
+	type Out = X;
+}
+impl<A: FX> UnifyTern for (A, T) {
+	type Out = X;
+}
+impl UnifyTern for (T,T) {
+	type Out = T;
+}
+impl UnifyTern for (F,F) {
+	type Out = F;
+}
+// impl<A,B> UnifyTern for (A,B) where (B,A): UnifyTern {
+// 	type Out = <(B,A) as UnifyTern>::Out;
+// }
+
+// impl<A: Tern> UnifyTern for (T,A) {
+// 	type Out = T;
+// }
+// impl<A: FX> UnifyTern for (A,T) {
+// 	type Out = T;
+// }
+// impl<A: FX> UnifyTern for (X,A) {
+// 	type Out = X;
+// }
+// impl UnifyTern for (F,X) {
+// 	type Out = X;
+// }
+// impl UnifyTern for (F,F) {
+// 	type Out = F;
+// }
+
+// trait UnifyState: Sized {
+// 	type Out: Token;
+// 	fn unify(self) -> Self::Out {
+// 		NoData::fresh()
+// 	}
+// }
+
+trait UnifyState:  {
+	type Out: Token;
+}
+
+impl<A1: Tern, A2: Tern> UnifyState for (State<A1>,State<A2>) where (A1,A2): UnifyTern {
+	type Out = State<<(A1, A2) as UnifyTern>::Out>;
+}
+
 pub struct State<A: Tern> {
 	phantom: PhantomData<A>,
 }
 impl<A: Tern> Token for State<A> {}
+// impl<A: Tern> State<A> {
+// 	fn unify_with<B: Tern>(self) -> State<<(A,B) as UnifyTern>::Out> where (A,B): UnifyTern {
+// 		NoData::fresh()
+// 	}
+// }
 impl<A: TF> State<A> {
-	pub fn weaken_a(self) -> State<A> {
+	pub fn weaken_a(self) -> State<X> {
 		NoData::fresh()
 	} 
 }
@@ -149,21 +210,85 @@ impl<X,Y> Knowable for X where X: Advance<Opts=Y>, Y: KnownCoupon {
 	}
 }
 
-struct States<A: Tern, N: Token> {
-	phantom: PhantomData<(A,N)>,
+struct States<S: Token, N: Token> {
+	//        ^state    ^next
+	phantom: PhantomData<(S,N)>,
+}
+impl<S: Token, N: Token> Token for States<S,N> {}
+
+trait Collapsing: Token {
+	type Out: Token;
+	fn collapse(self) -> Self::Out {
+		NoData::fresh()
+	}
+}
+impl<A: Token, B: Token> Collapsing for States<A,B>
+where
+	(A,B): UnifyState
+{
+	type Out = <(A,B) as UnifyState>::Out;
 }
 
+impl<A: Token, B: Token, N: Token> Collapsing for States<A,States<B, N>>
+where
+	(A,B): UnifyState,
+	States<<(A,B) as UnifyState>::Out, N>: Collapsing,
+{
+	type Out = <States<<(A,B) as UnifyState>::Out, N> as Collapsing>::Out;
+}
+
+
+// impl<S: Token, N: Token> Token for States<S,N> {}
+// impl<A:Token, B:Token, N: Token> States<A, States<B, N>> where (A,B): UnifyState {
+// 	fn collapse(self) -> States<<(A,B) as UnifyState>::Out, N> {
+// 		NoData::fresh()
+// 	}
+// }
+// impl<A:Token, B:Token> States<A, B> where (A,B): UnifyState {
+// 	fn collapse(self) -> <(A,B) as UnifyState>::Out {
+// 		NoData::fresh()
+// 	}
+// }
+
+
 pub fn atomic(start: State<F>, mut p0: Port<N0>, mut p1: Port<N1>) -> ! {
-	let mut f = start;
-	loop {
-		let t = p0.act(f.only_coupon());
-		f = p1.act(t.only_coupon())
-		// let t = p0.act(f.only_coupon());
-		// let t = f.advance(|o| match o {
-		// 	P0::P0(c) => p0.act(c),
-		// });
-		// f = t.advance(|o| match o {
-		// 	P1::P1(c) => p1.act(c),
-		// });
-	}
+	// let t: State<T> = NoData::fresh();
+	// let t: <(State<T>, State<T>) as UnifyState>::Out;
+	// let y: States<State<T>, States<State<T>, State<F>>> = NoData::fresh();
+	// let z = y.collapse();
+	// z == ();
+	// t == ();
+	// let s = start.un
+	// let s: States<State<T>, State<X>> = NoData::fresh();
+	// let s = s.collapse();
+	// s == ();
+
+	// let x = start;
+	// let x = x.unify_with::<X>();
+	// x==();
+
+	// let f = start;
+	// let mut x = f.weaken_a();
+	// // x == ();
+	// loop {
+	// 	x = x.advance(|o| match o {
+	// 		P0P1::P0(c) => p0.act(c).weaken_a(),
+	// 		P0P1::P1(c) => p1.act(c).weaken_a(),
+	// 	});
+	// }
+
+
+	unimplemented!()
+	// unimplemented!()
+	// loop {
+	// 	let t = p0.act(f.only_coupon());
+	// 	f = p1.act(t.only_coupon())
+	// 	// let t = p0.act(f.only_coupon());
+	// 	// let t = f.advance(|o| match o {
+	// 	// 	P0::P0(c) => p0.act(c),
+	// 	// });
+	// 	// f = t.advance(|o| match o {
+	// 	// 	P1::P1(c) => p1.act(c),
+	// 	// });
+	// }
 }
