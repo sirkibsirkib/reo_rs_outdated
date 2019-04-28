@@ -456,3 +456,9 @@ solutions:
 2. powerset of RULES. you are given a unique descrimenant for every rule set, with one branch per rule that tneds up being applied
 
 3. powerset of PORTS, but with DEST states being represented as SETS.
+
+
+----------
+interesting idea:
+Coupons can contain the current concrete state of the system, allowing you
+to arbitrarily strengthen them again
