@@ -1,5 +1,5 @@
 type PortId = u32;
-const LEN: usize = 3;
+const LEN: usize = 2;
 use std::fmt;
 
 
@@ -16,6 +16,13 @@ impl Val {
 	}
 	pub fn specific(self) -> bool {
 		!self.generic()
+	}
+	pub fn mismatches(self, other: Self) -> bool {
+		use Val::*;
+		match [self, other] {
+			[T,F] | [F,T] => true,
+			_ => false,
+		}
 	}
 }
 
@@ -35,7 +42,7 @@ impl Rba {
 			println!("TODO. Remove silent rule at idx={}", idx);
 			for (i,r) in rba.rules.iter().enumerate() {
 				if i == idx {continue}
-				if let Some(composed) = r.compose(silent) {
+				if let Some(composed) = silent.compose(r) {
 					println!("ADDING rule ({},{})", i, idx);
 					buf.push(composed);
 				}
@@ -44,10 +51,24 @@ impl Rba {
 			rba.rules.append(&mut buf);
 			println!("AFTER: {:#?}\n----------------", &rba.rules);
 		}
-		rba
+		rba.minimize()
 	}
 	pub fn first_silent_idx(&self) -> Option<usize> {
 		self.rules.iter().enumerate().filter(|(_,r)| r.is_silent()).map(|(i,_)| i).next()
+	}
+	pub fn minimize(mut self) -> Self {
+		let mut i = 0;
+		while i < self.rules.len() {
+			'inner: for j in (i+1)..self.rules.len() {
+				if let Some(new_rule) = self.rules[i].pair_collapse(&self.rules[j]) {
+					let _ = std::mem::replace(&mut self.rules[i], new_rule);
+					self.rules.remove(j);
+					break 'inner;
+				}
+			}
+			i += 1;
+		}
+		self
 	}
 }
 
@@ -60,6 +81,25 @@ struct Rule {
 	assign: [Val; LEN],
 }
 impl Rule {
+	pub fn pair_collapse(&self, other: &Self) -> Option<Rule> {
+		if self.port != other.port
+		|| &self.assign != &other.assign {
+			None
+		} else {
+			let mut guard = self.guard.clone();
+			let mut mismatches = 0;
+			for (g, &g2) in izip!(guard.iter_mut(), other.guard.iter()) {
+				if g.mismatches(g2) {
+					mismatches += 1;
+					if mismatches >= 2 {
+						return None;
+					}
+					*g = Val::X;
+				}
+			}
+			Some(Rule::new(guard, self.port.clone(), self.assign.clone()))
+		}
+	}
 	pub fn compose(&self, other: &Self) -> Option<Rule> {
 		if !self.can_precede(other) {
 			return None
@@ -92,10 +132,8 @@ impl Rule {
 			return false;
 		}
 		for (&a, &g) in self.assign.iter().zip(other.guard.iter()) {
-			use Val::*;
-			match [a,g] {
-				[T,F] | [F,T] => return false,
-				_ => (),
+			if a.mismatches(g) {
+				return false
 			}
 		}
 		true
@@ -130,10 +168,9 @@ pub fn wahey() {
 	// 	Rule::new([T,X], None   , [F,F]),
 	// ]};
 	let rba = Rba { rules: vec![
-		Rule::new([X,X,F], None   , [X,X,T]),
-		Rule::new([X,F,T], None   , [X,T,F]),
-		Rule::new([F,T,T], None   , [T,F,F]),
-		Rule::new([T,T,T], Some(1), [F,F,F]),
+		Rule::new([X,F], None   , [X,T]),
+		Rule::new([F,T], Some(2), [T,F]),
+		Rule::new([T,T], Some(1), [F,F]),
 	]};
 	println!("BEFORE");
 	for r in rba.rules.iter() {
