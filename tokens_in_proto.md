@@ -74,7 +74,8 @@ fact that after rule 1, rule 2 cannot be applied.
 
 ## Cannot always reason about generic GCMDS
 eg rules:
-1. {a}={1}=>{b}
+1. {a,!c}={1}=>{b,!c}
+1. {a,c}={1}=>{b?,c}
 2. {c}={ }=>{!b}
 ... 
 Do we weaken rule 1 to `{a}={1}=>{b?}`? Whether 2 can be applied after 1 depends on variable

@@ -28,25 +28,19 @@ trait NoData: Token {
 }
 impl<T: Token> NoData for T {}
 
-pub struct Coupon<P: Token> {
-    phantom: PhantomData<P>,
+pub struct Coupon<P: Token, S: Token> {
+    phantom: PhantomData<(P, S)>,
 }
-impl<P: Token> Token for Coupon<P> {}
+impl<P: Token, S: Token> Token for Coupon<P, S> {}
 
-pub struct ActResult {
-    proto_state_data: u32,
-}
 
 pub struct Port<P: Token> {
     phantom: PhantomData<P>,
 }
 impl<P: Token> Port<P> {
-    pub fn act(&mut self, coupon: Coupon<P>) -> ActResult {
+    pub fn act<S: Token>(&mut self, coupon: Coupon<P, S>) -> S {
         let _ = coupon;
-
-        ActResult {
-            proto_state_data: 5,
-        }
+        NoData::fresh()
     }
 }
 
@@ -119,8 +113,14 @@ impl<A: TF> State<A> {
 }
 
 pub trait KnownCoupon {
+    // type Coupon: Token;
     type PortNum: Token;
     type State: Token;
+}
+impl<P: Token, S: Token, K: Token> std::convert::Into<Coupon<P, S>> for K where K: KnownCoupon {
+    fn into(self) -> Coupon<P, S> {
+        
+    }
 }
 
 pub trait Advance: Token {
@@ -135,152 +135,129 @@ pub trait Advance: Token {
 }
 
 
-// pub trait Knowable: Advance {
-//     // type CouponType: Token;
-//     type PortId: Token;
-//     type States: Token;
-//     fn only_coupon(self) -> Self::CouponType;
+pub trait Knowable: Advance {
+    // type CouponType: Token;
+    type CouponType: Token;
+    fn only_coupon(self) -> Self::CouponType;
+}
+impl<X, Y> Knowable for X
+where
+    X: Advance<Opts = Y>,
+    Y: KnownCoupon,
+{
+    type CouponType = Coupon<<Y as KnownCoupon>::PortNum, <Y as KnownCoupon>::State>;
+    fn only_coupon(self) -> Self::CouponType {
+        NoData::fresh()
+    }
+}
+
+// pub struct Locked<T: Token> {
+//     phantom: PhantomData<T>,
 // }
-// impl<X, Y> Knowable for X
-// where
-//     X: Advance<Opts = Y>,
-//     Y: KnownCoupon,
-// {
-//     type PortId = 
-//     type CouponType = Coupon<<Y as KnownCoupon>::PortNum, <Y as KnownCoupon>::State>;
-//     fn only_coupon(self) -> Self::CouponType {
+// impl<T: Token> Token for Locked<T> {}
+// impl<T: Tern> Locked<State<T>> {
+//     pub fn unlock(self, act_result: ActResult) -> State<T> {
+//         let _ = act_result;
 //         NoData::fresh()
 //     }
 // }
-
-pub struct Locked<T: Token> {
-    phantom: PhantomData<T>,
-}
-impl<T: Token> Token for Locked<T> {}
-impl<T: Tern> Locked<State<T>> {
-    pub fn unlock(self, act_result: ActResult) -> State<T> {
-        let _ = act_result;
-        NoData::fresh()
-    }
-}
-impl<A: Token, N: Token> Locked<States<A, N>> {
-    pub fn unlock(self, act_result: &ActResult) -> States<A, N> {
-        let _ = act_result;
-        NoData::fresh()
-    }
-} 
+// impl<A: Token, N: Token> Locked<States<A, N>> {
+//     pub fn unlock(self, act_result: &ActResult) -> States<A, N> {
+//         let _ = act_result;
+//         NoData::fresh()
+//     }
+// } 
 
 
-pub enum StatesReified<S: Token, N: Token> {
-    Head(S),
-    Tail(N),
-}
+// pub enum StatesReified<S: Token, N: Token> {
+//     Head(S),
+//     Tail(N),
+// }
 
-pub struct States<S: Token, N: Token> {
-    //        ^state    ^next
-    phantom: PhantomData<(S, N)>,
-}
-impl<S: Token, N: Token> Token for States<S, N> {}
-impl<S: Token, N: Token> States<S,N> {
-    fn head_or(self, act_res: &ActResult) -> StatesReified<S,N> {
-        if act_res.proto_state_data == 5 {
-            StatesReified::Head(NoData::fresh())
-        } else {
-            StatesReified::Tail(NoData::fresh())
-        }
-    }
-}
+// pub struct States<S: Token, N: Token> {
+//     //        ^state    ^next
+//     phantom: PhantomData<(S, N)>,
+// }
+// impl<S: Token, N: Token> Token for States<S, N> {}
+// impl<S: Token, N: Token> States<S,N> {
+//     fn head_or(self, act_res: &ActResult) -> StatesReified<S,N> {
+//         if act_res.proto_state_data == 5 {
+//             StatesReified::Head(NoData::fresh())
+//         } else {
+//             StatesReified::Tail(NoData::fresh())
+//         }
+//     }
+// }
 
-pub trait Collapsing: Token {
-    type Out: Token;
-    fn collapse(self) -> Self::Out {
-        NoData::fresh()
-    }
-}
-impl<A: Token, B: Token> Collapsing for States<A, B>
-where
-    (A, B): UnifyState,
-{
-    type Out = <(A, B) as UnifyState>::Out;
-}
+// pub trait Collapsing: Token {
+//     type Out: Token;
+//     fn collapse(self) -> Self::Out {
+//         NoData::fresh()
+//     }
+// }
+// impl<A: Token, B: Token> Collapsing for States<A, B>
+// where
+//     (A, B): UnifyState,
+// {
+//     type Out = <(A, B) as UnifyState>::Out;
+// }
 
-impl<A: Token, B: Token, N: Token> Collapsing for States<A, States<B, N>>
-where
-    (A, B): UnifyState,
-    States<<(A, B) as UnifyState>::Out, N>: Collapsing,
-{
-    type Out = <States<<(A, B) as UnifyState>::Out, N> as Collapsing>::Out;
-}
+// pub struct ActResult {
+//     proto_state_data: u32,
+// }
+
+// impl<A: Token, B: Token, N: Token> Collapsing for States<A, States<B, N>>
+// where
+//     (A, B): UnifyState,
+//     States<<(A, B) as UnifyState>::Out, N>: Collapsing,
+// {
+//     type Out = <States<<(A, B) as UnifyState>::Out, N> as Collapsing>::Out;
+// }
 
 /////////////////////// SPECIFIC /////////////////
 
 
 
-pub enum P0<S0: Token> {
-    P0(Coupon<N0>, Locked<S0>),
+
+
+
+// {R1,R2}
+pub enum R1R2<S0: Token, S1: Token> {
+    R1(Coupon<N0, S0>),
+    R2(Coupon<N1, S1>),
 }
-impl<S0: Token> KnownCoupon for P0<S0> {
+impl Advance for State<X> { type Opts = R1R2<X, State<T>>; }
+
+// {R1}
+pub enum R1<S0: Token> {
+    R1(Coupon<N0, S0>),
+}
+impl<S0: Token> KnownCoupon for R1<S0> {
     type PortNum = N0;
     type State = S0;
 }
-pub enum P1<S1: Token> {
-    P1(Coupon<N1>, Locked<S1>),
-}
-impl<S1: Token> KnownCoupon for P1<S1> {
-    type PortNum = N1;
-    type State = S1;
-}
+impl Advance for State<F> { type Opts = R1<State<T>>; }
 
-pub enum P0P1<S0: Token, S1: Token> {
-    P0(Coupon<N0>, Locked<S0>),
-    P1(Coupon<N1>, Locked<S1>),
-}
+// {R2}
 
+pub enum R2<S1: Token> {
+    R2(Coupon<N1, S1>),
+}
+impl Advance for State<T> { type Opts = R2<State<F>>; }
 
-// {P0,P1}
-impl Advance for State<X> {
-    type Opts = P0P1<State<T>, State<F>>;
-}
-// {P0}
-impl Advance for State<F> {
-    type Opts = P0<State<T>>;
-}
-// {P1}
-impl Advance for State<T> {
-    type Opts = P1<States<State<T>, State<F>>>;
-}
 // {} (NONE)
 
 
 
 pub fn atomic(mut f: State<F>, mut p0: Port<N0>, mut p1: Port<N1>) -> ! {
     loop {
-        let t = f.advance(|o| match o {
-            P0::P0(coupon, state) => {
-                let res = p0.act(coupon);
-                let s = state.unlock(res);
-                s
-            },
-        });
-        let mut t_or_f = TorF::T(t);
-        f = loop {
-            t_or_f = match t_or_f {
-                TorF::F(f) => break f,
-                TorF::T(t) => {
-                    t.advance(|o| match o {
-                        P1::P1(coupon, state) => {
-                            let res = p1.act(coupon);
-                            let s = state.unlock(&res);
-                            use StatesReified::*;
-                            match s.head_or(&res) {
-                                Head(t) => TorF::T(t),
-                                Tail(f) => TorF::F(f),
-                            }
-                        }
-                    })
-                },
-            }
-        }
+        let t = p0.act(f.only_coupon());
+        // let t = f.advance(|o| match o {
+        //     R1::R1(coupon) => p0.act(coupon),
+        // });
+        f = t.advance(|o| match o {
+            R2::R2(coupon) => p1.act(coupon),
+        })
     }
 }
 
