@@ -1,10 +1,6 @@
 type PortId = u32;
-const LEN: usize = 2;
-use std::fmt;
-
-
-
-use derive_new::new;
+const LEN: usize = 4;
+use std::{fmt, mem};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum Val {
@@ -31,9 +27,6 @@ struct Rba {
 	rules: Vec<Rule>,
 }
 impl Rba {
-	pub fn count_silents(&self) -> usize {
-		self.rules.iter().filter(|r| r.is_silent()).count()
-	}
 	pub fn normalize(&self) -> Rba {
 		let mut buf = vec![];
 		let mut rba = self.clone();
@@ -57,18 +50,19 @@ impl Rba {
 		self.rules.iter().enumerate().filter(|(_,r)| r.is_silent()).map(|(i,_)| i).next()
 	}
 	pub fn minimize(mut self) -> Self {
-		let mut i = 0;
-		while i < self.rules.len() {
-			'inner: for j in (i+1)..self.rules.len() {
-				if let Some(new_rule) = self.rules[i].pair_collapse(&self.rules[j]) {
-					let _ = std::mem::replace(&mut self.rules[i], new_rule);
-					self.rules.remove(j);
-					break 'inner;
+		'outer: loop {
+			for (idx1, r1) in self.rules.iter().enumerate() {
+				let rng = (idx1 + 1)..;
+				for (r2, idx2) in self.rules[rng.clone()].iter().zip(rng) {
+					if let Some(new_rule) = r1.pair_collapse(r2) {
+						let _ = mem::replace(&mut self.rules[idx1], new_rule);
+						self.rules.remove(idx2);
+						continue 'outer;
+					}
 				}
 			}
-			i += 1;
+			return self
 		}
-		self
 	}
 }
 
@@ -97,7 +91,9 @@ impl Rule {
 					*g = Val::X;
 				}
 			}
-			Some(Rule::new(guard, self.port.clone(), self.assign.clone()))
+			let r = Rule::new(guard, self.port.clone(), self.assign.clone());
+			println!("combine {:?} + {:?}   TO   {:?}", self, other, &r);
+			Some(r)
 		}
 	}
 	pub fn compose(&self, other: &Self) -> Option<Rule> {
@@ -162,21 +158,17 @@ fn testy() {
 
 pub fn wahey() {
 	use Val::*;
-	// let rba = Rba { rules: vec![
-	// 	Rule::new([X,F], Some(1), [T,X]),
-	// 	Rule::new([T,F], Some(2), [F,T]),
-	// 	Rule::new([T,X], None   , [F,F]),
-	// ]};
 	let rba = Rba { rules: vec![
-		Rule::new([X,F], None   , [X,T]),
-		Rule::new([F,T], Some(2), [T,F]),
-		Rule::new([T,T], Some(1), [F,F]),
+		Rule::new([X,X,X,F], None   , [X,X,X,T]),
+		Rule::new([X,X,F,T], None   , [X,X,T,F]),
+		Rule::new([X,F,T,T], Some(2), [X,T,F,F]),
+		Rule::new([F,T,T,T], None, [T,F,F,F]),
+		Rule::new([T,T,T,T], Some(1), [F,F,F,F]),
 	]};
 	println!("BEFORE");
 	for r in rba.rules.iter() {
 		println!("{:?}", r);
 	}
-	println!("AFTER");
 	for r in rba.normalize().rules.iter() {
 		println!("{:?}", r);
 	}
