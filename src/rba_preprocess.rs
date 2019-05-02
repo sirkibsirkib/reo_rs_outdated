@@ -1,6 +1,5 @@
 type PortId = u32;
 use std::{fmt, mem, cmp};
-// use derive_new::new;
 
 use hashbrown::HashSet;
 
@@ -25,13 +24,14 @@ macro_rules! hashset {
     };
 }
 
+// part of the state-set predicate. 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum Val {
-	T, F, X,
+	T, F, 	// specific values corresponding to boolean true and false,
+	X,		// generic over T and F. Interpreted as an unspecified value.
 }
 impl PartialOrd for Val {
-	// ordering is on SPECIFICITY
-	// X < T
+	// ordering is on SPECIFICITY: X<T, X<F, T is not comparable to F.
 	fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
 		use Val::*;
 		match [self, other] {
@@ -54,13 +54,17 @@ impl Val {
 	}
 }
 
+// represents a port automaton with transitions represented as logical rules
 #[derive(Debug, Clone)]
-pub struct Rba {
+pub struct Rbpa {
+	/* 	A mask for which memory-variable indices are _irrelevant_.
+		where the value is `false`, T==F==X. */
 	mask: StateMask,
 	rules: Vec<Rule>,
 }
-impl Rba {
-	pub fn mask_irrelevant_vars(mut self) -> (Self, bool) {
+impl Rbpa {
+	// 
+	pub fn mask_irrelevant_vars(&mut self) -> bool {
 		let mut changed_something = false;
 		'outer: for i in 0..StateSet::LEN {
 			if !self.mask.relevant_index[i] {
@@ -80,9 +84,9 @@ impl Rba {
 				r.assign.predicate[i] = Val::X;
 			}
 		}
-		(self, changed_something)
+		changed_something
 	}
-	pub fn normalize(mut self) -> Self {
+	pub fn normalize(&mut self) {
 		let mut buf = vec![];
 		while let Some(idx) = self.first_silent_idx() {
 			let silent = self.rules.remove(idx);
@@ -100,35 +104,31 @@ impl Rba {
 			}
 			self.rules.append(&mut buf);
 			println!("AFTER: {:#?}\n----------------", &self.rules);
-			self = self.rule_merge();
+			self.merge_rules();
 			println!("... rules_merged {:#?}", &self.rules);
 		}
-		self = self.rule_merge();
-		loop {
-			let (rba, changed_something) = self.mask_irrelevant_vars();
-			self = rba;
-			if !changed_something {
-				return self;
-			}
-			self = self.rule_merge()
-		}
+		self.merge_rules();
+		while self.mask_irrelevant_vars() || self.merge_rules() {}
+		// DONE
 	}
 	pub fn first_silent_idx(&self) -> Option<usize> {
 		self.rules.iter().enumerate().filter(|(_,r)| r.is_silent()).map(|(i,_)| i).next()
 	}
-	pub fn rule_merge(mut self) -> Self {
+	pub fn merge_rules(&mut self) -> bool {
+		let mut changed_something = false;
 		'outer: loop {
 			for (idx1, r1) in self.rules.iter().enumerate() {
 				let rng = (idx1 + 1)..;
 				for (r2, idx2) in self.rules[rng.clone()].iter().zip(rng) {
 					if let Some(new_rule) = r1.try_merge(r2) {
+						changed_something = true;
 						let _ = mem::replace(&mut self.rules[idx1], new_rule);
 						self.rules.remove(idx2);
 						continue 'outer;
 					}
 				}
 			}
-			return self
+			return changed_something
 		}
 	}
 }
@@ -159,19 +159,11 @@ impl PartialOrd for StateSet {
 	}
 }
 impl StateSet {
-	const LEN: usize = 2;
+	const LEN: usize = 3;
 	pub fn make_specific_wrt(&mut self, other: &Self) {
 		for (s, o) in izip!(self.iter_mut(), other.iter()) {
 			if *s < *o { // s is X, o is specific. copy specific value.
 				*s = *o;
-			}
-		}
-	}
-
-	pub fn make_generic_wrt(&mut self, other: &Self) {
-		for (s, o) in izip!(self.iter_mut(), other.iter()) {
-			if *s == *o { // s and o match, no
-				*s = Val::X;
 			}
 		}
 	}
@@ -200,20 +192,24 @@ struct Rule {
 	assign: StateSet,
 }
 impl Rule {
+	// apply the given rule to this state set. Return the new state set
 	pub fn apply(&self, set: &StateSet) -> Option<StateSet> {
 		let mut res = set.clone();
 		for (&g, &a, r) in izip!(self.guard.iter(), self.assign.iter(), res.iter_mut()) {
 			if g.mismatches(*r) {
+				// guard is not satisfied.
 				return None;
 			} else if a.specific() {
+				// explicit assignment. Eg: X->T or T->T
 				*r = a;
 			} else if g.specific() {
+				// implicit assignment because of guard. Eg: X  ==> (T->X) ==> T
 				*r = g;
 			}
 		}
-		// println!("BEFORE {:?} after {:?}", set, &res);
 		Some(res)
 	}
+	// true if the rule has no port and has no effect on memory. eg: F->F 
 	pub fn no_effect(&self) -> bool {
 		if self.port.is_some() {
 			return false
@@ -233,29 +229,33 @@ impl Rule {
 
 		use cmp::Ordering::*;
 		match [g_cmp, a_cmp] {
+			// 1st case: one rule subsumes the other. Eg: {X->T, T->T} give X->T 
 			[Some(g), Some(a)] if (a==Equal || a==g) && (g==Equal || g==Less) => Some(self.clone()),
 			[Some(g), Some(a)] if (a==Equal || a==g) && g==Greater => Some(other.clone()),
+			// 2nd case. There exists rule R which is split in half by these two rules. Return R.
+			// eg: {T->T, F->T} give X->T
 			[None   , Some(Equal)] => {
 				let mut guard = self.guard.clone();
 				let mut equal_so_far = true;
 				for (g, &g2) in izip!(guard.iter_mut(), other.guard.iter()) {
 					if *g != g2 {
 						if !equal_so_far {
+							// 2+ indices mismatch
 							return None
 						}
 						equal_so_far = false;
 						*g = Val::X;
 					}
 				}
-				// self and other split a larger rule in half. Return that rule. 
 				Some(Rule::new(guard, self.port.clone(), self.assign.clone()))
 			},
 			_ => None,
 		}
 	}
+	// return a new rule that represents two rules applied in the sequence: [self, other]
+	// prodecure fails if provided rules that cannot be composed. Eg: [F->F, T->T]
 	pub fn compose(&self, other: &Self) -> Option<Rule> {
 		println!("composing {:?} and {:?}", self, other);
-		// TODO CHECK IF REQUIRES INVARIANT OR WHAT
 		if !self.can_precede(other) {
 			return None
 		}
@@ -293,9 +293,11 @@ impl Rule {
 	}
 	pub fn can_precede(&self, other: &Self) -> bool {
 		if self.port.is_some() && other.port.is_some() {
+			// rules by our definition can involve 0 or 1 ports. this would require 2.
 			return false;
 		}
 		for (&a, &g) in self.assign.iter().zip(other.guard.iter()) {
+			// assignment of first rule produces something that mismatches guard of the 2nd.
 			if a.mismatches(g) {
 				return false
 			}
@@ -318,8 +320,8 @@ fn testy() {
 	wahey()
 }
 
-pub fn project(mut rba: Rba, atomic_ports: HashSet<PortId>) -> Rba {
-	for rule in rba.rules.iter_mut() {
+pub fn project(mut r: Rbpa, atomic_ports: HashSet<PortId>) -> Rbpa {
+	for rule in r.rules.iter_mut() {
 		if let Some(p) = rule.port {
 			if !atomic_ports.contains(&p) {
 				// hide!
@@ -327,33 +329,29 @@ pub fn project(mut rba: Rba, atomic_ports: HashSet<PortId>) -> Rba {
 			}
 		}
 	}
-	rba.normalize()
+	r.normalize();
+	r
 }
 
 pub fn wahey() {
 	use Val::*;
-	// let rba = Rba { rules: vec![
-	// 	Rule::new([X,X,F], Some(1), [X,X,T]),
-	// 	Rule::new([X,F,T], Some(2), [X,T,F]),
-	// 	Rule::new([F,T,T], Some(3), [T,F,F]),
-	// 	Rule::new([T,T,T], Some(4), [F,F,F]),
-	// ]};
-	let rba = Rba { rules: vec![
-		Rule::new(ss![[F,X]], Some(1), ss![[T,X]]),
-		Rule::new(ss![[T,F]], Some(2), ss![[F,T]]),
-		Rule::new(ss![[X,T]], Some(3), ss![[X,F]]),
-	], mask: StateMask {relevant_index: [true, true]}};
+	let rba = Rbpa { rules: vec![
+		Rule::new(ss![[X,X,F]], Some(1), ss![[X,X,T]]),
+		Rule::new(ss![[X,F,T]], Some(2), ss![[X,T,F]]),
+		Rule::new(ss![[F,T,T]], Some(3), ss![[T,F,F]]),
+		Rule::new(ss![[T,T,T]], Some(1), ss![[F,F,F]]),
+	], mask: StateMask {relevant_index: [true;StateSet::LEN]}};
 	let org = rba.clone();
 	println!("BEFORE");
 	for r in rba.rules.iter() {
 		println!("{:?}", r);
 	}
-	let atomic_ports = hashset!{1,2};
+	let atomic_ports = hashset!{1};
 	let start = std::time::Instant::now();
 	let rba2 = project(rba, atomic_ports.clone());
 	println!("ELAPSED {:?}", start.elapsed());
 	println!("AFTER: {:#?}", rba2);
-	pair_test(ss![[F,F]], org, rba2, atomic_ports);
+	pair_test(ss![[F,F,F]], org, rba2, atomic_ports);
 }
 
 #[derive(Clone, derive_new::new)]
@@ -363,7 +361,7 @@ pub struct StateMask {
 impl fmt::Debug for StateMask {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		for &x in self.relevant_index.iter() {
-			write!(f, "{:?}", if x {'1'} else {'0'})?;
+			write!(f, "{}", if x {'1'} else {'0'})?;
 		}
 		Ok(())
 	}
@@ -380,7 +378,7 @@ impl StateMask {
 	}
 }
 
-pub fn pair_test(mut state: StateSet, rba: Rba, atomic: Rba, atomic_ports: HashSet<PortId>) {
+pub fn pair_test(mut state: StateSet, rba: Rbpa, atomic: Rbpa, atomic_ports: HashSet<PortId>) {
 	println!("PROTO: {:#?}\nATOMIC: {:#?}", &rba, &atomic);
 	// let mut buf = HashSet::default();
 	let mut atomic_state = state.clone();
