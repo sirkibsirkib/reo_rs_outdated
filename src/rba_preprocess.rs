@@ -1,5 +1,6 @@
 type PortId = u32;
 use std::{fmt, mem, cmp};
+// use derive_new::new;
 
 use hashbrown::HashSet;
 
@@ -55,9 +56,32 @@ impl Val {
 
 #[derive(Debug, Clone)]
 pub struct Rba {
+	mask: StateMask,
 	rules: Vec<Rule>,
 }
 impl Rba {
+	pub fn mask_irrelevant_vars(mut self) -> (Self, bool) {
+		let mut changed_something = false;
+		'outer: for i in 0..StateSet::LEN {
+			if !self.mask.relevant_index[i] {
+				continue; // already irrelevant
+			}
+			for r in self.rules.iter() {
+				if r.guard.predicate[i].specific() {
+					continue 'outer;
+				}
+			}
+			// this index is irrelevant
+			println!("index {} is irrelevant", i);
+			self.mask.relevant_index[i] = false;
+			changed_something = true;
+			for r in self.rules.iter_mut() {
+				r.guard.predicate[i] = Val::X;
+				r.assign.predicate[i] = Val::X;
+			}
+		}
+		(self, changed_something)
+	}
 	pub fn normalize(mut self) -> Self {
 		let mut buf = vec![];
 		while let Some(idx) = self.first_silent_idx() {
@@ -79,20 +103,15 @@ impl Rba {
 			self = self.rule_merge();
 			println!("... rules_merged {:#?}", &self.rules);
 		}
-		println!("----");
-		// TODO ATTEMPT TO COALESCE AGAIN? IDK LEL
-		// println!("... COALESCE BEFORE {:#?}", &self.rules);
-		// for r in self.rules.iter_mut() {
-		// 	r.assign.make_generic_wrt(&r.guard);
-		// }
-		// println!("... COALESCE MADE GEN {:#?}", &self.rules);
-		// self = self.rule_merge();
-		// println!("... COALESCE AFTER {:#?}", &self.rules);
-		// for r in self.rules.iter_mut() {
-		// 	r.assign.make_specific_wrt(&r.guard);
-		// }
-		// println!("... SPECIFIC AGAIN {:#?}", &self.rules);
-		self
+		self = self.rule_merge();
+		loop {
+			let (rba, changed_something) = self.mask_irrelevant_vars();
+			self = rba;
+			if !changed_something {
+				return self;
+			}
+			self = self.rule_merge()
+		}
 	}
 	pub fn first_silent_idx(&self) -> Option<usize> {
 		self.rules.iter().enumerate().filter(|(_,r)| r.is_silent()).map(|(i,_)| i).next()
@@ -206,32 +225,32 @@ impl Rule {
 		}
 		true
 	}
+
+	// if these two rules can be represented by one, return that rule
 	pub fn try_merge(&self, other: &Self) -> Option<Rule> {
-		if self.port != other.port
-		|| &self.assign != &other.assign {
-			None
-		} else {
-			if let Some(o) = self.guard.partial_cmp(&other.guard) {
-				use cmp::Ordering::*;
-				return Some(match o {
-					Equal | Less => self.clone(),
-					Greater => other.clone(),
-				})
-			}
-			let mut guard = self.guard.clone();
-			let mut inequalities = 0;
-			for (g, &g2) in izip!(guard.iter_mut(), other.guard.iter()) {
-				if *g != g2 {
-					inequalities += 1;
-					if inequalities >= 2 {
-						return None;
+		let g_cmp = self.guard.partial_cmp(&other.guard);
+		let a_cmp = self.assign.partial_cmp(&other.assign);
+
+		use cmp::Ordering::*;
+		match [g_cmp, a_cmp] {
+			[Some(g), Some(a)] if (a==Equal || a==g) && (g==Equal || g==Less) => Some(self.clone()),
+			[Some(g), Some(a)] if (a==Equal || a==g) && g==Greater => Some(other.clone()),
+			[None   , Some(Equal)] => {
+				let mut guard = self.guard.clone();
+				let mut equal_so_far = true;
+				for (g, &g2) in izip!(guard.iter_mut(), other.guard.iter()) {
+					if *g != g2 {
+						if !equal_so_far {
+							return None
+						}
+						equal_so_far = false;
+						*g = Val::X;
 					}
-					*g = Val::X;
 				}
-			}
-			let r = Rule::new(guard, self.port.clone(), self.assign.clone());
-			println!("combine {:?} + {:?}   TO   {:?}", self, other, &r);
-			Some(r)
+				// self and other split a larger rule in half. Return that rule. 
+				Some(Rule::new(guard, self.port.clone(), self.assign.clone()))
+			},
+			_ => None,
 		}
 	}
 	pub fn compose(&self, other: &Self) -> Option<Rule> {
@@ -263,14 +282,6 @@ impl Rule {
 				}
 			}
 		}
-		// for (&g1, &a1, &g2, a) in izip!(self.assign.iter(), self.guard.iter(), other.guard.iter(), assign.iter_mut()) {
-		// 	let true_gen1 = g1.generic() && a1.generic();
-		// 	let true_gen2 = g2.generic() && a.generic();
-		// 	if !true_gen1 && true_gen2 {
-		// 		*a = a1;
-		// 	}
-		// }
-
 		Some(Rule::new(guard, port, assign))
 	}
 	pub fn new(guard: StateSet, port: Option<PortId>, mut assign: StateSet) -> Self {
@@ -316,8 +327,7 @@ pub fn project(mut rba: Rba, atomic_ports: HashSet<PortId>) -> Rba {
 			}
 		}
 	}
-	let rba2 = rba.normalize();
-	rba2
+	rba.normalize()
 }
 
 pub fn wahey() {
@@ -332,19 +342,42 @@ pub fn wahey() {
 		Rule::new(ss![[F,X]], Some(1), ss![[T,X]]),
 		Rule::new(ss![[T,F]], Some(2), ss![[F,T]]),
 		Rule::new(ss![[X,T]], Some(3), ss![[X,F]]),
-	]};
+	], mask: StateMask {relevant_index: [true, true]}};
 	let org = rba.clone();
 	println!("BEFORE");
 	for r in rba.rules.iter() {
 		println!("{:?}", r);
 	}
-	let atomic_ports = hashset!{1};
+	let atomic_ports = hashset!{1,2};
 	let start = std::time::Instant::now();
 	let rba2 = project(rba, atomic_ports.clone());
 	println!("ELAPSED {:?}", start.elapsed());
 	println!("AFTER: {:#?}", rba2);
 	pair_test(ss![[F,F]], org, rba2, atomic_ports);
+}
 
+#[derive(Clone, derive_new::new)]
+pub struct StateMask {
+	relevant_index: [bool; StateSet::LEN], 
+}
+impl fmt::Debug for StateMask {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		for &x in self.relevant_index.iter() {
+			write!(f, "{:?}", if x {'1'} else {'0'})?;
+		}
+		Ok(())
+	}
+}
+impl StateMask {
+	pub fn mask(&self, state: StateSet) -> StateSet {
+		let mut ret = state.clone();
+		for (r, &b) in izip!(ret.iter_mut(), self.relevant_index.iter()) {
+			if !b {
+				*r = Val::X;
+			}
+		}
+		ret
+	}
 }
 
 pub fn pair_test(mut state: StateSet, rba: Rba, atomic: Rba, atomic_ports: HashSet<PortId>) {
@@ -356,7 +389,7 @@ pub fn pair_test(mut state: StateSet, rba: Rba, atomic: Rba, atomic_ports: HashS
 	let mut trace_atomic = format!("A: {:?}", &state);
 	let mut try_order: Vec<usize> = (0..rba.rules.len()).collect();
 
-	'outer: for _ in 0..30 {
+	'outer: for _ in 0..24 {
 		use rand::seq::SliceRandom;
 		try_order.shuffle(&mut rng);
 		for rule in try_order.iter().map(|&i| &rba.rules[i]) {
@@ -375,12 +408,13 @@ pub fn pair_test(mut state: StateSet, rba: Rba, atomic: Rba, atomic_ports: HashS
 						// check that the atomic can simulate this step.
 						'inner: for rule2 in atomic.rules.iter().filter(|r| r.port == Some(p)) {
 							if let Some(new_atomic_state) = rule2.apply(&atomic_state) {
-								if new_atomic_state != new_state {
+								let new_atomic_state = atomic.mask.mask(new_atomic_state);
+								if new_atomic_state != atomic.mask.mask(new_state) {
 									continue 'inner;
 								} else {
 									// match!
 									atomic_state = new_atomic_state;
-									trace_atomic.push_str(&format!(" --{}-> {:?}", p, &new_state));
+									trace_atomic.push_str(&format!(" --{}-> {:?}", p, &new_atomic_state));
 									continue 'outer;
 								}
 							}
