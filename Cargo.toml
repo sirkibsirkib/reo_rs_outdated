@@ -16,3 +16,4 @@ parking_lot = "0.7.1"
 itertools = "0.8.0"
 
 derive-new = "0.5.6"
+rand = "0.6.5"

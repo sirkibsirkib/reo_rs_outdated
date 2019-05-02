@@ -1,8 +1,11 @@
 type PortId = u32;
-const LEN: usize = 3;
-use std::{fmt, mem};
+use std::{fmt, mem, cmp};
 
 use hashbrown::HashSet;
+
+macro_rules! ss {
+	($arr:expr) => {{StateSet {predicate: $arr}}}
+}
 
 macro_rules! hashset {
     (@single $($x:tt)*) => (());
@@ -22,8 +25,21 @@ macro_rules! hashset {
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-enum Val {
+pub enum Val {
 	T, F, X,
+}
+impl PartialOrd for Val {
+	// ordering is on SPECIFICITY
+	// X < T
+	fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+		use Val::*;
+		match [self, other] {
+			[a,b] if a==b => Some(cmp::Ordering::Equal),
+			[X,_] => Some(cmp::Ordering::Less),
+			[_,X] => Some(cmp::Ordering::Greater),
+			_ => None,
+		}
+	}
 }
 impl Val {
 	pub fn generic(self) -> bool {
@@ -33,12 +49,7 @@ impl Val {
 		!self.generic()
 	}
 	pub fn mismatches(self, other: Self) -> bool {
-		use Val::*;
-		let s: [Val;2] = [self, other];
-		match s {
-			[T,F] | [F,T] => true,
-			_ => false,
-		}
+		self.partial_cmp(&other).is_none()
 	}
 }
 
@@ -58,7 +69,8 @@ impl Rba {
 			}
 			for (i,r) in self.rules.iter().enumerate() {
 				if let Some(composed) = silent.compose(r) {
-					println!("ADDING rule ({},{})", idx, i);
+					let old_i = if i>=idx {i+1} else {i};
+					println!("ADDING composed rule ({},{})", idx, old_i);
 					buf.push(composed);
 				}
 			}
@@ -67,6 +79,19 @@ impl Rba {
 			self = self.rule_merge();
 			println!("... rules_merged {:#?}", &self.rules);
 		}
+		println!("----");
+		// TODO ATTEMPT TO COALESCE AGAIN? IDK LEL
+		// println!("... COALESCE BEFORE {:#?}", &self.rules);
+		// for r in self.rules.iter_mut() {
+		// 	r.assign.make_generic_wrt(&r.guard);
+		// }
+		// println!("... COALESCE MADE GEN {:#?}", &self.rules);
+		// self = self.rule_merge();
+		// println!("... COALESCE AFTER {:#?}", &self.rules);
+		// for r in self.rules.iter_mut() {
+		// 	r.assign.make_specific_wrt(&r.guard);
+		// }
+		// println!("... SPECIFIC AGAIN {:#?}", &self.rules);
 		self
 	}
 	pub fn first_silent_idx(&self) -> Option<usize> {
@@ -90,28 +115,115 @@ impl Rba {
 }
 
 
+#[derive(Eq, PartialEq, Copy, Clone, Hash)]
+pub struct StateSet {
+	predicate: [Val; Self::LEN],
+}
+impl PartialOrd for StateSet {
+	fn partial_cmp(&self, rhs: &Self) -> Option<cmp::Ordering> {
+		use cmp::Ordering::*;
+		let mut o = Equal;
+		for (&a, &b) in izip!(self.iter(), rhs.iter()) {
+			match a.partial_cmp(&b) {
+				None => return None,
+				Some(x @ Less) | Some(x @ Greater) => {
+					if o==Equal {
+						o = x;
+					} else if o!=x {
+						return None;
+					}
+				},
+				Some(Equal) => (),
+			} 
+		}
+		Some(o)
+	}
+}
+impl StateSet {
+	const LEN: usize = 2;
+	pub fn make_specific_wrt(&mut self, other: &Self) {
+		for (s, o) in izip!(self.iter_mut(), other.iter()) {
+			if *s < *o { // s is X, o is specific. copy specific value.
+				*s = *o;
+			}
+		}
+	}
+
+	pub fn make_generic_wrt(&mut self, other: &Self) {
+		for (s, o) in izip!(self.iter_mut(), other.iter()) {
+			if *s == *o { // s and o match, no
+				*s = Val::X;
+			}
+		}
+	}
+	pub fn iter(&self) -> impl Iterator<Item=&Val> {
+		self.predicate.iter()
+	}
+	pub fn iter_mut(&mut self) -> impl Iterator<Item=&mut Val> {
+		self.predicate.iter_mut()
+	}
+}
+impl fmt::Debug for StateSet {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		for x in self.predicate.iter() {
+			write!(f, "{:?}", x)?;
+		}
+		Ok(())
+	}
+}
+
+
 #[derive(Clone, Eq, PartialEq, Hash)]
 struct Rule {
 	// invariant: an X in assignment implies an X in guard at same position
-	guard: [Val; LEN],
+	guard: StateSet,
 	port: Option<PortId>,
-	assign: [Val; LEN],
+	assign: StateSet,
 }
 impl Rule {
+	pub fn apply(&self, set: &StateSet) -> Option<StateSet> {
+		let mut res = set.clone();
+		for (&g, &a, r) in izip!(self.guard.iter(), self.assign.iter(), res.iter_mut()) {
+			if g.mismatches(*r) {
+				return None;
+			} else if a.specific() {
+				*r = a;
+			} else if g.specific() {
+				*r = g;
+			}
+		}
+		// println!("BEFORE {:?} after {:?}", set, &res);
+		Some(res)
+	}
 	pub fn no_effect(&self) -> bool {
-		self.port.is_none() && self.guard == self.assign 
+		if self.port.is_some() {
+			return false
+		}
+		for (&g, &a) in izip!(self.guard.iter(), self.assign.iter()) {
+			if g.mismatches(a) || g < a {
+				return false
+			}
+		}
+		true
 	}
 	pub fn try_merge(&self, other: &Self) -> Option<Rule> {
 		if self.port != other.port
 		|| &self.assign != &other.assign {
 			None
 		} else {
+			if let Some(o) = self.guard.partial_cmp(&other.guard) {
+				use cmp::Ordering::*;
+				return Some(match o {
+					Equal | Less => self.clone(),
+					Greater => other.clone(),
+				})
+			}
 			let mut guard = self.guard.clone();
-			let mut mismatches = 0;
+			let mut inequalities = 0;
 			for (g, &g2) in izip!(guard.iter_mut(), other.guard.iter()) {
-				if g.mismatches(g2) {
-					mismatches += 1;
-					if mismatches >= 2 {
+				if *g != g2 {
+					inequalities += 1;
+					if inequalities >= 2 {
 						return None;
 					}
 					*g = Val::X;
@@ -123,6 +235,8 @@ impl Rule {
 		}
 	}
 	pub fn compose(&self, other: &Self) -> Option<Rule> {
+		println!("composing {:?} and {:?}", self, other);
+		// TODO CHECK IF REQUIRES INVARIANT OR WHAT
 		if !self.can_precede(other) {
 			return None
 		}
@@ -130,28 +244,37 @@ impl Rule {
 		let mut guard = self.guard.clone();
 		// where the LATTER rule specifies something the FORMER leaves generic, specify it.
 		// Eg: [X->X . F->T] becomes [F->T] not [X->T]
-		for (&g2, &a1, ng) in izip!(other.guard.iter(), self.assign.iter(), guard.iter_mut()) {
-			if a1.generic() && g2.specific() {
+		use Val::X;
+		for (&g1, &a1, &g2, ng) in izip!(self.guard.iter(), self.assign.iter(), other.guard.iter(), guard.iter_mut()) {
+			if g1==X && a1==X && g2.specific() {
 				*ng = g2;
 			}
 		}
 		// where the FORMER rule specifies something the LATTER leaves generic, specify it.
-		// Eg: [F->F . X->X] becomes [F->F] not [F->X]
+		// Eg: [F->T . X->X] becomes [F->T] not [F->X]
 		let mut assign = other.assign.clone();
-		for (a, &a1, &a2) in izip!(assign.iter_mut(), self.assign.iter(), other.assign.iter()) {
-			if a1.specific() && a2.generic() {
-				*a = a1;
+		for (a, &g1, &a1, &g2, &a2) in izip!(assign.iter_mut(), self.guard.iter(), self.assign.iter(), other.guard.iter(), other.assign.iter()) {
+			let latter_is_generic = g2==X && a2==X;
+			if latter_is_generic {
+				if a1.specific() {
+					*a = a1;
+				} else if g1.specific() {
+					*a = g1;
+				}
 			}
 		}
+		// for (&g1, &a1, &g2, a) in izip!(self.assign.iter(), self.guard.iter(), other.guard.iter(), assign.iter_mut()) {
+		// 	let true_gen1 = g1.generic() && a1.generic();
+		// 	let true_gen2 = g2.generic() && a.generic();
+		// 	if !true_gen1 && true_gen2 {
+		// 		*a = a1;
+		// 	}
+		// }
 
 		Some(Rule::new(guard, port, assign))
 	}
-	pub fn new(guard: [Val; LEN], port: Option<PortId>, mut assign: [Val; LEN]) -> Self {
-		for (g, a) in guard.iter().zip(assign.iter_mut()) {
-			if *a == Val::X && *g != Val::X {
-				*a = *g; // make assignment more specific
-			}
-		}
+	pub fn new(guard: StateSet, port: Option<PortId>, mut assign: StateSet) -> Self {
+		assign.make_specific_wrt(&guard);
 		Self {guard, port, assign}
 	} 
 	pub fn is_silent(&self) -> bool {
@@ -171,16 +294,10 @@ impl Rule {
 }
 impl fmt::Debug for Rule {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		for x in self.guard.iter() {
-			write!(f, "{:?}", x)?;
-		}
 		match self.port {
-			Some(x) => write!(f, " ={:?}=> ", x)?,
-			None => write!(f, " =.=> ")?,
+			Some(p) => write!(f, "{:?} ={:?}=> {:?}", &self.guard, p, &self.assign)?,
+			None => write!(f, "{:?} =.=> {:?}", &self.guard, &self.assign)?,
 		};
-		for x in self.assign.iter() {
-			write!(f, "{:?}", x)?;
-		}
 		Ok(())
 	}
 }
@@ -205,19 +322,78 @@ pub fn project(mut rba: Rba, atomic_ports: HashSet<PortId>) -> Rba {
 
 pub fn wahey() {
 	use Val::*;
+	// let rba = Rba { rules: vec![
+	// 	Rule::new([X,X,F], Some(1), [X,X,T]),
+	// 	Rule::new([X,F,T], Some(2), [X,T,F]),
+	// 	Rule::new([F,T,T], Some(3), [T,F,F]),
+	// 	Rule::new([T,T,T], Some(4), [F,F,F]),
+	// ]};
 	let rba = Rba { rules: vec![
-		Rule::new([X,X,F], Some(1), [X,X,T]),
-		Rule::new([X,F,T], Some(2), [X,T,F]),
-		Rule::new([F,T,T], Some(3), [T,F,F]),
-		Rule::new([T,T,T], Some(4), [F,F,F]),
+		Rule::new(ss![[F,X]], Some(1), ss![[T,X]]),
+		Rule::new(ss![[T,F]], Some(2), ss![[F,T]]),
+		Rule::new(ss![[X,T]], Some(3), ss![[X,F]]),
 	]};
+	let org = rba.clone();
 	println!("BEFORE");
 	for r in rba.rules.iter() {
 		println!("{:?}", r);
 	}
-	let atomic_ports = hashset!{2,4};
+	let atomic_ports = hashset!{1};
 	let start = std::time::Instant::now();
-	let rba2 = project(rba, atomic_ports);
+	let rba2 = project(rba, atomic_ports.clone());
 	println!("ELAPSED {:?}", start.elapsed());
 	println!("AFTER: {:#?}", rba2);
+	pair_test(ss![[F,F]], org, rba2, atomic_ports);
+
+}
+
+pub fn pair_test(mut state: StateSet, rba: Rba, atomic: Rba, atomic_ports: HashSet<PortId>) {
+	println!("PROTO: {:#?}\nATOMIC: {:#?}", &rba, &atomic);
+	// let mut buf = HashSet::default();
+	let mut atomic_state = state.clone();
+	let mut rng = rand::thread_rng();
+	let mut trace = format!("P: {:?}", &state);
+	let mut trace_atomic = format!("A: {:?}", &state);
+	let mut try_order: Vec<usize> = (0..rba.rules.len()).collect();
+
+	'outer: for _ in 0..30 {
+		use rand::seq::SliceRandom;
+		try_order.shuffle(&mut rng);
+		for rule in try_order.iter().map(|&i| &rba.rules[i]) {
+			if let Some(new_state) = rule.apply(&state) {
+				state = new_state;
+				while trace_atomic.len() < trace.len() {
+					trace_atomic.push(' ');
+				}
+				trace.push_str(&match rule.port {
+					Some(p) => format!(" --{}-> {:?}", p, &new_state),
+					None => format!(" --.-> {:?}", &new_state),
+				});
+				if let Some(p) = rule.port {
+					if atomic_ports.contains(&p) {
+						// took NONSILENT TRANSITION
+						// check that the atomic can simulate this step.
+						'inner: for rule2 in atomic.rules.iter().filter(|r| r.port == Some(p)) {
+							if let Some(new_atomic_state) = rule2.apply(&atomic_state) {
+								if new_atomic_state != new_state {
+									continue 'inner;
+								} else {
+									// match!
+									atomic_state = new_atomic_state;
+									trace_atomic.push_str(&format!(" --{}-> {:?}", p, &new_state));
+									continue 'outer;
+								}
+							}
+						}
+						println!("FAILED TO MATCH");
+						break 'outer;
+					}
+				}
+				continue 'outer; // some progress was made
+			}
+		}
+		println!("STUCK!");
+		break;
+	}
+	println!("{}\n{}", trace, trace_atomic);
 }
