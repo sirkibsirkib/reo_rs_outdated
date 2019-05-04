@@ -14,8 +14,10 @@
 // // mod token_eg;
 // // mod preventative;
 // // mod preventative_rba;
-// pub mod decimal;
+pub mod decimal;
 // // mod rba_builder;
-// mod rba_api_w_roy;
-#[macro_use] extern crate itertools;
+mod rba_api_w_roy;
+#[macro_use]
+extern crate itertools;
+mod logic;
 mod rba_preprocess;

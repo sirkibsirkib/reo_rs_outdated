@@ -1,7 +1,6 @@
 use crate::decimal::*;
 use std::marker::PhantomData;
 
-
 //////////// FULLY GENERIC ////////////////////
 
 impl Token for () {}
@@ -32,7 +31,6 @@ pub struct Coupon<P: Token, S: Token> {
     phantom: PhantomData<(P, S)>,
 }
 impl<P: Token, S: Token> Token for Coupon<P, S> {}
-
 
 pub struct Port<P: Token> {
     phantom: PhantomData<P>,
@@ -117,11 +115,6 @@ pub trait KnownCoupon {
     type PortNum: Token;
     type State: Token;
 }
-impl<P: Token, S: Token, K: Token> std::convert::Into<Coupon<P, S>> for K where K: KnownCoupon {
-    fn into(self) -> Coupon<P, S> {
-        
-    }
-}
 
 pub trait Advance: Token {
     type Opts;
@@ -133,7 +126,6 @@ pub trait Advance: Token {
         f(x)
     }
 }
-
 
 pub trait Knowable: Advance {
     // type CouponType: Token;
@@ -166,8 +158,7 @@ where
 //         let _ = act_result;
 //         NoData::fresh()
 //     }
-// } 
-
+// }
 
 // pub enum StatesReified<S: Token, N: Token> {
 //     Head(S),
@@ -216,17 +207,14 @@ where
 
 /////////////////////// SPECIFIC /////////////////
 
-
-
-
-
-
 // {R1,R2}
 pub enum R1R2<S0: Token, S1: Token> {
     R1(Coupon<N0, S0>),
     R2(Coupon<N1, S1>),
 }
-impl Advance for State<X> { type Opts = R1R2<X, State<T>>; }
+impl Advance for State<X> {
+    type Opts = R1R2<X, State<T>>;
+}
 
 // {R1}
 pub enum R1<S0: Token> {
@@ -236,18 +224,20 @@ impl<S0: Token> KnownCoupon for R1<S0> {
     type PortNum = N0;
     type State = S0;
 }
-impl Advance for State<F> { type Opts = R1<State<T>>; }
+impl Advance for State<F> {
+    type Opts = R1<State<T>>;
+}
 
 // {R2}
 
 pub enum R2<S1: Token> {
     R2(Coupon<N1, S1>),
 }
-impl Advance for State<T> { type Opts = R2<State<F>>; }
+impl Advance for State<T> {
+    type Opts = R2<State<F>>;
+}
 
 // {} (NONE)
-
-
 
 pub fn atomic(mut f: State<F>, mut p0: Port<N0>, mut p1: Port<N1>) -> ! {
     loop {
@@ -261,7 +251,107 @@ pub fn atomic(mut f: State<F>, mut p0: Port<N0>, mut p1: Port<N1>) -> ! {
     }
 }
 
-enum TorF {
-    T(State<T>),
-    F(State<F>),
-}
+// mod testing {
+//     use std::marker::PhantomData;
+//     struct T;
+//     struct F;
+//     struct X;
+
+//     trait IsTrue {}
+//     impl<T> IsTrue for T {}
+
+//     trait TX: Terny {}
+//     impl TX for T {}
+//     impl TX for X {}
+//     trait Terny {
+//         type Not: Terny;
+//     }
+//     impl Terny for T {
+//         type Not = F;
+//     }
+//     impl Terny for F {
+//         type Not = T;
+//     }
+//     impl Terny for X {
+//         type Not = X;
+//     }
+
+//     trait NandT<X: Terny> {
+//         type Nand: Terny;
+//     }
+//     impl NandT<T> for T {
+//         type Nand = F;
+//     }
+//     impl NandT<F> for T {
+//         type Nand = T;
+//     }
+//     impl<Q: Terny> NandT<Q> for F {
+//         type Nand = T;
+//     }
+
+//     trait SomeFalse {}
+//     impl SomeFalse for F {}
+//     impl<A,B> SomeFalse for (A,B) where A: SomeFalse, B: TX {}
+//     impl<A> SomeFalse for (A,F) {}
+
+//     pub struct State<A:Terny, B:Terny, C:Terny> {
+//         phantom: PhantomData<(A,B,C)>,
+//     }
+//     pub trait Advance: Sized {
+//         fn advance(self) {
+//             unimplemented!()
+//         }
+//     }
+
+//     // FIRST
+//     // match [**F] but not [TF*]
+//     impl<X1: Terny, X2: Terny> Advance for State<X1,X2,F>
+//     where
+//         X1: NandT<X2>,
+//     {}
+
+//     // SECOND
+//     impl Advance for State<T,F,F> {}
+
+//     pub fn tryit() {
+//         let start: State<T,F,F> = unsafe {std::mem::uninitialized()};
+//         match start.advance() {
+
+//         }
+//     }
+
+//     // R1: XXF
+//     // R2: XFT
+//     // R3: TFX
+
+//     // // {2} but not {1,3}
+//     // enum Opts2 {
+//     //     R2,
+//     // }
+//     // impl<X1: Terny> Advance for State<X1,F,T>
+//     // where
+//     //     // r1 [XXF] implicitly blocked
+//     //     // r3 [TFX]
+//     //     X1: SomeFalse,
+//     // {
+//     //     type Option = Opts2;
+//     // }
+
+//     // // TODO note that this is unusatisfiable
+//     // // {3} but not {1,2}
+//     // enum Opts3 {
+//     //     R3,
+//     // }
+//     // impl<X3: Terny> Advance for State<T,F,X3>
+//     // where
+//     //     // r1 [XXF]
+//     //     X3::Not: SomeFalse,
+//     //     // r2 [TFX]
+//     //     X3: SomeFalse,
+//     // {
+//     //     type Option = Opts3;
+//     // }
+
+//     // {1,2,3} but not {} is unsatisfiable!
+
+// }
