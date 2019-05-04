@@ -2,6 +2,18 @@ use std::marker::PhantomData;
 struct T;
 struct F;
 
+// transforms an n-ary tuple into nested binary tuples. 
+// (a,b,c,d) => (a,(b,(c,d)))
+// (a,b) => (a,b)
+// () => ()
+macro_rules! nest {
+	() => {()};
+    ($single:ty) => { $single };
+    ($head:ty, $($tail:ty),*) => {
+        ($head, nest!($( $tail),*))
+    };
+}
+
 trait Nand {}
 impl Nand for F {}
 impl Nand for Neg<T> {}
@@ -34,7 +46,7 @@ trait Advance: Sized {
 
 impl<A: Var, B: Var, C: Var> Advance for (A, B, C)
 where
-    (A, (Neg<B>, Neg<C>)): Nand,
+	nest!(A, Neg<B>, Neg<C>): Nand,
 {
     type Opts = u32;
 }
