@@ -161,12 +161,18 @@ impl<P: Proto> ProtoReadable<P> {
 }
 
 // the "shared" concrete protocol object
-struct ProtoCommon<P: Proto> {
+pub(crate) struct ProtoCommon<P: Proto> {
     readable: ProtoReadable<P>,
     cra: Mutex<ProtoCrAll<P>>,
 }
 impl<P: Proto> ProtoCommon<P> {
-    pub fn new(specific: P) -> (Self, HashMap<Id, Receiver<OutMessage>>) {
+    pub(crate) fn group_ready_wait(&self, leader: Id) -> RuleId {
+        unimplemented!()
+    }
+    pub(crate) fn group_register(&self, group: HashSet<Id>) -> Result<Id,()> {
+        unimplemented!()
+    }
+    fn new(specific: P) -> (Self, HashMap<Id, Receiver<OutMessage>>) {
         let ids = <P as Proto>::interface_ids();
         let num_ids = ids.len();
         let mut s_out = HashMap::with_capacity(num_ids);
@@ -195,22 +201,16 @@ impl<P: Proto> ProtoCommon<P> {
     }
 }
 
+
+
 // hidden
-pub(crate) trait ProtoCommonTrait<T> {
+trait ProtoCommonTrait<T> {
     fn get(&self, pc: &PortCommon<T>) -> T;
     fn put(&self, pc: &PortCommon<T>, datum: T);
-    fn group_ready_wait(&self, leader: Id) -> RuleId;
-    fn group_register(&self, leader: Id, group: HashSet<Id>);
 }
 
 
 impl<P: Proto, T: TryClone> ProtoCommonTrait<T> for ProtoCommon<P> {
-    fn group_ready_wait(&self, leader: Id) -> RuleId {
-        unimplemented!()
-    }
-    fn group_register(&self, leader: Id, group: HashSet<Id>) {
-        unimplemented!()
-    }
     fn get(&self, pc: &PortCommon<T>) -> T {
         // println!("{:?} entering...", pc.id);
         {
@@ -264,7 +264,7 @@ pub struct PortCommon<T> {
     id: Id,
     phantom: PhantomData<*const T>,
     r_out: Receiver<OutMessage>,
-    pub(crate) proto_common: Arc<dyn ProtoCommonTrait<T>>,
+    proto_common: Arc<dyn ProtoCommonTrait<T>>,
 }
 unsafe impl<T> Send for PortCommon<T> {}
 unsafe impl<T> Sync for PortCommon<T> {}

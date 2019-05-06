@@ -1,8 +1,9 @@
 
+use hashbrown::HashSet;
 use std::sync::Arc;
 use std::mem;
 use std::marker::PhantomData;
-use crate::proto::{Putter, Getter, PortCommon, Proto, Id, RuleId};
+use crate::proto::{Putter, Getter, ProtoCommon, Proto, Id, RuleId};
 
 pub trait Decimal: Token + Default {}
 pub trait Token: Sized {}
@@ -58,33 +59,21 @@ impl<D:Decimal, T> Safe<D,T> {
 	}
 }
 
-// TODO ensure
-impl<D: Decimal, X, P: Proto> ProtoCommunicator<P> for Safe<D, Putter<X>> {
-	fn register_group(&mut self) {
-		/* panics if:
-		1. ports overlap with already-registered
-		2. proto not in initial state
-		*/
-		unimplemented!()
-	}
-
-	fn ready_wait_determine<T: Transition>(&self) -> T {
-		let leader: Id = self.port_ids.iter().cloned().next().expect("EMPTY ID ITER");
-		T::new(self.inner.0.proto_common.group_ready_wait(leader))
-	}
+pub struct ProtoHandle<P: Proto> {
+	leader: Id,
+	common: Arc<ProtoCommon<P>>,
 }
-pub trait ProtoCommunicator<P: Proto> {
-
-	// assumes: 
-	// 1. output.len() >= 1
-	// 2. output[0] is always the same
-	fn register_group(&mut self);
-
-	// 1. acquire group id
-	// 2. send proto a message that entire group is ready
-	// 3. wait for proto response
-	// 4. interpret the proto's response
-	fn ready_wait_determine<T: Transition>(&self) -> T;
+impl<P: Proto> ProtoHandle<P> {
+	fn new<I>(common: Arc<ProtoCommon<P>>, port_ids: HashSet<Id>) -> Self {
+		let leader = common.group_register(port_ids).expect("WAH");
+		Self {
+			leader, common,
+		}
+	}
+	fn ready_wait_determine<T: Transition<P>>(&self) -> T {
+		let rid: RuleId = self.common.group_ready_wait(self.leader);
+		T::new(rid)
+	}
 }
 
 impl<D:Decimal, T> Safe<D, Getter<T>> {
@@ -152,20 +141,19 @@ impl Var for F {}
 impl Var for X {}
 
 
-pub trait Transition: Sized {
+pub trait Transition<P: Proto>: Sized {
 	fn new(proto_rule_id: RuleId) -> Self;
 } 
 
 pub trait Advance<P: Proto>: Sized {
-    type Opts: Transition;
-    fn advance<C, F, R>(self, communicator: C, handler: F) -> R
+    type Opts: Transition<P>;
+    fn advance<F, R>(self, p_handle: ProtoHandle<P>, handler: F) -> R
     where
-    	C: ProtoCommunicator<P>,
         F: FnOnce(Self::Opts) -> R,
     {
     	let choice: Self::Opts = match mem::size_of::<Self::Opts>() {
     		0 => unsafe { mem::uninitialized() },
-    		_ => communicator.ready_wait_determine(),
+    		_ => p_handle.ready_wait_determine(),
     	};
     	handler(choice)
     }
