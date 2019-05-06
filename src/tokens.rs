@@ -1,10 +1,8 @@
 
-use crate::proto::PortCommon;
 use std::sync::Arc;
 use std::mem;
-use crate::proto::{Proto, Id};
 use std::marker::PhantomData;
-use crate::proto::{Putter, Getter};
+use crate::proto::{Putter, Getter, PortCommon, Proto, Id, RuleId};
 
 pub trait Decimal: Token + Default {}
 pub trait Token: Sized {}
@@ -60,12 +58,8 @@ impl<D:Decimal, T> Safe<D,T> {
 	}
 }
 
-pub trait ProtoCommunicator<P: Proto> {
-	// assumes: 
-	// 1. output.len() >= 1
-	// 2. output[0] is always the same
-	fn id_iter(&self) -> &[Id];
-	fn get_commo(&self) -> &PortCommon<P>;
+// TODO ensure
+impl<D: Decimal, X, P: Proto> ProtoCommunicator<P> for Safe<D, Putter<X>> {
 	fn register_group(&mut self) {
 		/* panics if:
 		1. ports overlap with already-registered
@@ -73,22 +67,35 @@ pub trait ProtoCommunicator<P: Proto> {
 		*/
 		unimplemented!()
 	}
-	fn ready_and_wait(&mut self) -> usize {
-		// 1. acquire group id
-		// 2. send proto a message that entire group is ready
-		// 3. wait for proto response
-		// 4. interpret the proto's response
-		unimplemented!()
+
+	fn ready_wait_determine<T: Transition>(&self) -> T {
+		let leader: Id = self.port_ids.iter().cloned().next().expect("EMPTY ID ITER");
+		T::new(self.inner.0.proto_common.group_ready_wait(leader))
 	}
+}
+pub trait ProtoCommunicator<P: Proto> {
+
+	// assumes: 
+	// 1. output.len() >= 1
+	// 2. output[0] is always the same
+	fn register_group(&mut self);
+
+	// 1. acquire group id
+	// 2. send proto a message that entire group is ready
+	// 3. wait for proto response
+	// 4. interpret the proto's response
+	fn ready_wait_determine<T: Transition>(&self) -> T;
 }
 
 impl<D:Decimal, T> Safe<D, Getter<T>> {
 	pub fn get<R:Token>(&self, coupon: Coupon<D,R>) -> (T,R) {
+		let _ = coupon; 
         (self.inner.get(), R::fresh())
     }
 }
 impl<D:Decimal, T> Safe<D, Putter<T>> {
 	pub fn put<R:Token>(&self, coupon: Coupon<D,R>, datum: T) -> R {
+		let _ = coupon;
 		self.inner.put(datum);
 		R::fresh()
     }
@@ -146,7 +153,7 @@ impl Var for X {}
 
 
 pub trait Transition: Sized {
-	fn new(proto_rule_id: usize) -> Self;
+	fn new(proto_rule_id: RuleId) -> Self;
 } 
 
 pub trait Advance<P: Proto>: Sized {
@@ -158,9 +165,7 @@ pub trait Advance<P: Proto>: Sized {
     {
     	let choice: Self::Opts = match mem::size_of::<Self::Opts>() {
     		0 => unsafe { mem::uninitialized() },
-    		_ => {
-    			unimplemented!()
-    		},
+    		_ => communicator.ready_wait_determine(),
     	};
     	handler(choice)
     }

@@ -1,5 +1,6 @@
 use hashbrown::HashSet;
 use std::{cmp, fmt, mem, ops};
+use crate::proto::RuleId;
 use itertools::izip;
 
 type PortId = u32;
@@ -223,7 +224,7 @@ struct Rule {
     guard: StateSet,
     port: Option<PortId>,
     assign: StateSet,
-    ids: Vec<u64>,
+    ids: Vec<RuleId>,
 }
 impl Rule {
     // apply the given rule to this state set. Return the new state set
@@ -336,7 +337,7 @@ impl Rule {
         }
         Some(Rule::new(guard, port, assign, other.ids.clone()))
     }
-    pub fn new(guard: StateSet, port: Option<PortId>, mut assign: StateSet, ids: Vec<u64>) -> Self {
+    pub fn new(guard: StateSet, port: Option<PortId>, mut assign: StateSet, ids: Vec<RuleId>) -> Self {
         assign.make_specific_wrt(&guard);
         Self {
             guard,
@@ -422,7 +423,7 @@ pub fn wahey() {
     // println!("AFTER BROADENING {:#?}", &rba2);
     println!("ELAPSED {:?}", start.elapsed());
     println!("AFTER: {:#?}", rba2);
-    // pair_test(ss![[F, F, F]], org, rba2, atomic_ports);
+    pair_test(ss![[F, F, F]], org, rba2, atomic_ports);
 }
 
 #[derive(Clone, derive_new::new)]
@@ -449,55 +450,55 @@ impl StateMask {
     }
 }
 
-// pub fn pair_test(mut state: StateSet, rba: Rbpa, atomic: Rbpa, atomic_ports: HashSet<PortId>) {
-//     println!("PROTO: {:#?}\nATOMIC: {:#?}", &rba, &atomic);
-//     // let mut buf = HashSet::default();
-//     let mut atomic_state = state.clone();
-//     let mut rng = rand::thread_rng();
-//     let mut trace = format!("P: {:?}", &state);
-//     let mut trace_atomic = format!("A: {:?}", &state);
-//     let mut try_order: Vec<usize> = (0..rba.rules.len()).collect();
+pub fn pair_test(mut state: StateSet, rba: Rbpa, atomic: Rbpa, atomic_ports: HashSet<PortId>) {
+    println!("PROTO: {:#?}\nATOMIC: {:#?}", &rba, &atomic);
+    // let mut buf = HashSet::default();
+    let mut atomic_state = state.clone();
+    let mut rng = rand::thread_rng();
+    let mut trace = format!("P: {:?}", &state);
+    let mut trace_atomic = format!("A: {:?}", &state);
+    let mut try_order: Vec<usize> = (0..rba.rules.len()).collect();
 
-//     'outer: for _ in 0..24 {
-//         use rand::seq::SliceRandom;
-//         try_order.shuffle(&mut rng);
-//         for rule in try_order.iter().map(|&i| &rba.rules[i]) {
-//             if let Some(new_state) = rule.apply(&state) {
-//                 state = new_state;
-//                 while trace_atomic.len() < trace.len() {
-//                     trace_atomic.push(' ');
-//                 }
-//                 trace.push_str(&match rule.port {
-//                     Some(p) => format!(" --{}-> {:?}", p, &new_state),
-//                     None => format!(" --.-> {:?}", &new_state),
-//                 });
-//                 if let Some(p) = rule.port {
-//                     if atomic_ports.contains(&p) {
-//                         // took NONSILENT TRANSITION
-//                         // check that the atomic can simulate this step.
-//                         'inner: for rule2 in atomic.rules.iter().filter(|r| r.port == Some(p)) {
-//                             if let Some(new_atomic_state) = rule2.apply(&atomic_state) {
-//                                 let new_atomic_state = atomic.mask.mask(new_atomic_state);
-//                                 if new_atomic_state != atomic.mask.mask(new_state) {
-//                                     continue 'inner;
-//                                 } else {
-//                                     // match!
-//                                     atomic_state = new_atomic_state;
-//                                     trace_atomic
-//                                         .push_str(&format!(" --{}-> {:?}", p, &new_atomic_state));
-//                                     continue 'outer;
-//                                 }
-//                             }
-//                         }
-//                         println!("FAILED TO MATCH");
-//                         break 'outer;
-//                     }
-//                 }
-//                 continue 'outer; // some progress was made
-//             }
-//         }
-//         println!("STUCK!");
-//         break;
-//     }
-//     println!("{}\n{}", trace, trace_atomic);
-// }
+    'outer: for _ in 0..24 {
+        use rand::seq::SliceRandom;
+        try_order.shuffle(&mut rng);
+        for rule in try_order.iter().map(|&i| &rba.rules[i]) {
+            if let Some(new_state) = rule.apply(&state) {
+                state = new_state;
+                while trace_atomic.len() < trace.len() {
+                    trace_atomic.push(' ');
+                }
+                trace.push_str(&match rule.port {
+                    Some(p) => format!(" --{}-> {:?}", p, &new_state),
+                    None => format!(" --.-> {:?}", &new_state),
+                });
+                if let Some(p) = rule.port {
+                    if atomic_ports.contains(&p) {
+                        // took NONSILENT TRANSITION
+                        // check that the atomic can simulate this step.
+                        'inner: for rule2 in atomic.rules.iter().filter(|r| r.port == Some(p)) {
+                            if let Some(new_atomic_state) = rule2.apply(&atomic_state) {
+                                let new_atomic_state = atomic.mask.mask(new_atomic_state);
+                                if new_atomic_state != atomic.mask.mask(new_state) {
+                                    continue 'inner;
+                                } else {
+                                    // match!
+                                    atomic_state = new_atomic_state;
+                                    trace_atomic
+                                        .push_str(&format!(" --{}-> {:?}", p, &new_atomic_state));
+                                    continue 'outer;
+                                }
+                            }
+                        }
+                        println!("FAILED TO MATCH");
+                        break 'outer;
+                    }
+                }
+                continue 'outer; // some progress was made
+            }
+        }
+        println!("STUCK!");
+        break;
+    }
+    println!("{}\n{}", trace, trace_atomic);
+}

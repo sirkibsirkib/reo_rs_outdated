@@ -1,8 +1,11 @@
+use hashbrown::HashSet;
 use crate::bitset::BitSet;
-use crossbeam::{sync::ShardedLock, Receiver, Sender};
+use crossbeam::{Receiver, Sender};
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 use std::{marker::PhantomData, mem, sync::Arc};
+
+pub type RuleId = u64;
 
 /*
 Represents a putters PUT value in no more than |usize| bytes (pointer size).
@@ -72,6 +75,7 @@ enum OutMessage {
     PutAwait { count: usize },
     GetNotify { ptr: Ptr, notify: Id },
     Notification {},
+    // TODO GroupRuleFire { rule_id: RuleId },
 }
 
 
@@ -83,10 +87,12 @@ pub trait Proto: Sized + 'static {
     fn build_guards() -> Vec<Guard<Self>>;
 }
 
+
 // this is NOT generic over P, but is passed to the protocol
 #[derive(Debug, Default)]
 pub struct ProtoCrGen {
     put: HashMap<Id, Ptr>,
+    groups: HashMap<Id, HashSet<Id>>,
 }
 
 // part of the Cr that is provided as argument to the Proto-trait implementor
@@ -100,9 +106,16 @@ pub struct ProtoCr<P: Proto> {
 #[derive(Debug)]
 pub struct ProtoCrAll<P: Proto> {
     ready: BitSet,
+    ready_groups: HashSet<Id>,
     inner: ProtoCr<P>,
 }
 impl<P: Proto> ProtoCrAll<P> {
+    fn group_register(&mut self, _leader: Id, _group: HashSet<Id>) {
+        unimplemented!()
+    }
+    fn group_ready(&mut self, _leader: Id) {
+        unimplemented!()
+    }
     fn getter_ready(&mut self, id: Id) {
         self.ready.set(id);
     }
@@ -169,6 +182,7 @@ impl<P: Proto> ProtoCommon<P> {
         };
         let cra = ProtoCrAll {
             inner,
+            ready_groups: HashSet::default(),
             ready: BitSet::default(),
         };
         let guards = <P as Proto>::build_guards();
@@ -181,13 +195,22 @@ impl<P: Proto> ProtoCommon<P> {
     }
 }
 
-trait ProtoCommonTrait<T> {
+// hidden
+pub(crate) trait ProtoCommonTrait<T> {
     fn get(&self, pc: &PortCommon<T>) -> T;
     fn put(&self, pc: &PortCommon<T>, datum: T);
+    fn group_ready_wait(&self, leader: Id) -> RuleId;
+    fn group_register(&self, leader: Id, group: HashSet<Id>);
 }
 
 
 impl<P: Proto, T: TryClone> ProtoCommonTrait<T> for ProtoCommon<P> {
+    fn group_ready_wait(&self, leader: Id) -> RuleId {
+        unimplemented!()
+    }
+    fn group_register(&self, leader: Id, group: HashSet<Id>) {
+        unimplemented!()
+    }
     fn get(&self, pc: &PortCommon<T>) -> T {
         // println!("{:?} entering...", pc.id);
         {
@@ -241,19 +264,19 @@ pub struct PortCommon<T> {
     id: Id,
     phantom: PhantomData<*const T>,
     r_out: Receiver<OutMessage>,
-    proto_common: Arc<dyn ProtoCommonTrait<T>>,
+    pub(crate) proto_common: Arc<dyn ProtoCommonTrait<T>>,
 }
 unsafe impl<T> Send for PortCommon<T> {}
 unsafe impl<T> Sync for PortCommon<T> {}
 
 // get and put invocations cross the dynamic dispatch barrier here
-pub struct Getter<T>(PortCommon<T>);
+pub struct Getter<T>(pub(crate) PortCommon<T>);
 impl<T> Getter<T> {
     pub fn get(&self) -> T {
         self.0.proto_common.get(&self.0)
     }
 }
-pub struct Putter<T>(PortCommon<T>);
+pub struct Putter<T>(pub(crate) PortCommon<T>);
 impl<T> Putter<T> {
     pub fn put(&self, datum: T) {
         self.0.proto_common.put(&self.0, datum)
@@ -359,18 +382,4 @@ pub fn test() {
         });
     })
     .expect("Fail");
-}
-
-//////////////////////////////
-
-impl<S, T> ProtoCommonTrait<T> for ShardedLock<S>
-where
-    S: ProtoCommonTrait<T>,
-{
-    fn get(&self, pc: &PortCommon<T>) -> T {
-        self.read().expect("POISONED").get(pc)
-    }
-    fn put(&self, pc: &PortCommon<T>, datum: T) {
-        self.read().expect("POISONED").put(pc, datum)
-    }
 }
