@@ -60,7 +60,29 @@ fn test_call() {
     test()
 }
 pub fn test() {
-    let x: (T, T, F) = unsafe { std::mem::uninitialized() };
+    let x: (T, F, F) = unsafe { std::mem::uninitialized() };
     let r = x.advance(|o| o);
-    r == 5;
+}
+
+
+pub struct Wang;
+impl Wang {
+	pub fn foo(&self) {
+
+	} 
+}
+
+//wrapper type
+pub struct Safe<T>(T);
+impl Safe<Wang> {
+	pub fn safe_foo(&self) {
+		self.0.foo();
+	}
+}
+
+pub fn tyes() {
+	let x = Wang;
+	x.foo();
+	let y = Safe(Wang);
+	y.safe_foo();
 }

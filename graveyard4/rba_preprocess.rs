@@ -1,5 +1,5 @@
 use hashbrown::HashSet;
-use std::{cmp, fmt, mem};
+use std::{cmp, fmt, mem, ops};
 
 type PortId = u32;
 
@@ -46,6 +46,18 @@ impl PartialOrd for Val {
         }
     }
 }
+impl ops::Neg for Val {
+	type Output = Self;
+	fn neg(self) -> Self::Output {
+		use Val::*;
+		match self {
+			X => X,
+			T => F,
+			F => T,
+		}
+	}
+
+}
 impl Val {
     pub fn is_generic(self) -> bool {
         self == Val::X
@@ -67,6 +79,29 @@ pub struct Rbpa {
     rules: Vec<Rule>,
 }
 impl Rbpa {
+	pub fn broaden_rules(&mut self, start_states: &[StateSet]) {
+		let mut buf: Vec<Rule> = vec![];
+		let mut changed_something = true;
+		while changed_something {
+			changed_something = self.mask_irrelevant_vars() || self.merge_rules();
+		    for rule in self.rules.iter() {
+		    	println!("RULE GUARD: {:?}", &rule.guard);
+		    	'outer: for sister in rule.guard.sisters() {
+		    		for guard in self.rules.iter().map(|r| &r.guard).chain(start_states.iter()) {
+		    			if guard >= &sister {
+		    				// this guard would capture this new thing
+		    				continue 'outer;
+		    			}
+		    		}
+	    			let new_rule = Rule::new(sister.clone(), rule.port, rule.assign.clone());
+	    			buf.push(new_rule);
+	    			changed_something = true;
+	    			println!(" + {:?}", &sister);
+		    	}
+		    }
+		    self.rules.append(&mut buf);
+		}
+	}
     pub fn mask_irrelevant_vars(&mut self) -> bool {
         let mut changed_something = false;
         'outer: for i in 0..StateSet::LEN {
@@ -181,6 +216,18 @@ impl StateSet {
     }
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Val> {
         self.predicate.iter_mut()
+    }
+    pub fn sisters<'a>(&'a self) -> impl Iterator<Item=Self> + 'a {
+    	(0..StateSet::LEN).filter_map(move |i| {
+    		match - self.predicate[i] {
+    			Val::X => None,
+    			t_or_f => {
+    				let mut x = self.clone();
+    				x.predicate[i] = t_or_f;
+    				Some(x)
+    			},
+    		}
+    	})
     }
 }
 impl fmt::Debug for StateSet {
@@ -369,8 +416,8 @@ pub fn wahey() {
     let rba = Rbpa {
         rules: vec![
             Rule::new(ss![[X, X, F]], Some(1), ss![[X, X, T]]),
-            Rule::new(ss![[X, F, T]], Some(2), ss![[X, T, F]]),
-            Rule::new(ss![[F, T, T]], Some(3), ss![[T, F, F]]),
+            Rule::new(ss![[X, F, T]], Some(1), ss![[X, T, F]]),
+            Rule::new(ss![[F, T, T]], Some(1), ss![[T, F, F]]),
             Rule::new(ss![[T, T, T]], Some(4), ss![[F, F, F]]),
         ],
         mask: StateMask {
@@ -382,9 +429,11 @@ pub fn wahey() {
     for r in rba.rules.iter() {
         println!("{:?}", r);
     }
-    let atomic_ports = hashset! {1,4};
+    let atomic_ports = hashset! {1,2,3};
     let start = std::time::Instant::now();
     let rba2 = project(rba, atomic_ports.clone());
+    // rba2.broaden_rules(&[ss![[F,F,F]]]);
+    // println!("AFTER BROADENING {:#?}", &rba2);
     println!("ELAPSED {:?}", start.elapsed());
     println!("AFTER: {:#?}", rba2);
     pair_test(ss![[F, F, F]], org, rba2, atomic_ports);
