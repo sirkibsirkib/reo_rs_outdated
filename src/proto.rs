@@ -82,6 +82,7 @@ enum OutMessage {
 }
 
 
+
 // the trait that constrains the properties of specific protocol structures
 pub trait Proto: Sized + 'static {
     type Interface;
@@ -199,11 +200,11 @@ where P: Proto, I: Iterator<Item=&'a (dyn Port<P>)> {
     let mut comm = None;
     // 1. build the GroupCommunicator object
     for port in it {
+        let id = port.get_common().id;
         if let None = comm {
             comm = Some(GroupCommunicator {
-                leader: port.get_common().id,
+                leader: id,
                 proto_common: {
-                    let Arc<dyn ProtoCommonTrait>,
                     port.get_common().proto_common.clone()
                 },
                 msg_receiver: port.get_common().r_out.clone(),
