@@ -91,6 +91,7 @@ pub trait Proto: Sized + 'static {
     fn state_predicate(&self, predicate: &StatePred) -> bool;
 }
 
+#[derive(Debug)]
 pub struct StatePred {
     pred: Vec<crate::rbpa::Val>,
 }
@@ -109,11 +110,18 @@ pub struct ProtoCr<P: Proto> {
     specific: P,
 }
 
+#[derive(Debug)]
+pub struct StateWaiter {
+    predicate: StatePred,
+    notify_when: Id,
+}
+
 // writable component: locking needed
 #[derive(Debug)]
 pub struct ProtoCrAll<P: Proto> {
     ready: BitSet,
     ready_groups: HashSet<Id>,
+    state_waiters: Vec<StateWaiter>,
     groups: HashMap<Id, HashSet<Id>>,
     inner: ProtoCr<P>,
 }
@@ -141,6 +149,19 @@ impl<P: Proto> ProtoCrAll<P> {
                     }
                 }
             }
+            if !self.state_waiters.is_empty() {
+                let Self { state_waiters, inner, .. } = self;
+                state_waiters.retain(|waiter| {
+                    if inner.specific.state_predicate(&waiter.predicate) {
+                        readable.s_out.get(&waiter.notify_when).expect("WHAYT")
+                        .send(OutMessage::Notification {}).expect("ZPYP");
+                        false
+                    } else {
+                        // keep waiting
+                        true
+                    }
+                });
+            }
             break; // no call to REDO
         }
         // println!("ADVANCE STATE OVER");
@@ -160,6 +181,73 @@ impl<P: Proto> ProtoReadable<P> {
             .send(msg)
             .expect("DEAD");
     }
+}
+
+pub trait Port<P: Proto> {
+    fn get_id(&self) -> Id;
+    fn get_receiver(&self) -> &Receiver<OutMessage>;
+    fn get_proto_common(&self) -> &Arc<ProtoCommon<P>>;
+}
+
+pub struct GroupCommunicator<P: Proto> {
+    leader: Id,
+    proto_common: Arc<ProtoCommon<P>>,
+    msg_receiver: Receiver<OutMessage>,
+}
+
+pub fn register_port_group<'a,I,P>(predicate: StatePred, it: I) -> Result<GroupCommunicator<P>, ()>
+where P: Proto, I: Iterator<Item=&'a (dyn Port<P>)> {
+    let mut group_ids: HashSet<Id> = HashSet::default();
+    let mut comm = None;
+    // 1. build the GroupCommunicator object
+    for port in it {
+        let id = port.get_id();
+        if let None = comm {
+            comm = Some(GroupCommunicator {
+                leader: id,
+                proto_common: port.get_proto_common().clone(),
+                msg_receiver: port.get_receiver().clone(),
+            })
+        };
+        if group_ids.insert(id) {
+            panic!("duplicate Ids ??");
+        }
+    }
+    let comm = match comm {
+        Some(comm) => comm,
+        None => return Err(()),
+    };
+    // 2. try register the group
+    let mut proto_cr_all = comm.proto_common.cra.lock();
+    for existing_group in proto_cr_all.groups.values() {
+        for id in group_ids.iter() {
+            if existing_group.contains(id) {
+                return Err(());
+            }
+        }
+    }
+    proto_cr_all.groups.insert(comm.leader, group_ids);
+
+    // 3. wait until the state predicate is satisifed
+    let satisfied = proto_cr_all.inner.specific.state_predicate(&predicate);
+    if !satisfied {
+        // wait 
+        let waiter = StateWaiter {
+            notify_when: comm.leader,
+            predicate, 
+        };
+        proto_cr_all.state_waiters.push(waiter);
+        mem::drop(proto_cr_all); // release lock
+        match comm.msg_receiver.recv().expect("KABLOEEY") {
+            OutMessage::Notification{} => {
+
+            },
+            wrong_msg => panic!("Group waiter got {:?}", wrong_msg),
+        }
+    } else {
+        mem::drop(proto_cr_all); // release lock
+    }
+    Ok(comm)
 }
 
 // the "shared" concrete protocol object
@@ -187,6 +275,7 @@ impl<P: Proto> ProtoCommon<P> {
         };
         let cra = ProtoCrAll {
             inner,
+            state_waiters: vec![],
             ready: BitSet::default(),
             ready_groups: HashSet::default(),
             groups: Default::default(),
