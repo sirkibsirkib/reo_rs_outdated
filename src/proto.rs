@@ -262,12 +262,15 @@ impl Huang {
 
 
 const MUTEX_BYTES: usize = mem::size_of::<MutexGuard<()>>();
-unsafe impl<P: Proto> Send for ProtoLock<P> {}
+/*
+This is created alongside the interface of a proto. so long a 
+*/
 pub struct ProtoLock<P: Proto> {
     proto_common: Arc<ProtoCommon<P>>,
     raw_lock: [u8; MUTEX_BYTES],
     locked_ptr: *mut ProtoCrAll<P>,
 }
+unsafe impl<P: Proto> Send for ProtoLock<P> {}
 impl<P: Proto> ProtoLock<P> {
     pub fn create_and_lock(proto_common: Arc<ProtoCommon<P>>) -> Self {
         let mut raw_lock = [0; MUTEX_BYTES];
@@ -308,7 +311,12 @@ impl<P: Proto> ProtoLock<P> {
         }
     }
     pub fn unlock(self) {
-        // drop
+        mem::drop(self)
+    }
+}
+impl<P: Proto> Drop for ProtoLock<P> {
+    fn drop(&mut self) {
+        println!("dropping mutex");
         let x: MutexGuard<ProtoCrAll<P>> = unsafe {
             mem::transmute(self.raw_lock)
         };
