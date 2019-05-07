@@ -1,7 +1,7 @@
-use hashbrown::HashSet;
-use std::{cmp, fmt, mem, ops};
 use crate::proto::RuleId;
+use hashbrown::HashSet;
 use itertools::izip;
+use std::{cmp, fmt, mem, ops};
 
 type PortId = u32;
 
@@ -58,7 +58,6 @@ impl ops::Neg for Val {
             F => T,
         }
     }
-
 }
 impl Val {
     pub fn is_generic(self) -> bool {
@@ -196,15 +195,13 @@ impl StateSet {
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Val> {
         self.predicate.iter_mut()
     }
-    pub fn sisters<'a>(&'a self) -> impl Iterator<Item=Self> + 'a {
-        (0..StateSet::LEN).filter_map(move |i| {
-            match - self.predicate[i] {
-                Val::X => None,
-                t_or_f => {
-                    let mut x = self.clone();
-                    x.predicate[i] = t_or_f;
-                    Some(x)
-                },
+    pub fn sisters<'a>(&'a self) -> impl Iterator<Item = Self> + 'a {
+        (0..StateSet::LEN).filter_map(move |i| match -self.predicate[i] {
+            Val::X => None,
+            t_or_f => {
+                let mut x = self.clone();
+                x.predicate[i] = t_or_f;
+                Some(x)
             }
         })
     }
@@ -292,7 +289,12 @@ impl Rule {
                 }
                 let mut ids = self.ids.clone();
                 ids.extend(&other.ids[..]);
-                Some(Rule::new(guard, self.port.clone(), self.assign.clone(), ids))
+                Some(Rule::new(
+                    guard,
+                    self.port.clone(),
+                    self.assign.clone(),
+                    ids,
+                ))
             }
             _ => None,
         }
@@ -337,7 +339,12 @@ impl Rule {
         }
         Some(Rule::new(guard, port, assign, other.ids.clone()))
     }
-    pub fn new(guard: StateSet, port: Option<PortId>, mut assign: StateSet, ids: Vec<RuleId>) -> Self {
+    pub fn new(
+        guard: StateSet,
+        port: Option<PortId>,
+        mut assign: StateSet,
+        ids: Vec<RuleId>,
+    ) -> Self {
         assign.make_specific_wrt(&guard);
         Self {
             guard,

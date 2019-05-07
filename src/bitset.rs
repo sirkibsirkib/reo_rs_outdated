@@ -1,17 +1,16 @@
 use std::fmt;
 
-
 #[derive(Default)]
 pub struct BitSet {
     data: Vec<usize>,
 }
 
 impl BitSet {
-     // INVARIANT: NO TRAILING ZERO CHUNKS
+    // INVARIANT: NO TRAILING ZERO CHUNKS
     const BYTES_PER_CHUNK: usize = std::mem::size_of::<usize>();
     const BITS_PER_CHUNK: usize = Self::BYTES_PER_CHUNK * 8;
 
-    pub fn from_usizes<I: Iterator<Item=usize>>(it: I) -> Self {
+    pub fn from_usizes<I: Iterator<Item = usize>>(it: I) -> Self {
         let data = it.collect();
         let mut me = Self { data };
         me.strip_trailing_zeroes();
@@ -19,9 +18,9 @@ impl BitSet {
     }
     pub fn from_usize(chunk: usize) -> Self {
         if chunk == 0 {
-            Self {data: vec![]}
+            Self { data: vec![] }
         } else {
-            Self {data: vec![chunk]}
+            Self { data: vec![chunk] }
         }
     }
     pub fn into_usizes(self) -> Vec<usize> {
@@ -82,7 +81,6 @@ impl BitSet {
                 return;
             }
         }
-
     }
     pub fn difference_with(&mut self, other: &Self) {
         for (s, &o) in self.data.iter_mut().zip(other.data.iter()) {
@@ -91,7 +89,6 @@ impl BitSet {
         self.strip_trailing_zeroes();
     }
 }
-
 
 impl fmt::Debug for BitSet {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -105,7 +102,6 @@ impl fmt::Debug for BitSet {
         write!(f, "]")
     }
 }
-
 
 pub mod adaptors {
     use crate::bitset::BitSet;
@@ -135,7 +131,7 @@ pub mod adaptors {
                                 Some(b) => b,
                             }
                         }
-                    },
+                    }
                     [Some(a), Some(b)] => {
                         // return false if there is a bit in b not in a
                         if (b & !a) != 0 {
@@ -180,13 +176,13 @@ pub mod adaptors {
     #[derive(Debug)]
     pub struct Identity<'a> {
         next_chunk_idx: usize,
-        bitset: &'a BitSet, 
+        bitset: &'a BitSet,
     }
     impl<'a> Identity<'a> {
         pub fn new(bitset: &'a BitSet) -> Self {
             Identity {
                 next_chunk_idx: 0,
-                bitset, 
+                bitset,
             }
         }
     }
@@ -219,29 +215,27 @@ pub mod adaptors {
         }
     }
 
-
     #[derive(Debug, derive_new::new)]
-    pub struct Or<A:BitSetIter,B:BitSetIter>(A,B);
-    impl<A:BitSetIter,B:BitSetIter> BitSetIter for Or<A,B> {
+    pub struct Or<A: BitSetIter, B: BitSetIter>(A, B);
+    impl<A: BitSetIter, B: BitSetIter> BitSetIter for Or<A, B> {
         fn next_chunk(&mut self) -> Option<usize> {
             match [self.0.next_chunk(), self.1.next_chunk()] {
                 [x, None] | [None, x] => x,
-                [Some(x), Some(y)] => Some(x | y)
+                [Some(x), Some(y)] => Some(x | y),
             }
         }
     }
 
     #[derive(Debug, derive_new::new)]
-    pub struct And<A:BitSetIter,B:BitSetIter>(A,B);
-    impl<A:BitSetIter,B:BitSetIter> BitSetIter for And<A,B> {
+    pub struct And<A: BitSetIter, B: BitSetIter>(A, B);
+    impl<A: BitSetIter, B: BitSetIter> BitSetIter for And<A, B> {
         fn next_chunk(&mut self) -> Option<usize> {
             match [self.0.next_chunk(), self.1.next_chunk()] {
                 [x, None] | [None, x] => x,
-                [Some(x), Some(y)] => Some(x & y)
+                [Some(x), Some(y)] => Some(x & y),
             }
         }
     }
-
 
     #[test]
     pub fn bitset_tests() {

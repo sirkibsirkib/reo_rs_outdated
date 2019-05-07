@@ -1,4 +1,3 @@
-
 #[macro_export]
 macro_rules! id_iter {
     ($($id:expr),*) => {
@@ -11,13 +10,13 @@ macro_rules! finalize_ports {
     ($commons:expr => $($struct:path),*) => {
         (
             $(
-                $struct($commons.next().unwrap()),
+                $struct($commons.next().unwrap(), Default::default()),
             )*
         )
     }
 }
 
-// transforms an n-ary tuple into nested binary tuples. 
+// transforms an n-ary tuple into nested binary tuples.
 // (a,b,c,d) => (a,(b,(c,d)))
 // (a,b) => (a,b)
 // () => ()
@@ -34,7 +33,7 @@ macro_rules! nest {
 macro_rules! milli_sleep {
     ($millis:expr) => {{
         std::thread::sleep(std::time::Duration::from_millis($millis));
-    }}
+    }};
 }
 
 #[macro_export]
