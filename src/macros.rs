@@ -1,4 +1,22 @@
 
+#[macro_export]
+macro_rules! id_iter {
+    ($($id:expr),*) => {
+        [$( $id, )*].iter().cloned()
+    };
+}
+
+#[macro_export]
+macro_rules! finalize_ports {
+    ($commons:expr => $($struct:path),*) => {
+        (
+            $(
+                $struct($commons.next().unwrap()),
+            )*
+        )
+    }
+}
+
 // transforms an n-ary tuple into nested binary tuples. 
 // (a,b,c,d) => (a,(b,(c,d)))
 // (a,b) => (a,b)
@@ -10,6 +28,13 @@ macro_rules! nest {
     ($head:ty, $($tail:ty),*) => {
         ($head, nest!($( $tail),*))
     };
+}
+
+#[macro_export]
+macro_rules! milli_sleep {
+    ($millis:expr) => {{
+        std::thread::sleep(std::time::Duration::from_millis($millis));
+    }}
 }
 
 #[macro_export]

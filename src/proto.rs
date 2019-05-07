@@ -1,3 +1,4 @@
+use smallvec::SmallVec;
 use parking_lot::RawMutex;
 use parking_lot::MutexGuard;
 use hashbrown::HashSet;
@@ -84,9 +85,14 @@ enum OutMessage {
 // the trait that constrains the properties of specific protocol structures
 pub trait Proto: Sized + 'static {
     type Interface;
-    fn instantiate() -> (ProtoLock<Self>, Self::Interface);
+    fn instantiate() -> Self::Interface;
     fn interface_ids() -> &'static [Id];
     fn build_guards() -> Vec<Guard<Self>>;
+    fn state_predicate(&self, predicate: &StatePred) -> bool;
+}
+
+pub struct StatePred {
+    pred: Vec<crate::rbpa::Val>,
 }
 
 
@@ -253,76 +259,78 @@ impl<P: Proto, T: TryClone> ProtoCommonTrait<T> for ProtoCommon<P> {
     }
 }
 
-struct Huang {
-    x: [u8; Self::FOO],
-}
-impl Huang {
-    const FOO: usize = 5;
-}
 
-
-const MUTEX_BYTES: usize = mem::size_of::<MutexGuard<()>>();
-/*
-This is created alongside the interface of a proto. so long a 
-*/
-pub struct ProtoLock<P: Proto> {
-    proto_common: Arc<ProtoCommon<P>>,
-    raw_lock: [u8; MUTEX_BYTES],
-    locked_ptr: *mut ProtoCrAll<P>,
-}
-unsafe impl<P: Proto> Send for ProtoLock<P> {}
-impl<P: Proto> ProtoLock<P> {
-    pub fn create_and_lock(proto_common: Arc<ProtoCommon<P>>) -> Self {
-        let mut raw_lock = [0; MUTEX_BYTES];
-        let raw_lockref = &mut raw_lock;
-        let locked_ptr = {
-            let mut locked = proto_common.cra.lock();
-            let locked_ptr: &mut ProtoCrAll<P> = &mut locked;
-            let locked_ptr: *mut ProtoCrAll<P> = locked_ptr;
-            let dest: &mut MutexGuard<_> = unsafe  {
-                mem::transmute(raw_lockref)
-            };
-            mem::forget(mem::replace(dest, locked));
-            locked_ptr
-        };
-        Self {
-            proto_common,
-            raw_lock,
-            locked_ptr,
-        }
-    }
-    pub fn register_group(&mut self, group_ids: HashSet<Id>) -> Result<Id,()> {
-        match group_ids.iter().cloned().next() {
-            None => Err(()),
-            Some(leader) => {
-                let x: &mut ProtoCrAll<P> = unsafe {
-                    &mut *self.locked_ptr
-                };
-                for existing_group in x.groups.values() {
-                    for id in group_ids.iter() {
-                        if existing_group.contains(id) {
-                            return Err(());
-                        }
-                    }
-                }
-                x.groups.insert(leader, group_ids);
-                Ok(leader)
-            }
-        }
-    }
-    pub fn unlock(self) {
-        mem::drop(self)
-    }
-}
-impl<P: Proto> Drop for ProtoLock<P> {
-    fn drop(&mut self) {
-        println!("dropping mutex");
-        let x: MutexGuard<ProtoCrAll<P>> = unsafe {
-            mem::transmute(self.raw_lock)
-        };
-        drop(x);
-    }
-}
+// const MUTEX_BYTES: usize = mem::size_of::<MutexGuard<()>>();
+// /*
+// This is created alongside the interface of a proto. so long as it is in scope,
+// it holds the mutex to the Proto using unsafe wizardry.
+// --- Safety:
+// raw MutexGuard is transmuted, stored in the raw_lock buffer. to shake off borrow checker
+// this represents internal mutability, since its a referece to the Arc field.
+// the arc is stored also, preventing the ProtoCommon from being freed until
+// the Protolock is freed itself. The drop order ensures the lock is unlocked
+// BEFORE the Arc goes out of scope.
+// The Proto lock ensures mutable access, thus its safe to access the ProtoCrAll using
+// a mutable reference.
+// */
+// pub struct ProtoLock<P: Proto> {
+//     proto_common: Arc<ProtoCommon<P>>,
+//     raw_lock: [u8; MUTEX_BYTES],
+//     locked_ptr: *mut ProtoCrAll<P>,
+// }
+// unsafe impl<P: Proto> Send for ProtoLock<P> {}
+// impl<P: Proto> ProtoLock<P> {
+//     pub fn create_and_lock(proto_common: Arc<ProtoCommon<P>>) -> Self {
+//         let mut raw_lock = [0; MUTEX_BYTES];
+//         let raw_lockref = &mut raw_lock;
+//         let locked_ptr = {
+//             let mut locked = proto_common.cra.lock();
+//             let locked_ptr: &mut ProtoCrAll<P> = &mut locked;
+//             let locked_ptr: *mut ProtoCrAll<P> = locked_ptr;
+//             let dest: &mut MutexGuard<_> = unsafe  {
+//                 mem::transmute(raw_lockref)
+//             };
+//             mem::forget(mem::replace(dest, locked));
+//             locked_ptr
+//         };
+//         Self {
+//             proto_common,
+//             raw_lock,
+//             locked_ptr,
+//         }
+//     }
+//     pub fn register_group(&mut self, group_ids: HashSet<Id>) -> Result<Id,()> {
+//         match group_ids.iter().cloned().next() {
+//             None => Err(()),
+//             Some(leader) => {
+//                 let x: &mut ProtoCrAll<P> = unsafe {
+//                     &mut *self.locked_ptr
+//                 };
+//                 for existing_group in x.groups.values() {
+//                     for id in group_ids.iter() {
+//                         if existing_group.contains(id) {
+//                             return Err(());
+//                         }
+//                     }
+//                 }
+//                 x.groups.insert(leader, group_ids);
+//                 Ok(leader)
+//             }
+//         }
+//     }
+//     pub fn unlock(self) {
+//         mem::drop(self)
+//     }
+// }
+// impl<P: Proto> Drop for ProtoLock<P> {
+//     fn drop(&mut self) {
+//         println!("dropping mutex");
+//         let x: MutexGuard<ProtoCrAll<P>> = unsafe {
+//             mem::transmute(self.raw_lock)
+//         };
+//         drop(x);
+//     }
+// }
 
 // common to Putter and to Getter to minimize boilerplate
 pub struct PortCommon<T> {
@@ -362,27 +370,15 @@ pub trait TryClone: Sized {
 
 ////////////// EXAMPLE concrete ///////////////
 
-macro_rules! id_iter {
-	($($id:expr),*) => {
-        [$( $id, )*].iter().cloned()
-    };
-}
-
-macro_rules! finalize_ports {
- 	($commons:expr => $($struct:path),*) => {
- 		(
- 			$(
-				$struct($commons.next().unwrap()),
-			)*
- 		)
- 	}
-}
 
 // concrete proto. implements Proto trait
 struct SyncProto<T> {
     data_type: PhantomData<T>,
 }
 impl<T: 'static + Clone> Proto for SyncProto<T> {
+    fn state_predicate(&self, _predicate: &StatePred) -> bool {
+        true
+    }
     type Interface = (Putter<T>, Getter<T>);
     fn interface_ids() -> &'static [Id] {
         &[0, 1]
@@ -409,13 +405,12 @@ impl<T: 'static + Clone> Proto for SyncProto<T> {
             },
         }]
     }
-    fn instantiate() -> (ProtoLock<Self>, <Self as Proto>::Interface) {
+    fn instantiate() -> <Self as Proto>::Interface {
         let proto = Self {
             data_type: Default::default(),
         };
         let (proto_common, mut r_out) = ProtoCommon::new(proto);
         let proto_common = Arc::new(proto_common);
-        let proto_common2 = proto_common.clone();
         let mut commons = <Self as Proto>::interface_ids()
             .iter()
             .map(|id| PortCommon {
@@ -424,10 +419,7 @@ impl<T: 'static + Clone> Proto for SyncProto<T> {
                 proto_common: proto_common.clone(),
                 phantom: PhantomData::default(),
             });
-        (
-            ProtoLock::create_and_lock(proto_common2),
-            finalize_ports!(commons => Putter, Getter)
-        )
+        finalize_ports!(commons => Putter, Getter)
     }
 }
 
@@ -437,39 +429,38 @@ impl<T: Clone> TryClone for T {
     }
 }
 
-#[test]
-pub fn lock_test() {
-    let (lock, (p, g)) = SyncProto::<u8>::instantiate();
-    println!("Starting. Lock locked!");
-    crossbeam::scope(|s| {
-        s.spawn(move |_| {
-            for i in 0..5 {
-                println!("put start ...");
-                p.put(i);
-                println!("put succeeded");
-            }
-        });
-        s.spawn(move |_| {
-            for _ in 0..5 {
-                println!("get start ...");
-                println!("put succeeded. got {:?}", g.get());
-            }
-        });
-        s.spawn(move |_| {
-            println!("unlocker sleeping...");
-            std::thread::sleep(std::time::Duration::from_millis(3000));
-            println!("... waking");
-            lock.unlock();
-            println!("unlocked");
-        });
-    })
-    .expect("Fail");
-}
+// #[test]
+// pub fn lock_test() {
+//     let (lock, (p, g)) = SyncProto::<u8>::instantiate();
+//     println!("Starting. Lock locked!");
+//     crossbeam::scope(|s| {
+//         s.spawn(move |_| {
+//             for i in 0..5 {
+//                 println!("put start ...");
+//                 p.put(i);
+//                 println!("put succeeded");
+//             }
+//         });
+//         s.spawn(move |_| {
+//             for _ in 0..5 {
+//                 println!("get start ...");
+//                 println!("put succeeded. got {:?}", g.get());
+//             }
+//         });
+//         s.spawn(move |_| {
+//             println!("unlocker sleeping...");
+//             std::thread::sleep(std::time::Duration::from_millis(3000));
+//             println!("... waking");
+//             lock.unlock();
+//             println!("unlocked");
+//         });
+//     })
+//     .expect("Fail");
+// }
 
 #[test]
 pub fn prod_cons() {
-    let (lock, (p, g)) = SyncProto::<String>::instantiate();
-    lock.unlock();
+    let (p, g) = SyncProto::<String>::instantiate();
     println!("INITIALIZED");
     crossbeam::scope(|s| {
         s.spawn(move |_| {
