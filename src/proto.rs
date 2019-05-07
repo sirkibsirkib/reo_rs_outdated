@@ -1,3 +1,5 @@
+use parking_lot::RawMutex;
+use parking_lot::MutexGuard;
 use hashbrown::HashSet;
 use crate::bitset::BitSet;
 use crossbeam::{Receiver, Sender};
@@ -82,7 +84,7 @@ enum OutMessage {
 // the trait that constrains the properties of specific protocol structures
 pub trait Proto: Sized + 'static {
     type Interface;
-    fn instantiate() -> Self::Interface;
+    fn instantiate() -> (ProtoLock<Self>, Self::Interface);
     fn interface_ids() -> &'static [Id];
     fn build_guards() -> Vec<Guard<Self>>;
 }
@@ -92,7 +94,6 @@ pub trait Proto: Sized + 'static {
 #[derive(Debug, Default)]
 pub struct ProtoCrGen {
     put: HashMap<Id, Ptr>,
-    groups: HashMap<Id, HashSet<Id>>,
 }
 
 // part of the Cr that is provided as argument to the Proto-trait implementor
@@ -107,15 +108,10 @@ pub struct ProtoCr<P: Proto> {
 pub struct ProtoCrAll<P: Proto> {
     ready: BitSet,
     ready_groups: HashSet<Id>,
+    groups: HashMap<Id, HashSet<Id>>,
     inner: ProtoCr<P>,
 }
 impl<P: Proto> ProtoCrAll<P> {
-    fn group_register(&mut self, _leader: Id, _group: HashSet<Id>) {
-        unimplemented!()
-    }
-    fn group_ready(&mut self, _leader: Id) {
-        unimplemented!()
-    }
     fn getter_ready(&mut self, id: Id) {
         self.ready.set(id);
     }
@@ -161,15 +157,12 @@ impl<P: Proto> ProtoReadable<P> {
 }
 
 // the "shared" concrete protocol object
-pub(crate) struct ProtoCommon<P: Proto> {
+pub struct ProtoCommon<P: Proto> {
     readable: ProtoReadable<P>,
     cra: Mutex<ProtoCrAll<P>>,
 }
 impl<P: Proto> ProtoCommon<P> {
-    pub(crate) fn group_ready_wait(&self, leader: Id) -> RuleId {
-        unimplemented!()
-    }
-    pub(crate) fn group_register(&self, group: HashSet<Id>) -> Result<Id,()> {
+    pub(crate) fn group_ready_wait(&mut self, leader: Id) -> Result<RuleId,()> {
         unimplemented!()
     }
     fn new(specific: P) -> (Self, HashMap<Id, Receiver<OutMessage>>) {
@@ -188,8 +181,9 @@ impl<P: Proto> ProtoCommon<P> {
         };
         let cra = ProtoCrAll {
             inner,
-            ready_groups: HashSet::default(),
             ready: BitSet::default(),
+            ready_groups: HashSet::default(),
+            groups: Default::default(),
         };
         let guards = <P as Proto>::build_guards();
         let readable = ProtoReadable { s_out, guards };
@@ -259,6 +253,69 @@ impl<P: Proto, T: TryClone> ProtoCommonTrait<T> for ProtoCommon<P> {
     }
 }
 
+struct Huang {
+    x: [u8; Self::FOO],
+}
+impl Huang {
+    const FOO: usize = 5;
+}
+
+
+const MUTEX_BYTES: usize = mem::size_of::<MutexGuard<()>>();
+unsafe impl<P: Proto> Send for ProtoLock<P> {}
+pub struct ProtoLock<P: Proto> {
+    proto_common: Arc<ProtoCommon<P>>,
+    raw_lock: [u8; MUTEX_BYTES],
+    locked_ptr: *mut ProtoCrAll<P>,
+}
+impl<P: Proto> ProtoLock<P> {
+    pub fn create_and_lock(proto_common: Arc<ProtoCommon<P>>) -> Self {
+        let mut raw_lock = [0; MUTEX_BYTES];
+        let raw_lockref = &mut raw_lock;
+        let locked_ptr = {
+            let mut locked = proto_common.cra.lock();
+            let locked_ptr: &mut ProtoCrAll<P> = &mut locked;
+            let locked_ptr: *mut ProtoCrAll<P> = locked_ptr;
+            let dest: &mut MutexGuard<_> = unsafe  {
+                mem::transmute(raw_lockref)
+            };
+            mem::forget(mem::replace(dest, locked));
+            locked_ptr
+        };
+        Self {
+            proto_common,
+            raw_lock,
+            locked_ptr,
+        }
+    }
+    pub fn register_group(&mut self, group_ids: HashSet<Id>) -> Result<Id,()> {
+        match group_ids.iter().cloned().next() {
+            None => Err(()),
+            Some(leader) => {
+                let x: &mut ProtoCrAll<P> = unsafe {
+                    &mut *self.locked_ptr
+                };
+                for existing_group in x.groups.values() {
+                    for id in group_ids.iter() {
+                        if existing_group.contains(id) {
+                            return Err(());
+                        }
+                    }
+                }
+                x.groups.insert(leader, group_ids);
+                Ok(leader)
+            }
+        }
+    }
+    pub fn unlock(self) {
+        // drop
+        let x: MutexGuard<ProtoCrAll<P>> = unsafe {
+            mem::transmute(self.raw_lock)
+        };
+        drop(x);
+    }
+}
+
 // common to Putter and to Getter to minimize boilerplate
 pub struct PortCommon<T> {
     id: Id,
@@ -314,9 +371,11 @@ macro_rules! finalize_ports {
 }
 
 // concrete proto. implements Proto trait
-struct SyncProto {}
-impl Proto for SyncProto {
-    type Interface = (Putter<String>, Getter<String>);
+struct SyncProto<T> {
+    data_type: PhantomData<T>,
+}
+impl<T: 'static + Clone> Proto for SyncProto<T> {
+    type Interface = (Putter<T>, Getter<T>);
     fn interface_ids() -> &'static [Id] {
         &[0, 1]
     }
@@ -342,10 +401,13 @@ impl Proto for SyncProto {
             },
         }]
     }
-    fn instantiate() -> <Self as Proto>::Interface {
-        let proto = Self {};
+    fn instantiate() -> (ProtoLock<Self>, <Self as Proto>::Interface) {
+        let proto = Self {
+            data_type: Default::default(),
+        };
         let (proto_common, mut r_out) = ProtoCommon::new(proto);
         let proto_common = Arc::new(proto_common);
+        let proto_common2 = proto_common.clone();
         let mut commons = <Self as Proto>::interface_ids()
             .iter()
             .map(|id| PortCommon {
@@ -354,7 +416,10 @@ impl Proto for SyncProto {
                 proto_common: proto_common.clone(),
                 phantom: PhantomData::default(),
             });
-        finalize_ports!(commons => Putter, Getter)
+        (
+            ProtoLock::create_and_lock(proto_common2),
+            finalize_ports!(commons => Putter, Getter)
+        )
     }
 }
 
@@ -365,8 +430,38 @@ impl<T: Clone> TryClone for T {
 }
 
 #[test]
-pub fn test() {
-    let (p, g) = SyncProto::instantiate();
+pub fn lock_test() {
+    let (lock, (p, g)) = SyncProto::<u8>::instantiate();
+    println!("Starting. Lock locked!");
+    crossbeam::scope(|s| {
+        s.spawn(move |_| {
+            for i in 0..5 {
+                println!("put start ...");
+                p.put(i);
+                println!("put succeeded");
+            }
+        });
+        s.spawn(move |_| {
+            for _ in 0..5 {
+                println!("get start ...");
+                println!("put succeeded. got {:?}", g.get());
+            }
+        });
+        s.spawn(move |_| {
+            println!("unlocker sleeping...");
+            std::thread::sleep(std::time::Duration::from_millis(3000));
+            println!("... waking");
+            lock.unlock();
+            println!("unlocked");
+        });
+    })
+    .expect("Fail");
+}
+
+#[test]
+pub fn prod_cons() {
+    let (lock, (p, g)) = SyncProto::<String>::instantiate();
+    lock.unlock();
     println!("INITIALIZED");
     crossbeam::scope(|s| {
         s.spawn(move |_| {

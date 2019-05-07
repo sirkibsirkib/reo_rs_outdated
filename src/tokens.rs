@@ -59,20 +59,24 @@ impl<D:Decimal, T> Safe<D,T> {
 	}
 }
 
+// proto-type specific 
 pub struct ProtoHandle<P: Proto> {
 	leader: Id,
 	common: Arc<ProtoCommon<P>>,
 }
 impl<P: Proto> ProtoHandle<P> {
-	fn new<I>(common: Arc<ProtoCommon<P>>, port_ids: HashSet<Id>) -> Self {
-		let leader = common.group_register(port_ids).expect("WAH");
-		Self {
-			leader, common,
-		}
-	}
+	// fn new<I>(proto_lock: &mut ProtoLock<P>, port_ids: HashSet<Id>) -> Self {
+	// 	// let common = proto_lock.proto_common.clone();
+	// 	// let leader = proto_lock.register_group(port_ids).expect("WAH");
+	// 	// Self {
+	// 	// 	leader, common,
+	// 	// }
+	// 	unimplemented!()
+	// }
 	fn ready_wait_determine<T: Transition<P>>(&self) -> T {
-		let rid: RuleId = self.common.group_ready_wait(self.leader);
-		T::new(rid)
+		// let rid: RuleId = self.common.group_ready_wait(self.leader).expect("HUEY");
+		// T::new(rid)
+		unimplemented!()
 	}
 }
 
