@@ -1,11 +1,7 @@
 use crate::bitset::BitSet;
 use crossbeam::{Receiver, Sender};
-use hashbrown::HashMap;
-use hashbrown::HashSet;
+use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
-use parking_lot::MutexGuard;
-use parking_lot::RawMutex;
-use smallvec::SmallVec;
 use std::{marker::PhantomData, mem, sync::Arc};
 
 pub type RuleId = u64;
@@ -73,12 +69,12 @@ impl Ptr {
 pub type Id = usize;
 
 // protocol-to-port messaging with instructions
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 enum OutMessage {
     PutAwait { count: usize },
-    GetNotify { ptr: Ptr, notify: Id },
-    Notification {},
-    // TODO GroupRuleFire { rule_id: RuleId },
+    GetNotify { ptr: Ptr, notify: Id, move_allowed: bool },
+    StateNotify {},
+    GottenNotify { moved: bool },
 }
 
 // the trait that constrains the properties of specific protocol structures
@@ -159,7 +155,7 @@ impl<P: Proto> ProtoCrAll<P> {
                             .s_out
                             .get(&waiter.notify_when)
                             .expect("WHAYT")
-                            .send(OutMessage::Notification {})
+                            .send(OutMessage::StateNotify {})
                             .expect("ZPYP");
                         false
                     } else {
@@ -203,68 +199,93 @@ impl<T, P: Proto> Port<P> for Getter<T, P> {
     }
 }
 
+pub enum GroupMakeError {
+    DifferentProtoInstances,
+    DuplicateIds,
+    EmptyGroup,
+    OverlapsWithExisting,
+}
+
+// represents a group of ports.
+// creation performs registration with the
 pub struct GroupCommunicator<P: Proto> {
     leader: Id,
     proto_common: Arc<ProtoCommon<P>>,
     r_out: Receiver<OutMessage>,
 }
 
-pub fn register_port_group<'a, I, P>(
-    predicate: StatePred,
-    it: I,
-) -> Result<GroupCommunicator<P>, ()>
-where
-    P: Proto,
-    I: Iterator<Item = &'a (dyn Port<P>)>,
-{
-    let mut group_ids: HashSet<Id> = HashSet::default();
-    let mut comm = None;
-    // 1. build the GroupCommunicator object
-    for port in it {
-        if let None = comm {
-            comm = Some(GroupCommunicator {
+impl<P: Proto> GroupCommunicator<P> {
+    pub fn register_port_group<'a, I>(predicate: StatePred, it: I) -> Result<Self, GroupMakeError>
+    where
+        P: Proto,
+        I: Iterator<Item = &'a (dyn Port<P>)>,
+    {
+        use GroupMakeError::*;
+        let mut group_ids: HashSet<Id> = HashSet::default();
+        let mut comm = None;
+        // 1. build the GroupCommunicator object
+        for port in it {
+            let comm = comm.get_or_insert_with(|| GroupCommunicator {
                 leader: port.get_common().id,
                 r_out: port.get_common().r_out.clone(),
                 proto_common: port.get_common().proto_common.clone(),
-            })
-        };
-        if group_ids.insert(port.get_common().id) {
-            panic!("duplicate Ids ??");
-        }
-    }
-    let comm = match comm {
-        Some(comm) => comm,
-        None => return Err(()),
-    };
-    // 2. try register the group
-    let mut proto_cr_all = comm.proto_common.cra.lock();
-    for existing_group in proto_cr_all.groups.values() {
-        for id in group_ids.iter() {
-            if existing_group.contains(id) {
-                return Err(());
+            });
+            if !comm
+                .proto_common
+                .share_instance(&port.get_common().proto_common)
+            {
+                return Err(DifferentProtoInstances);
+            }
+            if group_ids.insert(port.get_common().id) {
+                return Err(DuplicateIds);
             }
         }
-    }
-    proto_cr_all.groups.insert(comm.leader, group_ids);
-
-    // 3. wait until the state predicate is satisifed
-    let satisfied = proto_cr_all.inner.specific.state_predicate(&predicate);
-    if !satisfied {
-        // wait
-        let waiter = StateWaiter {
-            notify_when: comm.leader,
-            predicate,
+        let comm = match comm {
+            Some(comm) => comm,
+            None => return Err(EmptyGroup),
         };
-        proto_cr_all.state_waiters.push(waiter);
-        mem::drop(proto_cr_all); // release lock
-        match comm.r_out.recv().expect("KABLOEEY") {
-            OutMessage::Notification {} => {}
-            wrong_msg => panic!("Group waiter got {:?}", wrong_msg),
+        // TODO no IDs should be ready, as non-readiness
+        // is invariant outside put() and get()
+        // TODO add a check for protocol IDENTITY
+        // 2. try register the group
+        let mut cra = comm.proto_common.cra.lock();
+        for existing_group in cra.groups.values() {
+            for id in group_ids.iter() {
+                // TODO
+
+                if existing_group.contains(id) {
+                    return Err(OverlapsWithExisting);
+                }
+            }
         }
-    } else {
-        mem::drop(proto_cr_all); // release lock
+        cra.groups.insert(comm.leader, group_ids);
+
+        // 3. wait until the state predicate is satisifed
+        let satisfied = cra.inner.specific.state_predicate(&predicate);
+        if !satisfied {
+            // wait
+            let waiter = StateWaiter {
+                notify_when: comm.leader,
+                predicate,
+            };
+            cra.state_waiters.push(waiter);
+            mem::drop(cra); // release lock
+            match comm.r_out.recv().expect("KABLOEEY") {
+                OutMessage::StateNotify {} => {}
+                wrong_msg => panic!("Group waiter got {:?}", wrong_msg),
+            }
+        } else {
+            mem::drop(cra); // release lock
+        }
+        Ok(comm)
     }
-    Ok(comm)
+}
+impl<P: Proto> Drop for GroupCommunicator<P> {
+    fn drop(&mut self) {
+        let mut cra = self.proto_common.cra.lock();
+        assert!(cra.groups.remove(&self.leader).is_some());
+        cra.ready_groups.remove(&self.leader);
+    }
 }
 
 // the "shared" concrete protocol object
@@ -273,8 +294,10 @@ pub struct ProtoCommon<P: Proto> {
     cra: Mutex<ProtoCrAll<P>>,
 }
 impl<P: Proto> ProtoCommon<P> {
-    pub(crate) fn group_ready_wait(&mut self, leader: Id) -> Result<RuleId, ()> {
-        unimplemented!()
+    fn share_instance(&self, other: &Self) -> bool {
+        let left: *const ProtoCommon<P> = self;
+        let right: *const ProtoCommon<P> = other;
+        left == right
     }
     fn new(specific: P) -> (Self, HashMap<Id, Receiver<OutMessage>>) {
         let ids = <P as Proto>::interface_ids();
@@ -305,15 +328,6 @@ impl<P: Proto> ProtoCommon<P> {
         };
         (common, r_out)
     }
-    // }
-
-    // hidden
-    // trait ProtoCommonTrait<T> {
-    //     fn get(&self, pc: &PortCommon<T>) -> T;
-    //     fn put(&self, pc: &PortCommon<T>, datum: T);
-    // }
-
-    // impl<P: Proto, T: TryClone> ProtoCommonTrait<T> for ProtoCommon<P> {
     fn get<T>(&self, pc: &PortCommon<P>) -> T {
         // println!("{:?} entering...", pc.id);
         {
@@ -325,16 +339,36 @@ impl<P: Proto> ProtoCommon<P> {
         }
         use OutMessage::*;
         match pc.r_out.recv().expect("LEL") {
-            GetNotify { ptr, notify } => {
+            GetNotify { ptr, notify, move_allowed } => {
+                // TODO handle if !move_allowed
                 let datum = ptr.consume_moving();
                 self.readable
-                    .out_message(notify, OutMessage::Notification {});
+                    .out_message(notify, OutMessage::GottenNotify { moved: move_allowed });
                 datum
             }
             wrong => panic!("WRONG {:?}", wrong),
         }
     }
-    fn put<T>(&self, pc: &PortCommon<P>, datum: T) {
+
+    fn get_signal(&self, pc: &PortCommon<P>) {
+        // println!("{:?} entering...", pc.id);
+        {
+            let mut cra = self.cra.lock();
+            // println!("{:?} got lock", pc.id);
+            cra.getter_ready(pc.id);
+            cra.advance_state(&self.readable);
+            // println!("{:?} dropping lock", pc.id);
+        }
+        use OutMessage::*;
+        match pc.r_out.recv().expect("LEL") {
+            GetNotify { ptr: _, notify, move_allowed } => {
+                self.readable
+                    .out_message(notify, OutMessage::GottenNotify { moved: move_allowed });
+            }
+            wrong => panic!("WRONG {:?}", wrong),
+        }
+    }
+    fn put<T>(&self, pc: &PortCommon<P>, datum: T) -> Option<T> {
         // println!("{:?} entering...", pc.id);
         let ptr = Ptr::produce(&datum);
         // println!("{:?} finished putting", pc.id);
@@ -348,92 +382,31 @@ impl<P: Proto> ProtoCommon<P> {
         use OutMessage::*;
         match pc.r_out.recv().expect("HUAA") {
             PutAwait { count } => {
+                let mut data_moved = false;
                 for _ in 0..count {
                     match pc.r_out.recv().expect("HEE") {
-                        Notification {} => {}
+                        GottenNotify { moved } => {
+                            if moved {
+                                if data_moved {
+                                    panic!("Duplicate move!");
+                                }
+                                data_moved = true;
+                            }
+                        }
                         wrong => panic!("WRONG {:?}", wrong),
                     }
                 }
-                mem::forget(datum);
-                //return
+                if data_moved {
+                    mem::forget(datum);
+                    None    
+                } else {
+                    Some(datum)
+                }
             }
             wrong => panic!("WRONG {:?}", wrong),
         }
     }
 }
-
-// const MUTEX_BYTES: usize = mem::size_of::<MutexGuard<()>>();
-// /*
-// This is created alongside the interface of a proto. so long as it is in scope,
-// it holds the mutex to the Proto using unsafe wizardry.
-// --- Safety:
-// raw MutexGuard is transmuted, stored in the raw_lock buffer. to shake off borrow checker
-// this represents internal mutability, since its a referece to the Arc field.
-// the arc is stored also, preventing the ProtoCommon from being freed until
-// the Protolock is freed itself. The drop order ensures the lock is unlocked
-// BEFORE the Arc goes out of scope.
-// The Proto lock ensures mutable access, thus its safe to access the ProtoCrAll using
-// a mutable reference.
-// */
-// pub struct ProtoLock<P: Proto> {
-//     proto_common: Arc<ProtoCommon<P>>,
-//     raw_lock: [u8; MUTEX_BYTES],
-//     locked_ptr: *mut ProtoCrAll<P>,
-// }
-// unsafe impl<P: Proto> Send for ProtoLock<P> {}
-// impl<P: Proto> ProtoLock<P> {
-//     pub fn create_and_lock(proto_common: Arc<ProtoCommon<P>>) -> Self {
-//         let mut raw_lock = [0; MUTEX_BYTES];
-//         let raw_lockref = &mut raw_lock;
-//         let locked_ptr = {
-//             let mut locked = proto_common.cra.lock();
-//             let locked_ptr: &mut ProtoCrAll<P> = &mut locked;
-//             let locked_ptr: *mut ProtoCrAll<P> = locked_ptr;
-//             let dest: &mut MutexGuard<_> = unsafe  {
-//                 mem::transmute(raw_lockref)
-//             };
-//             mem::forget(mem::replace(dest, locked));
-//             locked_ptr
-//         };
-//         Self {
-//             proto_common,
-//             raw_lock,
-//             locked_ptr,
-//         }
-//     }
-//     pub fn register_group(&mut self, group_ids: HashSet<Id>) -> Result<Id,()> {
-//         match group_ids.iter().cloned().next() {
-//             None => Err(()),
-//             Some(leader) => {
-//                 let x: &mut ProtoCrAll<P> = unsafe {
-//                     &mut *self.locked_ptr
-//                 };
-//                 for existing_group in x.groups.values() {
-//                     for id in group_ids.iter() {
-//                         if existing_group.contains(id) {
-//                             return Err(());
-//                         }
-//                     }
-//                 }
-//                 x.groups.insert(leader, group_ids);
-//                 Ok(leader)
-//             }
-//         }
-//     }
-//     pub fn unlock(self) {
-//         mem::drop(self)
-//     }
-// }
-// impl<P: Proto> Drop for ProtoLock<P> {
-//     fn drop(&mut self) {
-//         println!("dropping mutex");
-//         let x: MutexGuard<ProtoCrAll<P>> = unsafe {
-//             mem::transmute(self.raw_lock)
-//         };
-//         drop(x);
-//     }
-// }
-
 // common to Putter and to Getter to minimize boilerplate
 pub struct PortCommon<P: Proto> {
     id: Id,
@@ -449,10 +422,13 @@ impl<T, P: Proto> Getter<T, P> {
     pub fn get(&self) -> T {
         self.0.proto_common.get(&self.0)
     }
+    pub fn get_signal(&self) {
+        self.0.proto_common.get_signal(&self.0)
+    }
 }
 pub struct Putter<T, P: Proto>(PortCommon<P>, PhantomData<T>);
 impl<T, P: Proto> Putter<T, P> {
-    pub fn put(&self, datum: T) {
+    pub fn put(&self, datum: T) -> Option<T> {
         self.0.proto_common.put(&self.0, datum)
     }
 }
@@ -475,7 +451,7 @@ pub trait TryClone: Sized {
 struct SyncProto<T> {
     data_type: PhantomData<T>,
 }
-impl<T: 'static + Clone> Proto for SyncProto<T> {
+impl<T: 'static> Proto for SyncProto<T> {
     fn state_predicate(&self, _predicate: &StatePred) -> bool {
         true
     }
@@ -495,11 +471,13 @@ impl<T: 'static + Clone> Proto for SyncProto<T> {
                     count: getter_id_iter.clone().count(),
                 };
                 r.out_message(putter_id, p_msg);
-                let g_msg = OutMessage::GetNotify {
-                    ptr,
-                    notify: putter_id,
-                };
-                for getter_id in getter_id_iter {
+                for (i, getter_id) in getter_id_iter.enumerate() {
+                    let first = i==0;
+                    let g_msg = OutMessage::GetNotify {
+                        ptr,
+                        notify: putter_id,
+                        move_allowed: first,
+                    };
                     r.out_message(getter_id, g_msg);
                 }
             },
@@ -527,35 +505,6 @@ impl<T: Clone> TryClone for T {
         self.clone()
     }
 }
-
-// #[test]
-// pub fn lock_test() {
-//     let (lock, (p, g)) = SyncProto::<u8>::instantiate();
-//     println!("Starting. Lock locked!");
-//     crossbeam::scope(|s| {
-//         s.spawn(move |_| {
-//             for i in 0..5 {
-//                 println!("put start ...");
-//                 p.put(i);
-//                 println!("put succeeded");
-//             }
-//         });
-//         s.spawn(move |_| {
-//             for _ in 0..5 {
-//                 println!("get start ...");
-//                 println!("put succeeded. got {:?}", g.get());
-//             }
-//         });
-//         s.spawn(move |_| {
-//             println!("unlocker sleeping...");
-//             std::thread::sleep(std::time::Duration::from_millis(3000));
-//             println!("... waking");
-//             lock.unlock();
-//             println!("unlocked");
-//         });
-//     })
-//     .expect("Fail");
-// }
 
 #[test]
 pub fn prod_cons() {
