@@ -184,9 +184,7 @@ impl<P: Proto> ProtoReadable<P> {
 }
 
 pub trait Port<P: Proto> {
-    fn get_id(&self) -> Id;
-    fn get_receiver(&self) -> &Receiver<OutMessage>;
-    fn get_proto_common(&self) -> &Arc<ProtoCommon<P>>;
+    fn get_common(&self) -> &PortCommon<P>;
 }
 
 pub struct GroupCommunicator<P: Proto> {
@@ -201,12 +199,14 @@ where P: Proto, I: Iterator<Item=&'a (dyn Port<P>)> {
     let mut comm = None;
     // 1. build the GroupCommunicator object
     for port in it {
-        let id = port.get_id();
         if let None = comm {
             comm = Some(GroupCommunicator {
-                leader: id,
-                proto_common: port.get_proto_common().clone(),
-                msg_receiver: port.get_receiver().clone(),
+                leader: port.get_common().id,
+                proto_common: {
+                    let Arc<dyn ProtoCommonTrait>,
+                    port.get_common().proto_common.clone()
+                },
+                msg_receiver: port.get_common().r_out.clone(),
             })
         };
         if group_ids.insert(id) {
