@@ -3,6 +3,7 @@
 use crate::proto::*;
 use crate::tokens::*;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 // 2. state definition
 pub struct State {
@@ -89,3 +90,44 @@ pub fn api_test() {
     })
     .expect("Fail");
 }
+
+
+
+//////////////////// example 2 ///////////////// 
+
+
+// // concrete proto. implements Proto trait
+// pub(crate) struct AltProto<T> {
+//     data_type: PhantomData<(T,)>,
+// }
+// impl<T: 'static + TryClone> Proto for AltProto<T> {
+//     fn state_predicate(&self, _predicate: &StatePred) -> bool {
+//         true
+//     }
+//     type Interface = (Putter<T, Self>, Getter<T, Self>);
+//     fn interface_ids() -> &'static [PortId] {
+//         &[0, 1]
+//     }
+//     fn build_guards() -> Vec<Guard<Self>> {
+//         vec![Guard {
+//             min_ready: bitset! {0,1},
+//             constraint: |_cr| true,
+//             action: data_move_action![1 => 0],
+//         }]
+//     }
+//     fn new() -> <Self as Proto>::Interface {
+//         let proto = Self {
+//             data_type: Default::default(),
+//         };
+//         let (proto_common, mut r_out) = ProtoCommon::new(proto);
+//         let proto_common = Arc::new(proto_common);
+//         let mut commons = <Self as Proto>::interface_ids()
+//             .iter()
+//             .map(|id| PortCommon {
+//                 id: *id,
+//                 r_out: r_out.remove(id).unwrap(),
+//                 proto_common: proto_common.clone(),
+//             });
+//         finalize_ports!(commons, Putter, Getter)
+//     }
+// }

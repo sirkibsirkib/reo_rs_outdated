@@ -6,6 +6,7 @@ use hashbrown::{HashMap, HashSet};
 use itertools::izip;
 use parking_lot::Mutex;
 use std::{marker::PhantomData, mem, sync::Arc};
+use crate::helper::WithFirstTrait;
 
 // associated with putter OR getter OR mem-in OR mem-out
 pub type PortId = usize;
@@ -19,7 +20,7 @@ Otherwise, its a pointer directly to the putter's stack which getters will
 clone / move from as needed.
 */
 #[derive(Debug, Copy, Clone)]
-struct Ptr {
+pub struct Ptr {
     raw: *const (),
 }
 impl Ptr {
@@ -72,7 +73,7 @@ impl Ptr {
 
 // protocol-to-port messaging with instructions
 #[derive(Debug, Clone)]
-enum OutMessage {
+pub enum OutMessage {
     PutAwait {
         count: usize,
     },
@@ -94,9 +95,26 @@ enum OutMessage {
 pub trait Proto: Sized + 'static {
     type Interface;
     fn new() -> Self::Interface;
+    fn new_state() -> Self;
     fn interface_ids() -> &'static [PortId];
     fn build_guards() -> Vec<Guard<Self>>;
-    fn state_predicate(&self, predicate: &StatePred) -> bool;
+    fn test_state(&self, predicate: &StatePred) -> bool;
+    fn new_in_map() -> HashMap<PortId, PortCommon<Self>> {
+        let state = Self::new_state();
+        let (proto_common, mut r_out) = ProtoCommon::new(state);
+        let proto_common = Arc::new(proto_common);
+        <Self as Proto>::interface_ids()
+        .iter()
+        .cloned()
+        .map(|id| {
+            let common = PortCommon {
+                id,
+                r_out: r_out.remove(&id).unwrap(),
+                proto_common: proto_common.clone(),
+            };
+            (id, common)
+        }).collect()
+    }
 }
 
 #[derive(Debug, derive_new::new)]
@@ -107,14 +125,14 @@ pub struct StatePred {
 // this is NOT generic over P, but is passed to the protocol
 #[derive(Debug, Default)]
 pub struct ProtoCrGen {
-    put: HashMap<PortId, Ptr>,
+    pub put: HashMap<PortId, Ptr>,
 }
 
 // part of the Cr that is provided as argument to the Proto-trait implementor
 #[derive(Debug)]
 pub struct ProtoCr<P: Proto> {
-    generic: ProtoCrGen,
-    specific: P,
+    pub generic: ProtoCrGen,
+    pub specific: P,
 }
 
 #[derive(Debug)]
@@ -149,7 +167,7 @@ impl<P: Proto> ProtoCrAll<P> {
             ..
         } = self;
         state_waiters.retain(|waiter| {
-            if inner.specific.state_predicate(&waiter.predicate) {
+            if inner.specific.test_state(&waiter.predicate) {
                 readable
                     .s_out
                     .get(&waiter.notify_when)
@@ -233,7 +251,7 @@ impl<P: Proto> ProtoCrAll<P> {
 }
 
 // read-only component: no locking needed
-struct ProtoReadable<P: Proto> {
+pub struct ProtoReadable<P: Proto> {
     s_out: HashMap<PortId, Sender<OutMessage>>,
     guards: Vec<Guard<P>>,
 }
@@ -244,6 +262,20 @@ impl<P: Proto> ProtoReadable<P> {
             .expect("bad proto_gen_stateunique")
             .send(msg)
             .expect("DEAD");
+    }
+    pub unsafe fn distribute_ptr<I: Iterator<Item=PortId> + Clone>(&self, ptr: Ptr, from: PortId, to: I) {
+        let p_msg = OutMessage::PutAwait {
+            count: to.clone().count(),
+        };
+        self.out_message(from, p_msg);
+        for (is_first, getter_id) in to.with_first() {
+            let g_msg = OutMessage::GetNotify {
+                ptr,
+                notify: from,
+                move_allowed: is_first,
+            };
+            self.out_message(getter_id, g_msg);
+        }
     }
 }
 
@@ -334,7 +366,7 @@ impl<P: Proto> PortGroup<P> {
         cra.groups.insert(comm.leader, group_ids);
 
         // 3. wait until the state predicate is satisifed
-        let satisfied = cra.inner.specific.state_predicate(&predicate);
+        let satisfied = cra.inner.specific.test_state(&predicate);
         if !satisfied {
             // wait
             let waiter = StateWaiter {
@@ -372,7 +404,7 @@ impl<P: Proto> ProtoCommon<P> {
         let right: *const ProtoCommon<P> = other;
         left == right
     }
-    fn new(specific: P) -> (Self, HashMap<PortId, Receiver<OutMessage>>) {
+    pub fn new(specific: P) -> (Self, HashMap<PortId, Receiver<OutMessage>>) {
         let ids = <P as Proto>::interface_ids();
         let num_ids = ids.len();
         let mut s_out = HashMap::with_capacity(num_ids);
@@ -500,9 +532,9 @@ impl<P: Proto> ProtoCommon<P> {
 }
 // common to Putter and to Getter to minimize boilerplate
 pub struct PortCommon<P: Proto> {
-    id: PortId,
-    r_out: Receiver<OutMessage>,
-    proto_common: Arc<ProtoCommon<P>>,
+    pub id: PortId,
+    pub r_out: Receiver<OutMessage>,
+    pub proto_common: Arc<ProtoCommon<P>>,
 }
 unsafe impl<P: Proto> Send for PortCommon<P> {}
 unsafe impl<P: Proto> Sync for PortCommon<P> {}
@@ -516,18 +548,24 @@ impl<T: TryClone, P: Proto> Getter<T, P> {
     pub fn get_signal(&self) {
         self.0.proto_common.get_signal(&self.0)
     }
+    pub unsafe fn new(common: PortCommon<P>) -> Self {
+        Self(common, Default::default())
+    }
 }
 pub struct Putter<T: TryClone, P: Proto>(PortCommon<P>, PhantomData<T>);
 impl<T: TryClone, P: Proto> Putter<T, P> {
     pub fn put(&self, datum: T) -> Option<T> {
         self.0.proto_common.put(&self.0, datum)
     }
+    pub unsafe fn new(common: PortCommon<P>) -> Self {
+        Self(common, Default::default())
+    }
 }
 
 pub struct Guard<P: Proto> {
-    min_ready: BitSet,
-    constraint: fn(&ProtoCr<P>) -> bool,
-    action: fn(&mut ProtoCr<P>, &ProtoReadable<P>),
+    pub min_ready: BitSet,
+    pub constraint: fn(&ProtoCr<P>) -> bool,
+    pub action: fn(&mut ProtoCr<P>, &ProtoReadable<P>),
 }
 
 pub trait TryClone: Sized {
@@ -550,31 +588,6 @@ pub trait AtomicComponent {
         F: FnOnce(S, PortGroup<Self::P>, Self::Interface);
 }
 
-
-pub trait WithFirstTrait: Iterator + Sized {
-    fn with_first(self) -> WithFirst<Self> {
-        WithFirst { first: true, it: self }
-    }
-}
-impl<I: Iterator> WithFirstTrait for I {}
-pub struct WithFirst<I: Iterator> {
-    first: bool,
-    it: I,
-}
-impl<I: Iterator> Iterator for WithFirst<I> {
-    type Item = (bool, I::Item);
-    fn next(&mut self) -> Option<Self::Item> {
-        match (self.first, self.it.next()) {
-            (_, None) => None,
-            (true, Some(x)) => {
-                self.first = false;
-                Some((true, x))
-            },
-            (false, Some(x)) => Some((false, x)),
-        }
-    }
-}
-
 ////////////// EXAMPLE concrete ///////////////
 
 // concrete proto. implements Proto trait
@@ -582,7 +595,7 @@ pub(crate) struct SyncProto<T> {
     data_type: PhantomData<T>,
 }
 impl<T: 'static + TryClone> Proto for SyncProto<T> {
-    fn state_predicate(&self, _predicate: &StatePred) -> bool {
+    fn test_state(&self, _predicate: &StatePred) -> bool {
         true
     }
     type Interface = (Putter<T, Self>, Getter<T, Self>);
@@ -593,39 +606,20 @@ impl<T: 'static + TryClone> Proto for SyncProto<T> {
         vec![Guard {
             min_ready: bitset! {0,1},
             constraint: |_cr| true,
-            action: |cr, r| {
-                let putter_id = 0;
-                let ptr = *cr.generic.put.get(&putter_id).expect("HARK");
-                let getter_id_iter = id_iter![1];
-                let p_msg = OutMessage::PutAwait {
-                    count: getter_id_iter.clone().count(),
-                };
-                r.out_message(putter_id, p_msg);
-                for (first, getter_id) in getter_id_iter.with_first() {
-                    let g_msg = OutMessage::GetNotify {
-                        ptr,
-                        notify: putter_id,
-                        move_allowed: first,
-                    };
-                    r.out_message(getter_id, g_msg);
-                }
-            },
+            action: data_move_action![0 => 1],
         }]
     }
-    fn new() -> <Self as Proto>::Interface {
-        let proto = Self {
+    fn new_state() -> Self {
+        Self {
             data_type: Default::default(),
-        };
-        let (proto_common, mut r_out) = ProtoCommon::new(proto);
-        let proto_common = Arc::new(proto_common);
-        let mut commons = <Self as Proto>::interface_ids()
-            .iter()
-            .map(|id| PortCommon {
-                id: *id,
-                r_out: r_out.remove(id).unwrap(),
-                proto_common: proto_common.clone(),
-            });
-        finalize_ports!(commons => Putter, Getter)
+        }
+    }
+    fn new() -> <Self as Proto>::Interface {
+        finalize_ports!(
+            Self::interface_ids().iter(),
+            Self::new_in_map(),
+            Putter, Getter
+        )
     }
 }
 
