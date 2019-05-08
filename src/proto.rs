@@ -1,9 +1,14 @@
+use crate::tokens::Transition;
 use crate::bitset::BitSet;
 use crossbeam::{Receiver, Sender};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
 use std::{marker::PhantomData, mem, sync::Arc};
+use itertools::izip;
 
+
+// associated with putter OR getter OR mem-in OR mem-out
+pub type PortId = usize;
 pub type RuleId = u64;
 
 /*
@@ -65,15 +70,13 @@ impl Ptr {
     }
 }
 
-// associated with putter OR getter OR mem-in OR mem-out
-pub type Id = usize;
-
 // protocol-to-port messaging with instructions
 #[derive(Debug, Clone)]
 enum OutMessage {
     PutAwait { count: usize },
-    GetNotify { ptr: Ptr, notify: Id, move_allowed: bool },
+    GetNotify { ptr: Ptr, notify: PortId, move_allowed: bool },
     StateNotify {},
+    GroupFireNotify { rule_id: RuleId},
     GottenNotify { moved: bool },
 }
 
@@ -81,7 +84,7 @@ enum OutMessage {
 pub trait Proto: Sized + 'static {
     type Interface;
     fn instantiate() -> Self::Interface;
-    fn interface_ids() -> &'static [Id];
+    fn interface_ids() -> &'static [PortId];
     fn build_guards() -> Vec<Guard<Self>>;
     fn state_predicate(&self, predicate: &StatePred) -> bool;
 }
@@ -94,7 +97,7 @@ pub struct StatePred {
 // this is NOT generic over P, but is passed to the protocol
 #[derive(Debug, Default)]
 pub struct ProtoCrGen {
-    put: HashMap<Id, Ptr>,
+    put: HashMap<PortId, Ptr>,
 }
 
 // part of the Cr that is provided as argument to the Proto-trait implementor
@@ -107,76 +110,120 @@ pub struct ProtoCr<P: Proto> {
 #[derive(Debug)]
 pub struct StateWaiter {
     predicate: StatePred,
-    notify_when: Id,
+    notify_when: PortId,
 }
 
 // writable component: locking needed
 #[derive(Debug)]
 pub struct ProtoCrAll<P: Proto> {
+    buf: Vec<PortId>,
+    committed: Option<RuleId>,
     ready: BitSet,
-    ready_groups: HashSet<Id>,
+    ready_groups: HashSet<PortId>,
     state_waiters: Vec<StateWaiter>,
-    groups: HashMap<Id, HashSet<Id>>,
+    groups: HashMap<PortId, BitSet>,
     inner: ProtoCr<P>,
-}
+} 
 impl<P: Proto> ProtoCrAll<P> {
-    fn getter_ready(&mut self, id: Id) {
+    fn getter_ready(&mut self, id: PortId) {
         self.ready.set(id);
     }
-    fn putter_ready(&mut self, id: Id, ptr: Ptr) {
+    fn putter_ready(&mut self, id: PortId, ptr: Ptr) {
         self.ready.set(id);
         self.inner.generic.put.insert(id, ptr);
     }
+    fn notify_waiters(&mut self, readable: &ProtoReadable<P>) {
+        let Self {
+            state_waiters,
+            inner,
+            ..
+        } = self;
+        state_waiters.retain(|waiter| {
+            if inner.specific.state_predicate(&waiter.predicate) {
+                readable
+                    .s_out
+                    .get(&waiter.notify_when)
+                    .expect("WHAYT")
+                    .send(OutMessage::StateNotify {})
+                    .expect("ZPYP");
+                false
+            } else {
+                // keep waiting
+                true
+            }
+        });
+    }
     fn advance_state(&mut self, readable: &ProtoReadable<P>) {
-        'redo: loop {
+        'outer: loop {
             // println!("READY: {:?}", &self.ready);
-            for (_i, g) in readable.guards.iter().enumerate() {
-                if self.ready.is_superset(&g.min_ready) {
-                    if (g.constraint)(&self.inner) {
+            let range = match self.committed {
+                Some(rule_id) => {
+                    let r = rule_id as usize;
+                    r..(r+1)
+                },
+                None => 0..readable.guards.len(),
+            };
+            'inner: for (rule_id, r) in izip!(range.clone(), readable.guards[range].iter()) {
+                if self.ready.is_superset(&r.min_ready) {
+                    // rule is unconditionally ready to fire
+                    if (r.constraint)(&self.inner) {
                         // println!("GUARD {} FIRING START", i);
-                        (g.action)(&mut self.inner, readable);
+                        (r.action)(&mut self.inner, readable);
                         // println!("GUARD {} FIRING END", i);
                         // println!("BEFORE DIFFERENCE {:?} and {:?}", &self.ready, &g.min_ready);
-                        self.ready.difference_with(&g.min_ready);
+                        self.ready.difference_with(&r.min_ready);
                         // println!("AFTER  DIFFERENCE {:?} and {:?}", &self.ready, &g.min_ready);
-                        continue 'redo; // re-check!
+                        continue 'outer; // re-check all rules!
                     }
+                } else {
+                    self.buf.clear();
+                    // check if we can commit to this rule
+                    for (chunk_id, min_chunk) in r.min_ready.iter_chunks().enumerate() {
+                        let mut chunk = 0x0;
+                        for (leader, group) in self.groups.iter() {
+                            if !self.ready_groups.contains(leader) {
+                                continue;
+                            }
+                            let contribution = min_chunk & group.get_chunk(chunk_id);
+                            assert!(contribution & chunk == 0); // must not overlap!!
+                            if contribution == 0 {
+                                // this group contributes to satisfying this rule
+                                chunk |= contribution;
+                                self.buf.push(*leader);
+                                if min_chunk & (!chunk) == 0 {
+                                    // this guard would be satisfied!
+                                    self.committed = Some(rule_id as u64);
+                                    for leader in self.buf.drain(..) {
+                                        self.ready_groups.remove(&leader);
+                                        readable.s_out.get(&leader).expect("HUUEEE")
+                                        .send(OutMessage::GroupFireNotify { rule_id: rule_id as u64 })
+                                        .expect("LOOOOUUU");
+                                    }
+                                    break 'inner; // cleanup and return
+                                }
+                            }
+                        }
+                    }
+                    // nevermind. failed to fulfill this rule even with groups
+                    self.buf.clear();
                 }
             }
+            // all rules checked with no progress. finalize
             if !self.state_waiters.is_empty() {
-                let Self {
-                    state_waiters,
-                    inner,
-                    ..
-                } = self;
-                state_waiters.retain(|waiter| {
-                    if inner.specific.state_predicate(&waiter.predicate) {
-                        readable
-                            .s_out
-                            .get(&waiter.notify_when)
-                            .expect("WHAYT")
-                            .send(OutMessage::StateNotify {})
-                            .expect("ZPYP");
-                        false
-                    } else {
-                        // keep waiting
-                        true
-                    }
-                });
+                self.notify_waiters(readable);
             }
-            break; // no call to REDO
+            return;
         }
-        // println!("ADVANCE STATE OVER");
     }
 }
 
 // read-only component: no locking needed
 struct ProtoReadable<P: Proto> {
-    s_out: HashMap<Id, Sender<OutMessage>>,
+    s_out: HashMap<PortId, Sender<OutMessage>>,
     guards: Vec<Guard<P>>,
 }
 impl<P: Proto> ProtoReadable<P> {
-    fn out_message(&self, dest: Id, msg: OutMessage) {
+    fn out_message(&self, dest: PortId, msg: OutMessage) {
         self.s_out
             .get(&dest)
             .expect("bad proto_gen_stateunique")
@@ -188,12 +235,12 @@ impl<P: Proto> ProtoReadable<P> {
 pub trait Port<P: Proto> {
     fn get_common(&self) -> &PortCommon<P>;
 }
-impl<T, P: Proto> Port<P> for Putter<T, P> {
+impl<T: TryClone, P: Proto> Port<P> for Putter<T, P> {
     fn get_common(&self) -> &PortCommon<P> {
         &self.0
     }
 }
-impl<T, P: Proto> Port<P> for Getter<T, P> {
+impl<T: TryClone, P: Proto> Port<P> for Getter<T, P> {
     fn get_common(&self) -> &PortCommon<P> {
         &self.0
     }
@@ -201,7 +248,7 @@ impl<T, P: Proto> Port<P> for Getter<T, P> {
 
 pub enum GroupMakeError {
     DifferentProtoInstances,
-    DuplicateIds,
+    DuplicatePortIds,
     EmptyGroup,
     OverlapsWithExisting,
 }
@@ -209,19 +256,35 @@ pub enum GroupMakeError {
 // represents a group of ports.
 // creation performs registration with the
 pub struct GroupCommunicator<P: Proto> {
-    leader: Id,
+    leader: PortId,
     proto_common: Arc<ProtoCommon<P>>,
     r_out: Receiver<OutMessage>,
 }
 
 impl<P: Proto> GroupCommunicator<P> {
+    pub fn ready_wait_determine<T: Transition<P>>(&self) -> T {
+        if mem::size_of::<T>() == 0 {
+            // trivial branch of 0 or 1 variants
+            unsafe { mem::uninitialized() }
+        } else {
+            let mut cra = self.proto_common.cra.lock();
+            cra.ready_groups.insert(self.leader);
+            cra.advance_state(&self.proto_common.readable);
+            match self.r_out.recv().expect("muuu") {
+                OutMessage::GroupFireNotify { rule_id } => {
+                    T::from_rule_id(rule_id)
+                },
+                wrong => panic!("GROUP WRONG! {:?}", wrong),
+            }
+        }
+    }
     pub fn register_port_group<'a, I>(predicate: StatePred, it: I) -> Result<Self, GroupMakeError>
     where
         P: Proto,
         I: Iterator<Item = &'a (dyn Port<P>)>,
     {
         use GroupMakeError::*;
-        let mut group_ids: HashSet<Id> = HashSet::default();
+        let mut group_ids: BitSet = BitSet::default();
         let mut comm = None;
         // 1. build the GroupCommunicator object
         for port in it {
@@ -236,8 +299,8 @@ impl<P: Proto> GroupCommunicator<P> {
             {
                 return Err(DifferentProtoInstances);
             }
-            if group_ids.insert(port.get_common().id) {
-                return Err(DuplicateIds);
+            if group_ids.set(port.get_common().id) {
+                return Err(DuplicatePortIds);
             }
         }
         let comm = match comm {
@@ -250,12 +313,8 @@ impl<P: Proto> GroupCommunicator<P> {
         // 2. try register the group
         let mut cra = comm.proto_common.cra.lock();
         for existing_group in cra.groups.values() {
-            for id in group_ids.iter() {
-                // TODO
-
-                if existing_group.contains(id) {
-                    return Err(OverlapsWithExisting);
-                }
+            if existing_group.intersects_with(&group_ids) {
+                return Err(OverlapsWithExisting);
             }
         }
         cra.groups.insert(comm.leader, group_ids);
@@ -299,7 +358,7 @@ impl<P: Proto> ProtoCommon<P> {
         let right: *const ProtoCommon<P> = other;
         left == right
     }
-    fn new(specific: P) -> (Self, HashMap<Id, Receiver<OutMessage>>) {
+    fn new(specific: P) -> (Self, HashMap<PortId, Receiver<OutMessage>>) {
         let ids = <P as Proto>::interface_ids();
         let num_ids = ids.len();
         let mut s_out = HashMap::with_capacity(num_ids);
@@ -315,6 +374,8 @@ impl<P: Proto> ProtoCommon<P> {
         };
         let cra = ProtoCrAll {
             inner,
+            buf: Vec::with_capacity(8),
+            committed: None,
             state_waiters: vec![],
             ready: BitSet::default(),
             ready_groups: HashSet::default(),
@@ -409,7 +470,7 @@ impl<P: Proto> ProtoCommon<P> {
 }
 // common to Putter and to Getter to minimize boilerplate
 pub struct PortCommon<P: Proto> {
-    id: Id,
+    id: PortId,
     r_out: Receiver<OutMessage>,
     proto_common: Arc<ProtoCommon<P>>,
 }
@@ -417,8 +478,8 @@ unsafe impl<P: Proto> Send for PortCommon<P> {}
 unsafe impl<P: Proto> Sync for PortCommon<P> {}
 
 // get and put invocations cross the dynamic dispatch barrier here
-pub struct Getter<T, P: Proto>(PortCommon<P>, PhantomData<T>);
-impl<T, P: Proto> Getter<T, P> {
+pub struct Getter<T: TryClone, P: Proto>(PortCommon<P>, PhantomData<T>);
+impl<T: TryClone, P: Proto> Getter<T, P> {
     pub fn get(&self) -> T {
         self.0.proto_common.get(&self.0)
     }
@@ -426,8 +487,8 @@ impl<T, P: Proto> Getter<T, P> {
         self.0.proto_common.get_signal(&self.0)
     }
 }
-pub struct Putter<T, P: Proto>(PortCommon<P>, PhantomData<T>);
-impl<T, P: Proto> Putter<T, P> {
+pub struct Putter<T: TryClone, P: Proto>(PortCommon<P>, PhantomData<T>);
+impl<T: TryClone, P: Proto> Putter<T, P> {
     pub fn put(&self, datum: T) -> Option<T> {
         self.0.proto_common.put(&self.0, datum)
     }
@@ -444,6 +505,11 @@ pub trait TryClone: Sized {
         panic!("Don't know how to clone this!")
     }
 }
+impl<T: Clone> TryClone for T {
+    fn try_clone(&self) -> Self {
+        self.clone()
+    }
+}
 
 ////////////// EXAMPLE concrete ///////////////
 
@@ -451,12 +517,12 @@ pub trait TryClone: Sized {
 struct SyncProto<T> {
     data_type: PhantomData<T>,
 }
-impl<T: 'static> Proto for SyncProto<T> {
+impl<T: 'static + TryClone> Proto for SyncProto<T> {
     fn state_predicate(&self, _predicate: &StatePred) -> bool {
         true
     }
     type Interface = (Putter<T, Self>, Getter<T, Self>);
-    fn interface_ids() -> &'static [Id] {
+    fn interface_ids() -> &'static [PortId] {
         &[0, 1]
     }
     fn build_guards() -> Vec<Guard<Self>> {
@@ -500,11 +566,6 @@ impl<T: 'static> Proto for SyncProto<T> {
     }
 }
 
-impl<T: Clone> TryClone for T {
-    fn try_clone(&self) -> Self {
-        self.clone()
-    }
-}
 
 #[test]
 pub fn prod_cons() {

@@ -1,5 +1,4 @@
-use crate::proto::{Getter, Id, Proto, ProtoCommon, Putter, RuleId};
-use hashbrown::HashSet;
+use crate::proto::{Getter, PortId, GroupCommunicator, Proto, Putter, RuleId, TryClone};
 use std::marker::PhantomData;
 use std::mem;
 use std::sync::Arc;
@@ -44,12 +43,12 @@ pub type E8 = D8<()>;
 pub type E9 = D9<()>;
 
 pub struct Safe<D: Decimal, T> {
-    port_ids: Arc<Vec<Id>>,
+    port_ids: Arc<Vec<PortId>>,
     inner: T,
     d: D,
 }
 impl<D: Decimal, T> Safe<D, T> {
-    pub fn new(inner: T, port_ids: Arc<Vec<Id>>) -> Self {
+    pub fn new(inner: T, port_ids: Arc<Vec<PortId>>) -> Self {
         Self {
             port_ids,
             inner,
@@ -58,34 +57,14 @@ impl<D: Decimal, T> Safe<D, T> {
     }
 }
 
-// proto-type specific
-pub struct ProtoHandle<P: Proto> {
-    leader: Id,
-    common: Arc<ProtoCommon<P>>,
-}
-impl<P: Proto> ProtoHandle<P> {
-    // fn new<I>(proto_lock: &mut ProtoLock<P>, port_ids: HashSet<Id>) -> Self {
-    // 	// let common = proto_lock.proto_common.clone();
-    // 	// let leader = proto_lock.register_group(port_ids).expect("WAH");
-    // 	// Self {
-    // 	// 	leader, common,
-    // 	// }
-    // 	unimplemented!()
-    // }
-    fn ready_wait_determine<T: Transition<P>>(&self) -> T {
-        // let rid: RuleId = self.common.group_ready_wait(self.leader).expect("HUEY");
-        // T::new(rid)
-        unimplemented!()
-    }
-}
 
-impl<D: Decimal, T, P: Proto> Safe<D, Getter<T, P>> {
+impl<D: Decimal, T: TryClone, P: Proto> Safe<D, Getter<T, P>> {
     pub fn get<R: Token>(&self, coupon: Coupon<D, R>) -> (T, R) {
         let _ = coupon;
         (self.inner.get(), R::fresh())
     }
 }
-impl<D: Decimal, T, P: Proto> Safe<D, Putter<T, P>> {
+impl<D: Decimal, T: TryClone, P: Proto> Safe<D, Putter<T, P>> {
     pub fn put<R: Token>(&self, coupon: Coupon<D, R>, datum: T) -> R {
         let _ = coupon;
         self.inner.put(datum);
@@ -140,12 +119,12 @@ impl Var for F {}
 impl Var for X {}
 
 pub trait Transition<P: Proto>: Sized {
-    fn new(proto_rule_id: RuleId) -> Self;
+    fn from_rule_id(proto_rule_id: RuleId) -> Self;
 }
 
 pub trait Advance<P: Proto>: Sized {
     type Opts: Transition<P>;
-    fn advance<F, R>(self, p_handle: ProtoHandle<P>, handler: F) -> R
+    fn advance<F, R>(self, p_handle: GroupCommunicator<P>, handler: F) -> R
     where
         F: FnOnce(Self::Opts) -> R,
     {

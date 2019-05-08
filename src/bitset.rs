@@ -1,4 +1,5 @@
 use std::fmt;
+use itertools::izip;
 
 #[derive(Default)]
 pub struct BitSet {
@@ -15,6 +16,12 @@ impl BitSet {
         let mut me = Self { data };
         me.strip_trailing_zeroes();
         me
+    }
+    pub fn get_chunk(&self, vec_idx: usize) -> usize {
+        self.data.get(vec_idx).cloned().unwrap_or(0)
+    }
+    pub fn iter_chunks(&self) -> impl Iterator<Item=usize> + '_ {
+        self.data.iter().cloned()
     }
     pub fn from_usize(chunk: usize) -> Self {
         if chunk == 0 {
@@ -41,14 +48,17 @@ impl BitSet {
     pub fn capacity(&self) -> usize {
         self.data.capacity() * Self::BITS_PER_CHUNK
     }
-    pub fn set(&mut self, mut idx: usize) {
+    pub fn set(&mut self, mut idx: usize) -> bool {
         idx += 1;
         let mask = idx % Self::BITS_PER_CHUNK;
         let chunk_idx = idx / Self::BITS_PER_CHUNK;
         while self.data.len() <= chunk_idx {
             self.data.push(0);
         }
-        self.data[chunk_idx] |= mask;
+        let chunk = &mut self.data[chunk_idx];
+        let was_set: bool = (*chunk & mask) != 0;
+        *chunk |= mask;
+        was_set
     }
     pub fn test(&self, mut idx: usize) -> bool {
         idx += 1;
@@ -58,6 +68,14 @@ impl BitSet {
             Some(chunk) => chunk & mask != 0,
             None => false,
         }
+    }
+    pub fn intersects_with(&self, other: &Self) -> bool {
+        for (&a, &b) in izip!(self.data.iter(), other.data.iter()) {
+            if a & b != 0 {
+                return true;
+            }
+        }
+        false
     }
     pub fn is_superset(&self, other: &Self) -> bool {
         if self.data.len() < other.data.len() {
