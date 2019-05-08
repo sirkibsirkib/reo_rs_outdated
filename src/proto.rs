@@ -550,6 +550,31 @@ pub trait AtomicComponent {
         F: FnOnce(S, PortGroup<Self::P>, Self::Interface);
 }
 
+
+pub trait WithFirstTrait: Iterator + Sized {
+    fn with_first(self) -> WithFirst<Self> {
+        WithFirst { first: true, it: self }
+    }
+}
+impl<I: Iterator> WithFirstTrait for I {}
+pub struct WithFirst<I: Iterator> {
+    first: bool,
+    it: I,
+}
+impl<I: Iterator> Iterator for WithFirst<I> {
+    type Item = (bool, I::Item);
+    fn next(&mut self) -> Option<Self::Item> {
+        match (self.first, self.it.next()) {
+            (_, None) => None,
+            (true, Some(x)) => {
+                self.first = false;
+                Some((true, x))
+            },
+            (false, Some(x)) => Some((false, x)),
+        }
+    }
+}
+
 ////////////// EXAMPLE concrete ///////////////
 
 // concrete proto. implements Proto trait
@@ -576,8 +601,7 @@ impl<T: 'static + TryClone> Proto for SyncProto<T> {
                     count: getter_id_iter.clone().count(),
                 };
                 r.out_message(putter_id, p_msg);
-                for (i, getter_id) in getter_id_iter.enumerate() {
-                    let first = i == 0;
+                for (first, getter_id) in getter_id_iter.with_first() {
                     let g_msg = OutMessage::GetNotify {
                         ptr,
                         notify: putter_id,
