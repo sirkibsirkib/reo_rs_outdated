@@ -96,6 +96,14 @@ impl BitSet {
             min: 0,
         }
     }
+    pub fn is_empty(&self) -> bool {
+        for &x in self.data.iter() {
+            if x != 0 {
+                return false;
+            }
+        }
+        true
+    }
     pub fn iter_and<'a,'b: 'a>(&'a self, other: &'b Self) -> AndIter {
         AndIter {
             a: self,

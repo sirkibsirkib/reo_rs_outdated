@@ -48,10 +48,10 @@ fn new_atomic<F, S: SomeState, T: TryClone + 'static>(
 where
     F: FnOnce(PortGroup<P<T>>, S, SafeInterface<T>),
 {
-    let i = interface;
-    let port_slice: &[&Port<P<T>>] = &[&i.0,];
+    let mut i = interface;
+    let port_slice: &mut [&mut Port<P<T>>] = &mut [&mut i.0,];
     let state_predicate = S::new_predicate();
-    let port_group = PortGroup::new(state_predicate, port_slice)?;
+    let port_group = PortGroup::new(state_predicate, port_slice.iter_mut())?;
     let safe_interface = (Safe::new(i.0),);
     let start_token = if std::mem::size_of::<S>() != 0 {
         panic!("BAD")

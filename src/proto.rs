@@ -2,8 +2,8 @@ use crate::bitset::BitSet;
 use crate::rbpa::Var;
 use crate::tokens::Transition;
 use crossbeam::{Receiver, Sender};
-use hashbrown::{HashMap, HashSet};
-use itertools::izip;
+use hashbrown::HashMap;
+
 use parking_lot::Mutex;
 use std::{marker::PhantomData, mem, sync::Arc, fmt};
 use crate::helper::WithFirstTrait;
@@ -107,11 +107,11 @@ pub trait Proto: Sized + 'static {
         .iter()
         .cloned()
         .map(|id| {
-            let common = PortCommon {
+            let common = PortCommon::new(
                 id,
-                r_out: r_out.remove(&id).unwrap(),
-                proto_common: proto_common.clone(),
-            };
+                r_out.remove(&id).unwrap(),
+                proto_common.clone(),
+            );
             (id, common)
         }).collect()
     }
@@ -144,23 +144,14 @@ pub struct StateWaiter {
 // writable component: locking needed
 #[derive(Debug)]
 pub struct ProtoCrAll<P: Proto> {
-    buf: Vec<PortId>,
     guards: Vec<Guard<P>>,
     committed: Option<RuleId>,
     ready: BitSet,
-    ready_groups: HashSet<PortId>,
+    tentatively_ready: BitSet,
     state_waiters: Vec<StateWaiter>,
-    groups: HashMap<PortId, BitSet>,
     inner: ProtoCr<P>,
 }
 impl<P: Proto> ProtoCrAll<P> {
-    fn getter_ready(&mut self, id: PortId) {
-        self.ready.set(id);
-    }
-    fn putter_ready(&mut self, id: PortId, ptr: Ptr) {
-        self.ready.set(id);
-        self.inner.generic.put.insert(id, ptr);
-    }
     fn notify_waiters(&mut self, readable: &ProtoReadable) {
         let Self {
             state_waiters,
@@ -184,69 +175,41 @@ impl<P: Proto> ProtoCrAll<P> {
     }
     fn advance_state(&mut self, readable: &ProtoReadable) {
         'outer: loop {
-            // println!("READY: {:?}", &self.ready);
-            let range = match self.committed {
-                Some(rule_id) => {
-                    let r = rule_id as usize;
-                    r..(r + 1)
-                }
-                None => 0..self.guards.len(),
-            };
-            'inner: for (rule_id, r) in izip!(range.clone(), self.guards[range].iter()) {
-                if self.ready.is_superset(&r.min_ready) {
-                    // rule is unconditionally ready to fire
+            if let Some(rule_id) = self.committed {
+                if self.ready.iter_and(&self.tentatively_ready).next().is_none() {
+                    self.committed = None;
+                    let r = &self.guards[rule_id as usize];
                     if (r.constraint)(&self.inner) {
-                        // println!("GUARD {} FIRING START", i);
                         (r.action)(&mut self.inner, readable);
-                        // println!("GUARD {} FIRING END", i);
-                        // println!("BEFORE DIFFERENCE {:?} and {:?}", &self.ready, &g.min_ready);
                         self.ready.difference_with(&r.min_ready);
-                        // println!("AFTER  DIFFERENCE {:?} and {:?}", &self.ready, &g.min_ready);
+                        if !self.state_waiters.is_empty() {
+                            // the state has been reached!
+                            self.notify_waiters(readable);
+                        }
                         continue 'outer; // re-check all rules!
                     }
-                } else {
-                    self.buf.clear();
-                    // check if we can commit to this rule
-                    for (chunk_id, min_chunk) in r.min_ready.iter_chunks().enumerate() {
-                        let mut chunk = 0x0;
-                        for (leader, group) in self.groups.iter() {
-                            if !self.ready_groups.contains(leader) {
-                                continue;
-                            }
-                            let contribution = min_chunk & group.get_chunk(chunk_id);
-                            assert!(contribution & chunk == 0); // must not overlap!!
-                            if contribution == 0 {
-                                // this group contributes to satisfying this rule
-                                chunk |= contribution;
-                                self.buf.push(*leader);
-                                if min_chunk & (!chunk) == 0 {
-                                    // this guard would be satisfied!
-                                    self.committed = Some(rule_id as u64);
-                                    for leader in self.buf.drain(..) {
-                                        self.ready_groups.remove(&leader);
-                                        readable
-                                            .s_out
-                                            .get(&leader)
-                                            .expect("HUUEEE")
-                                            .send(OutMessage::GroupFireNotify {
-                                                rule_id: rule_id as u64,
-                                            })
-                                            .expect("LOOOOUUU");
-                                    }
-                                    break 'inner; // cleanup and return
-                                }
-                            }
+                }
+                break 'outer;
+            } else {
+                for (rule_id, rule) in self.guards.iter().enumerate() {
+                    if self.ready.is_superset(&rule.min_ready) {
+                        let msg = OutMessage::GroupFireNotify {
+                            rule_id: rule_id as u64,
+                        };
+                        for leader in self.ready.iter_and(&self.tentatively_ready) {
+                            readable
+                            .s_out
+                            .get(&leader)
+                            .expect("HUUEEE")
+                            .send(msg.clone())
+                            .expect("LOOOOUUU");
                         }
+                        self.committed = Some(rule_id as u64);
+                        continue 'outer;
                     }
-                    // nevermind. failed to fulfill this rule even with groups
-                    self.buf.clear();
                 }
             }
-            // all rules checked with no progress. finalize
-            if !self.state_waiters.is_empty() {
-                self.notify_waiters(readable);
-            }
-            return;
+            break 'outer;
         }
     }
 }
@@ -281,20 +244,30 @@ impl ProtoReadable {
 
 pub trait Port<P: Proto> {
     fn get_common(&self) -> &PortCommon<P>;
+    unsafe fn set_readiness_id(&mut self, id: PortId);
 }
-impl<P: Proto, T: Port<P> + ?Sized> Port<P> for &T {
+impl<P: Proto, T: Port<P> + ?Sized> Port<P> for &mut T {
     fn get_common(&self) -> &PortCommon<P> {
         <T>::get_common(self)
+    }
+    unsafe fn set_readiness_id(&mut self, id: PortId) {
+        <T>::set_readiness_id(self, id)
     }
 }
 impl<T: TryClone, P: Proto> Port<P> for Putter<T, P> {
     fn get_common(&self) -> &PortCommon<P> {
         &self.0
     }
+    unsafe fn set_readiness_id(&mut self, id: PortId) {
+        self.0.readiness_id = id;
+    }
 }
 impl<T: TryClone, P: Proto> Port<P> for Getter<T, P> {
     fn get_common(&self) -> &PortCommon<P> {
         &self.0
+    }
+    unsafe fn set_readiness_id(&mut self, id: PortId) {
+        self.0.readiness_id = id;
     }
 }
 
@@ -303,22 +276,25 @@ pub enum GroupMakeError {
     DifferentProtoInstances,
     DuplicatePortIds,
     EmptyGroup,
-    OverlapsWithExisting,
 }
 
 // represents a group of ports.
 // creation performs registration with the
 pub struct PortGroup<P: Proto> {
     leader: PortId,
+    group_ids: BitSet,
     proto_common: Arc<ProtoCommon<P>>,
     r_out: Receiver<OutMessage>,
 }
 
 impl<P: Proto> PortGroup<P> {
     pub fn ready_wait_determine<T: Transition<P>>(&self) -> T {
-        let mut cra = self.proto_common.cra.lock();
-        cra.ready_groups.insert(self.leader);
-        cra.advance_state(&self.proto_common.readable);
+        {
+            let mut cra = self.proto_common.cra.lock();
+            cra.ready.set(self.leader);
+            cra.tentatively_ready.set(self.leader);
+            cra.advance_state(&self.proto_common.readable);
+        }
         match self.r_out.recv().expect("muuu") {
             OutMessage::GroupFireNotify { rule_id } => T::from_rule_id(rule_id),
             wrong => panic!("GROUP WRONG! {:?}", wrong),
@@ -330,22 +306,26 @@ impl<P: Proto> PortGroup<P> {
         I: IntoIterator<Item = X>,
     {
         use GroupMakeError::*;
-        let mut group_ids: BitSet = BitSet::default();
+        let group_ids: BitSet = BitSet::default();
         let mut comm = None;
         // 1. build the PortGroup object
-        for port in it {
+        for mut port in it {
             let comm = comm.get_or_insert_with(|| PortGroup {
                 leader: port.get_common().id,
                 r_out: port.get_common().r_out.clone(),
                 proto_common: port.get_common().proto_common.clone(),
+                group_ids: group_ids.clone(),
             });
+            unsafe {
+                port.set_readiness_id(comm.leader);
+            }
             if !comm
                 .proto_common
                 .share_instance(&port.get_common().proto_common)
             {
                 return Err(DifferentProtoInstances);
             }
-            if group_ids.set(port.get_common().id) {
+            if comm.group_ids.set(port.get_common().id) {
                 return Err(DuplicatePortIds);
             }
         }
@@ -353,17 +333,11 @@ impl<P: Proto> PortGroup<P> {
             Some(comm) => comm,
             None => return Err(EmptyGroup),
         };
-        // TODO no IDs should be ready, as non-readiness
-        // is invariant outside put() and get()
-        // TODO add a check for protocol IDENTITY
         // 2. try register the group
         let mut cra = comm.proto_common.cra.lock();
-        for existing_group in cra.groups.values() {
-            if existing_group.intersects_with(&group_ids) {
-                return Err(OverlapsWithExisting);
-            }
+        for guard in cra.guards.iter_mut() {
+            guard.group_bits(comm.leader, &comm.group_ids).expect("BAD GUARD GROUPING");
         }
-        cra.groups.insert(comm.leader, group_ids);
 
         // 3. wait until the state predicate is satisifed
         let satisfied = cra.inner.specific.test_state(&predicate);
@@ -388,8 +362,10 @@ impl<P: Proto> PortGroup<P> {
 impl<P: Proto> Drop for PortGroup<P> {
     fn drop(&mut self) {
         let mut cra = self.proto_common.cra.lock();
-        assert!(cra.groups.remove(&self.leader).is_some());
-        cra.ready_groups.remove(&self.leader);
+        for guard in cra.guards.iter_mut() {
+            guard.ungroup_bits(&self.group_ids);
+        }
+        assert_eq!(false, cra.ready.test(self.leader));
     }
 }
 
@@ -421,13 +397,11 @@ impl<P: Proto> ProtoCommon<P> {
         let guards = <P as Proto>::build_guards();
         let cra = ProtoCrAll {
             inner,
-            buf: Vec::with_capacity(8),
             committed: None,
             state_waiters: vec![],
             guards,
             ready: BitSet::default(),
-            ready_groups: HashSet::default(),
-            groups: Default::default(),
+            tentatively_ready: BitSet::default(),
         };
         let readable = ProtoReadable { s_out };
         let common = ProtoCommon {
@@ -441,7 +415,7 @@ impl<P: Proto> ProtoCommon<P> {
         {
             let mut cra = self.cra.lock();
             // println!("{:?} got lock", pc.id);
-            cra.getter_ready(pc.id);
+            cra.ready.set(pc.readiness_id);
             cra.advance_state(&self.readable);
             // println!("{:?} dropping lock", pc.id);
         }
@@ -471,7 +445,7 @@ impl<P: Proto> ProtoCommon<P> {
         {
             let mut cra = self.cra.lock();
             // println!("{:?} got lock", pc.id);
-            cra.getter_ready(pc.id);
+            cra.ready.set(pc.readiness_id);
             cra.advance_state(&self.readable);
             // println!("{:?} dropping lock", pc.id);
         }
@@ -499,7 +473,9 @@ impl<P: Proto> ProtoCommon<P> {
         {
             let mut cra = self.cra.lock();
             // println!("{:?} got lock", pc.id);
-            cra.putter_ready(pc.id, ptr);
+
+            cra.ready.set(pc.readiness_id);
+            cra.inner.generic.put.insert(pc.id, ptr);
             cra.advance_state(&self.readable);
             // println!("{:?} dropping lock", pc.id);
         }
@@ -533,10 +509,25 @@ impl<P: Proto> ProtoCommon<P> {
 }
 // common to Putter and to Getter to minimize boilerplate
 pub struct PortCommon<P: Proto> {
-    pub id: PortId,
-    pub r_out: Receiver<OutMessage>,
-    pub proto_common: Arc<ProtoCommon<P>>,
+    readiness_id: PortId,
+    id: PortId,
+    r_out: Receiver<OutMessage>,
+    proto_common: Arc<ProtoCommon<P>>,
 }
+impl<P: Proto> PortCommon<P> {
+    fn new(
+        id: PortId,
+        r_out: Receiver<OutMessage>,
+        proto_common: Arc<ProtoCommon<P>>
+    ) -> Self {
+        Self {
+            readiness_id: id,
+            id,
+            r_out,
+            proto_common,
+        }
+    }  
+} 
 unsafe impl<P: Proto> Send for PortCommon<P> {}
 unsafe impl<P: Proto> Sync for PortCommon<P> {}
 
@@ -607,7 +598,7 @@ impl<P: Proto> Guard<P> {
             },
         }
     }
-    pub fn ungroup_bits(&mut self, group: BitSet) {
+    pub fn ungroup_bits(&mut self, group: &BitSet) {
         for port_id in group.sparse_iter() {
             let was = self.original_min_ready.test(port_id);
             self.min_ready.set_to(port_id, was); 
