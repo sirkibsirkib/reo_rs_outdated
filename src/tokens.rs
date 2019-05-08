@@ -3,44 +3,31 @@ use std::marker::PhantomData;
 use std::mem;
 use std::sync::Arc;
 
-pub trait Decimal: Token + Default {}
-pub trait Token: Sized {}
+pub trait Decimal: Token {}
+pub trait Token: Sized {} 
+impl Token for () {}
 trait NoData: Token {
     fn fresh() -> Self;
 }
 
-#[derive(Default)]
-pub struct D0<T>(PhantomData<T>);
-#[derive(Default)]
-pub struct D1<T>(PhantomData<T>);
-#[derive(Default)]
-pub struct D2<T>(PhantomData<T>);
-#[derive(Default)]
-pub struct D3<T>(PhantomData<T>);
-#[derive(Default)]
-pub struct D4<T>(PhantomData<T>);
-#[derive(Default)]
-pub struct D5<T>(PhantomData<T>);
-#[derive(Default)]
-pub struct D6<T>(PhantomData<T>);
-#[derive(Default)]
-pub struct D7<T>(PhantomData<T>);
-#[derive(Default)]
-pub struct D8<T>(PhantomData<T>);
-#[derive(Default)]
-pub struct D9<T>(PhantomData<T>);
-
-// convenience to make the last digit less ugly
-pub type E0 = D0<()>;
-pub type E1 = D1<()>;
-pub type E2 = D2<()>;
-pub type E3 = D3<()>;
-pub type E4 = D4<()>;
-pub type E5 = D5<()>;
-pub type E6 = D6<()>;
-pub type E7 = D7<()>;
-pub type E8 = D8<()>;
-pub type E9 = D9<()>;
+macro_rules! def_decimal {
+    ($d:tt, $e:tt) => {
+        pub struct $d<T>(PhantomData<T>);
+        impl<T: Token> Decimal for $d<T> {}
+        impl<T: Token> Token for $d<T> {}
+        pub type $e = $d<()>;
+    }
+}
+def_decimal![D0, E0];
+def_decimal![D1, E1];
+def_decimal![D2, E2];
+def_decimal![D3, E3];
+def_decimal![D4, E4];
+def_decimal![D5, E5];
+def_decimal![D6, E6];
+def_decimal![D7, E7];
+def_decimal![D8, E8];
+def_decimal![D9, E9];
 
 pub struct Safe<D: Decimal, T> {
     port_ids: Arc<Vec<PortId>>,

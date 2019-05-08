@@ -92,7 +92,7 @@ enum OutMessage {
 // the trait that constrains the properties of specific protocol structures
 pub trait Proto: Sized + 'static {
     type Interface;
-    fn instantiate() -> Self::Interface;
+    fn new() -> Self::Interface;
     fn interface_ids() -> &'static [PortId];
     fn build_guards() -> Vec<Guard<Self>>;
     fn state_predicate(&self, predicate: &StatePred) -> bool;
@@ -102,7 +102,6 @@ pub trait Proto: Sized + 'static {
 pub struct StatePred {
     pred: Vec<crate::rbpa::Val>,
 }
-
 
 // this is NOT generic over P, but is passed to the protocol
 #[derive(Debug, Default)]
@@ -366,9 +365,7 @@ impl<P: Proto> ProtoCommon<P> {
         let right: *const ProtoCommon<P> = other;
         left == right
     }
-    pub unsafe fn new(specific: P) -> (Self, HashMap<PortId, Receiver<OutMessage>>) {
-        // 
-        TODO just pass in a set and then magic happens. will be unsafe anyways
+    fn new(specific: P) -> (Self, HashMap<PortId, Receiver<OutMessage>>) {
         let ids = <P as Proto>::interface_ids();
         let num_ids = ids.len();
         let mut s_out = HashMap::with_capacity(num_ids);
@@ -575,7 +572,7 @@ impl<T: 'static + TryClone> Proto for SyncProto<T> {
             },
         }]
     }
-    fn instantiate() -> <Self as Proto>::Interface {
+    fn new() -> <Self as Proto>::Interface {
         let proto = Self {
             data_type: Default::default(),
         };
@@ -594,7 +591,7 @@ impl<T: 'static + TryClone> Proto for SyncProto<T> {
 
 #[test]
 pub fn prod_cons() {
-    let (p, g) = SyncProto::<String>::instantiate();
+    let (p, g) = SyncProto::<String>::new();
     println!("INITIALIZED");
     crossbeam::scope(|s| {
         s.spawn(move |_| {
@@ -612,18 +609,43 @@ pub fn prod_cons() {
     .expect("Fail");
 }
 
-
-
-pub trait AtomicComponent<P: Proto> {
+pub trait AtomicComponent {
+    type P: Proto;
     type Interface;
     type SafeInterface;
-    fn new<F,S>(interface: Self::Interface, f: F) where F: FnOnce(S, PortGroup<P>, Self::Interface);
+    fn new<F, S>(interface: Self::Interface, f: F)
+    where
+        F: FnOnce(S, PortGroup<Self::P>, Self::Interface);
 }
 
+mod atomic_pc {
+    use crate::tokens::*;
+    use crate::proto::*;
+    type P<T> = SyncProto<T>;
+    type Interface<T> = (Putter<T,P<T>>, Getter<T,P<T>>);
+    type SafeInterface<T> = (Safe<E0, Putter<T,P<T>>>, Safe<E1, Getter<T,P<T>>>);
+
+    fn new<F, S, T>(interface: Interface<T>, f: F)
+    where
+    F: FnOnce(S, PortGroup<P<T>>, SafeInterface<T>) {
+        unimplemented!()
+    }
+
+}
+
+// struct AtomicPc;
+// impl AtomicComponent for AtomicPc {
+//     type P = SyncProto<T>;
+//     type Interface = (Putter<);
+//     type SafeInterface;
+//     fn new<F, S, T: TryClone>(interface: Self::Interface, f: F)
+//     where
+//         F: FnOnce(S, PortGroup<Self::P>, Self::Interface);
+// }
 
 // #[test]
 // pub fn grouped_prod_cons() {
-//     let (p, g) = SyncProto::<String>::instantiate();
+//     let (p, g) = SyncProto::<String>::new();
 
 //     let x: [&(dyn Port<_>);2] = [&p,&g];
 //     let x = PortGroup::new(StatePred::new(vec![]), x.iter());
