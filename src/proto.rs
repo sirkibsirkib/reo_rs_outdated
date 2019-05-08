@@ -5,7 +5,7 @@ use crossbeam::{Receiver, Sender};
 use hashbrown::{HashMap, HashSet};
 use itertools::izip;
 use parking_lot::Mutex;
-use std::{marker::PhantomData, mem, sync::Arc};
+use std::{marker::PhantomData, mem, sync::Arc, fmt};
 use crate::helper::WithFirstTrait;
 
 // associated with putter OR getter OR mem-in OR mem-out
@@ -145,6 +145,7 @@ pub struct StateWaiter {
 #[derive(Debug)]
 pub struct ProtoCrAll<P: Proto> {
     buf: Vec<PortId>,
+    guards: Vec<Guard<P>>,
     committed: Option<RuleId>,
     ready: BitSet,
     ready_groups: HashSet<PortId>,
@@ -160,7 +161,7 @@ impl<P: Proto> ProtoCrAll<P> {
         self.ready.set(id);
         self.inner.generic.put.insert(id, ptr);
     }
-    fn notify_waiters(&mut self, readable: &ProtoReadable<P>) {
+    fn notify_waiters(&mut self, readable: &ProtoReadable) {
         let Self {
             state_waiters,
             inner,
@@ -181,7 +182,7 @@ impl<P: Proto> ProtoCrAll<P> {
             }
         });
     }
-    fn advance_state(&mut self, readable: &ProtoReadable<P>) {
+    fn advance_state(&mut self, readable: &ProtoReadable) {
         'outer: loop {
             // println!("READY: {:?}", &self.ready);
             let range = match self.committed {
@@ -189,9 +190,9 @@ impl<P: Proto> ProtoCrAll<P> {
                     let r = rule_id as usize;
                     r..(r + 1)
                 }
-                None => 0..readable.guards.len(),
+                None => 0..self.guards.len(),
             };
-            'inner: for (rule_id, r) in izip!(range.clone(), readable.guards[range].iter()) {
+            'inner: for (rule_id, r) in izip!(range.clone(), self.guards[range].iter()) {
                 if self.ready.is_superset(&r.min_ready) {
                     // rule is unconditionally ready to fire
                     if (r.constraint)(&self.inner) {
@@ -251,11 +252,10 @@ impl<P: Proto> ProtoCrAll<P> {
 }
 
 // read-only component: no locking needed
-pub struct ProtoReadable<P: Proto> {
+pub struct ProtoReadable {
     s_out: HashMap<PortId, Sender<OutMessage>>,
-    guards: Vec<Guard<P>>,
 }
-impl<P: Proto> ProtoReadable<P> {
+impl ProtoReadable {
     fn out_message(&self, dest: PortId, msg: OutMessage) {
         self.s_out
             .get(&dest)
@@ -395,7 +395,7 @@ impl<P: Proto> Drop for PortGroup<P> {
 
 // the "shared" concrete protocol object
 pub struct ProtoCommon<P: Proto> {
-    readable: ProtoReadable<P>,
+    readable: ProtoReadable,
     cra: Mutex<ProtoCrAll<P>>,
 }
 impl<P: Proto> ProtoCommon<P> {
@@ -418,17 +418,18 @@ impl<P: Proto> ProtoCommon<P> {
             generic: ProtoCrGen::default(),
             specific,
         };
+        let guards = <P as Proto>::build_guards();
         let cra = ProtoCrAll {
             inner,
             buf: Vec::with_capacity(8),
             committed: None,
             state_waiters: vec![],
+            guards,
             ready: BitSet::default(),
             ready_groups: HashSet::default(),
             groups: Default::default(),
         };
-        let guards = <P as Proto>::build_guards();
-        let readable = ProtoReadable { s_out, guards };
+        let readable = ProtoReadable { s_out };
         let common = ProtoCommon {
             readable,
             cra: Mutex::new(cra),
@@ -562,10 +563,61 @@ impl<T: TryClone, P: Proto> Putter<T, P> {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub enum GuardGroupingError {
+    BadLeader,
+    DuplicateOverlaps,
+}
 pub struct Guard<P: Proto> {
-    pub min_ready: BitSet,
-    pub constraint: fn(&ProtoCr<P>) -> bool,
-    pub action: fn(&mut ProtoCr<P>, &ProtoReadable<P>),
+    min_ready: BitSet,
+    constraint: fn(&ProtoCr<P>) -> bool,
+    action: fn(&mut ProtoCr<P>, &ProtoReadable),
+    original_min_ready: BitSet,
+}
+impl<P: Proto> Guard<P> {
+    pub fn new(
+        min_ready: BitSet,
+        constraint: fn(&ProtoCr<P>) -> bool,
+        action: fn(&mut ProtoCr<P>, &ProtoReadable)
+    ) -> Self {
+        let original_min_ready = min_ready.clone();
+        Self { min_ready, constraint, action, original_min_ready }
+    }
+
+    pub fn group_bits(&mut self, leader: PortId, group: &BitSet) -> Result<bool,GuardGroupingError> {
+        use GuardGroupingError::*;
+        if !group.test(leader) {
+            return Err(BadLeader);
+        }
+        let mut overlapping = None;
+        for x in self.min_ready.iter_and(group) {
+            if overlapping.is_some() {
+                return Err(DuplicateOverlaps); // 2+ overlaps!
+            } else {
+                overlapping = Some(x);
+            }
+        }
+        match (overlapping, leader) {
+            (None, _) => Ok(false), 
+            (Some(o), l) if o==l => Ok(false),
+            (Some(o), l) => {
+                self.min_ready.set(l);
+                self.min_ready.set_to(o, false);
+                Ok(true)
+            },
+        }
+    }
+    pub fn ungroup_bits(&mut self, group: BitSet) {
+        for port_id in group.sparse_iter() {
+            let was = self.original_min_ready.test(port_id);
+            self.min_ready.set_to(port_id, was); 
+        }
+    }
+}
+impl<P: Proto> fmt::Debug for Guard<P> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Guard:{:?}, constraint: ?, action: ?", &self.min_ready)
+    }
 }
 
 pub trait TryClone: Sized {
@@ -603,11 +655,11 @@ impl<T: 'static + TryClone> Proto for SyncProto<T> {
         &[0, 1]
     }
     fn build_guards() -> Vec<Guard<Self>> {
-        vec![Guard {
-            min_ready: bitset! {0,1},
-            constraint: |_cr| true,
-            action: data_move_action![0 => 1],
-        }]
+        vec![Guard::new(
+            bitset! {0,1},
+            |_cr| true,
+            data_move_action![0 => 1],
+        )]
     }
     fn new_state() -> Self {
         Self {

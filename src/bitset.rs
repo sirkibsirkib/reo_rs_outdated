@@ -1,9 +1,74 @@
 use itertools::izip;
 use std::fmt;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct BitSet {
     data: Vec<usize>,
+}
+
+pub struct SparseIter<'a> {
+    a: &'a BitSet,
+    n: Option<usize>,
+    maj: usize,
+    min: usize,
+}
+impl<'a> Iterator for SparseIter<'a> {
+    type Item = usize;
+    fn next(&mut self) -> Option<usize> {
+        loop {
+            if self.min == BitSet::BITS_PER_CHUNK {
+                self.min = 0;
+                self.maj += 1;
+                self.n = self.a.data.get(self.maj).cloned();
+            } 
+            match self.n {
+                Some(x) => {
+                    let val = (1 << self.min) & x;
+                    self.min += 1;
+                    if val != 0 {
+                        return Some(self.maj * BitSet::BITS_PER_CHUNK + self.min);
+                    }
+                },
+                None => return None,
+            }
+        }
+    }
+}
+
+
+pub struct AndIter<'a,'b> {
+    a: &'a BitSet,
+    b: &'b BitSet,
+    n: Option<usize>,
+    maj: usize,
+    min: usize,
+}
+impl<'a, 'b> AndIter<'a,'b> {
+    fn fetch_chunk(a: &BitSet, b: &BitSet, chunk_idx: usize) -> Option<usize> {
+        a.data.get(0).and_then(|x| b.data.get(0).map(|y| x&y))
+    }
+}
+impl<'a, 'b> Iterator for AndIter<'a,'b> {
+    type Item = usize;
+    fn next(&mut self) -> Option<usize> {
+        loop {
+            if self.min == BitSet::BITS_PER_CHUNK {
+                self.min = 0;
+                self.maj += 1;
+                self.n = Self::fetch_chunk(self.a, self.b, self.maj);
+            } 
+            match self.n {
+                Some(x) => {
+                    let val = (1 << self.min) & x;
+                    self.min += 1;
+                    if val != 0 {
+                        return Some(self.maj * BitSet::BITS_PER_CHUNK + self.min);
+                    }
+                },
+                None => return None,
+            }
+        }
+    }
 }
 
 impl BitSet {
@@ -22,6 +87,23 @@ impl BitSet {
     }
     pub fn iter_chunks(&self) -> impl Iterator<Item = usize> + '_ {
         self.data.iter().cloned()
+    }
+    pub fn sparse_iter(&self) -> SparseIter {
+        SparseIter {
+            a: self,
+            n: self.data.get(0).cloned(),
+            maj: 0,
+            min: 0,
+        }
+    }
+    pub fn iter_and<'a,'b: 'a>(&'a self, other: &'b Self) -> AndIter {
+        AndIter {
+            a: self,
+            b: other,
+            n: AndIter::fetch_chunk(self, other, 0),
+            maj: 0,
+            min: 0,
+        }
     }
     pub fn from_usize(chunk: usize) -> Self {
         if chunk == 0 {
@@ -47,6 +129,28 @@ impl BitSet {
     }
     pub fn capacity(&self) -> usize {
         self.data.capacity() * Self::BITS_PER_CHUNK
+    }
+    pub fn set_to(&mut self, mut idx: usize, val: bool) -> bool {
+        idx += 1;
+        let mask = idx % Self::BITS_PER_CHUNK;
+        let chunk_idx = idx / Self::BITS_PER_CHUNK;
+        let chunk = match (val, self.data.get_mut(chunk_idx)) {
+            (false, None) => return false,
+            (true, None) => {
+                while self.data.len() <= chunk_idx {
+                    self.data.push(0);
+                }
+                &mut self.data[chunk_idx]
+            }
+            (_, Some(c)) => &mut self.data[chunk_idx],
+        };
+        let was_set: bool = (*chunk & mask) != 0;
+        if val {
+            *chunk |= mask;
+        } else {
+            *chunk &= !mask;
+        }
+        was_set
     }
     pub fn set(&mut self, mut idx: usize) -> bool {
         idx += 1;

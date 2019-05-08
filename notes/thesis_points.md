@@ -27,3 +27,7 @@
 27. dynamic reconfig: sharded rwlock at outermost level can alter the proto
 28. RBA api: do we fragment rules or nah?
 29. what happens if we DONT fragment rules: we get overly conservative APIs
+30. ways of representing group_ready sets:
+-- a group becoming ready sets N bits. checking readiness involves ONE ready set
+-- a group becoming ready sets 1 leader-bit. checking readiness involves N ready sets
+-- a group becoming ready sets 1 leader-bit. checking readiness involved ONE ready set BUT guards get changed

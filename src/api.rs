@@ -3,7 +3,6 @@
 use crate::proto::*;
 use crate::tokens::*;
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 // 2. state definition
 pub struct State {
