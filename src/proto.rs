@@ -144,6 +144,7 @@ pub struct StateWaiter {
 // writable component: locking needed
 #[derive(Debug)]
 pub struct ProtoCrAll<P: Proto> {
+    ready_id_remaps: HashMap<PortId, PortId>,
     guards: Vec<Guard<P>>,
     committed: Option<RuleId>,
     ready: BitSet,
@@ -244,30 +245,20 @@ impl ProtoReadable {
 
 pub trait Port<P: Proto> {
     fn get_common(&self) -> &PortCommon<P>;
-    unsafe fn set_readiness_id(&mut self, id: PortId);
 }
-impl<P: Proto, T: Port<P> + ?Sized> Port<P> for &mut T {
+impl<P: Proto, T: Port<P> + ?Sized> Port<P> for &T {
     fn get_common(&self) -> &PortCommon<P> {
         <T>::get_common(self)
-    }
-    unsafe fn set_readiness_id(&mut self, id: PortId) {
-        <T>::set_readiness_id(self, id)
     }
 }
 impl<T: TryClone, P: Proto> Port<P> for Putter<T, P> {
     fn get_common(&self) -> &PortCommon<P> {
         &self.0
     }
-    unsafe fn set_readiness_id(&mut self, id: PortId) {
-        self.0.readiness_id = id;
-    }
 }
 impl<T: TryClone, P: Proto> Port<P> for Getter<T, P> {
     fn get_common(&self) -> &PortCommon<P> {
         &self.0
-    }
-    unsafe fn set_readiness_id(&mut self, id: PortId) {
-        self.0.readiness_id = id;
     }
 }
 
@@ -309,16 +300,13 @@ impl<P: Proto> PortGroup<P> {
         let group_ids: BitSet = BitSet::default();
         let mut comm = None;
         // 1. build the PortGroup object
-        for mut port in it {
+        for port in it {
             let comm = comm.get_or_insert_with(|| PortGroup {
                 leader: port.get_common().id,
                 r_out: port.get_common().r_out.clone(),
                 proto_common: port.get_common().proto_common.clone(),
                 group_ids: group_ids.clone(),
             });
-            unsafe {
-                port.set_readiness_id(comm.leader);
-            }
             if !comm
                 .proto_common
                 .share_instance(&port.get_common().proto_common)
@@ -335,6 +323,9 @@ impl<P: Proto> PortGroup<P> {
         };
         // 2. try register the group
         let mut cra = comm.proto_common.cra.lock();
+        for port in comm.group_ids.iter_sparse() {
+            cra.ready_id_remaps.insert(port, comm.leader);
+        }
         for guard in cra.guards.iter_mut() {
             guard.group_bits(comm.leader, &comm.group_ids).expect("BAD GUARD GROUPING");
         }
@@ -362,6 +353,9 @@ impl<P: Proto> PortGroup<P> {
 impl<P: Proto> Drop for PortGroup<P> {
     fn drop(&mut self) {
         let mut cra = self.proto_common.cra.lock();
+        for port in self.group_ids.iter_sparse() {
+            debug_assert!(cra.ready_id_remaps.remove(&port).is_some());
+        }
         for guard in cra.guards.iter_mut() {
             guard.ungroup_bits(&self.group_ids);
         }
@@ -396,6 +390,7 @@ impl<P: Proto> ProtoCommon<P> {
         };
         let guards = <P as Proto>::build_guards();
         let cra = ProtoCrAll {
+            ready_id_remaps: Default::default(),
             inner,
             committed: None,
             state_waiters: vec![],
@@ -415,7 +410,8 @@ impl<P: Proto> ProtoCommon<P> {
         {
             let mut cra = self.cra.lock();
             // println!("{:?} got lock", pc.id);
-            cra.ready.set(pc.readiness_id);
+            let readiness_id = cra.ready_id_remaps.get(&pc.id).cloned().unwrap_or(pc.id);
+            cra.ready.set(readiness_id);
             cra.advance_state(&self.readable);
             // println!("{:?} dropping lock", pc.id);
         }
@@ -445,7 +441,8 @@ impl<P: Proto> ProtoCommon<P> {
         {
             let mut cra = self.cra.lock();
             // println!("{:?} got lock", pc.id);
-            cra.ready.set(pc.readiness_id);
+            let readiness_id = cra.ready_id_remaps.get(&pc.id).cloned().unwrap_or(pc.id);
+            cra.ready.set(readiness_id);
             cra.advance_state(&self.readable);
             // println!("{:?} dropping lock", pc.id);
         }
@@ -474,7 +471,8 @@ impl<P: Proto> ProtoCommon<P> {
             let mut cra = self.cra.lock();
             // println!("{:?} got lock", pc.id);
 
-            cra.ready.set(pc.readiness_id);
+            let readiness_id = cra.ready_id_remaps.get(&pc.id).cloned().unwrap_or(pc.id);
+            cra.ready.set(readiness_id);
             cra.inner.generic.put.insert(pc.id, ptr);
             cra.advance_state(&self.readable);
             // println!("{:?} dropping lock", pc.id);
@@ -509,7 +507,6 @@ impl<P: Proto> ProtoCommon<P> {
 }
 // common to Putter and to Getter to minimize boilerplate
 pub struct PortCommon<P: Proto> {
-    readiness_id: PortId,
     id: PortId,
     r_out: Receiver<OutMessage>,
     proto_common: Arc<ProtoCommon<P>>,
@@ -521,7 +518,6 @@ impl<P: Proto> PortCommon<P> {
         proto_common: Arc<ProtoCommon<P>>
     ) -> Self {
         Self {
-            readiness_id: id,
             id,
             r_out,
             proto_common,
@@ -599,7 +595,7 @@ impl<P: Proto> Guard<P> {
         }
     }
     pub fn ungroup_bits(&mut self, group: &BitSet) {
-        for port_id in group.sparse_iter() {
+        for port_id in group.iter_sparse() {
             let was = self.original_min_ready.test(port_id);
             self.min_ready.set_to(port_id, was); 
         }

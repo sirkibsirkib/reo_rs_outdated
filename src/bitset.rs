@@ -88,7 +88,7 @@ impl BitSet {
     pub fn iter_chunks(&self) -> impl Iterator<Item = usize> + '_ {
         self.data.iter().cloned()
     }
-    pub fn sparse_iter(&self) -> SparseIter {
+    pub fn iter_sparse(&self) -> SparseIter {
         SparseIter {
             a: self,
             n: self.data.get(0).cloned(),
