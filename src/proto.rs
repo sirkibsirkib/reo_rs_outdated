@@ -1,4 +1,5 @@
 use crate::bitset::BitSet;
+use crate::rbpa::Var;
 use crate::tokens::Transition;
 use crossbeam::{Receiver, Sender};
 use hashbrown::{HashMap, HashSet};
@@ -100,7 +101,7 @@ pub trait Proto: Sized + 'static {
 
 #[derive(Debug, derive_new::new)]
 pub struct StatePred {
-    pred: Vec<crate::rbpa::Val>,
+    pred: Vec<Var>,
 }
 
 // this is NOT generic over P, but is passed to the protocol
@@ -249,6 +250,11 @@ impl<P: Proto> ProtoReadable<P> {
 pub trait Port<P: Proto> {
     fn get_common(&self) -> &PortCommon<P>;
 }
+impl<P: Proto, T: Port<P> + ?Sized> Port<P> for &T {
+    fn get_common(&self) -> &PortCommon<P> {
+        <T>::get_common(self)
+    }
+}
 impl<T: TryClone, P: Proto> Port<P> for Putter<T, P> {
     fn get_common(&self) -> &PortCommon<P> {
         &self.0
@@ -260,6 +266,7 @@ impl<T: TryClone, P: Proto> Port<P> for Getter<T, P> {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum GroupMakeError {
     DifferentProtoInstances,
     DuplicatePortIds,
@@ -285,10 +292,10 @@ impl<P: Proto> PortGroup<P> {
             wrong => panic!("GROUP WRONG! {:?}", wrong),
         }
     }
-    pub fn new<'a, I>(predicate: StatePred, it: I) -> Result<Self, GroupMakeError>
+    pub fn new<'a, I, X: Port<P>>(predicate: StatePred, it: I) -> Result<Self, GroupMakeError>
     where
         P: Proto,
-        I: IntoIterator<Item = &'a (dyn Port<P>)>,
+        I: IntoIterator<Item = X>,
     {
         use GroupMakeError::*;
         let mut group_ids: BitSet = BitSet::default();
@@ -534,10 +541,19 @@ impl<T: Clone> TryClone for T {
     }
 }
 
+pub trait AtomicComponent {
+    type P: Proto;
+    type Interface;
+    type SafeInterface;
+    fn new<F, S>(interface: Self::Interface, f: F)
+    where
+        F: FnOnce(S, PortGroup<Self::P>, Self::Interface);
+}
+
 ////////////// EXAMPLE concrete ///////////////
 
 // concrete proto. implements Proto trait
-struct SyncProto<T> {
+pub(crate) struct SyncProto<T> {
     data_type: PhantomData<T>,
 }
 impl<T: 'static + TryClone> Proto for SyncProto<T> {
@@ -608,45 +624,3 @@ pub fn prod_cons() {
     })
     .expect("Fail");
 }
-
-pub trait AtomicComponent {
-    type P: Proto;
-    type Interface;
-    type SafeInterface;
-    fn new<F, S>(interface: Self::Interface, f: F)
-    where
-        F: FnOnce(S, PortGroup<Self::P>, Self::Interface);
-}
-
-mod atomic_pc {
-    use crate::tokens::*;
-    use crate::proto::*;
-    type P<T> = SyncProto<T>;
-    type Interface<T> = (Putter<T,P<T>>, Getter<T,P<T>>);
-    type SafeInterface<T> = (Safe<E0, Putter<T,P<T>>>, Safe<E1, Getter<T,P<T>>>);
-
-    fn new<F, S, T>(interface: Interface<T>, f: F)
-    where
-    F: FnOnce(S, PortGroup<P<T>>, SafeInterface<T>) {
-        unimplemented!()
-    }
-
-}
-
-// struct AtomicPc;
-// impl AtomicComponent for AtomicPc {
-//     type P = SyncProto<T>;
-//     type Interface = (Putter<);
-//     type SafeInterface;
-//     fn new<F, S, T: TryClone>(interface: Self::Interface, f: F)
-//     where
-//         F: FnOnce(S, PortGroup<Self::P>, Self::Interface);
-// }
-
-// #[test]
-// pub fn grouped_prod_cons() {
-//     let (p, g) = SyncProto::<String>::new();
-
-//     let x: [&(dyn Port<_>);2] = [&p,&g];
-//     let x = PortGroup::new(StatePred::new(vec![]), x.iter());
-// }

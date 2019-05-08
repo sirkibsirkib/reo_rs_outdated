@@ -1,5 +1,6 @@
 #[macro_use]
 pub mod macros;
+pub mod api;
 pub mod bitset;
 pub mod proto;
 pub mod rbpa;

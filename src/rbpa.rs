@@ -31,15 +31,15 @@ macro_rules! hashset {
 
 // part of the state-set predicate.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub enum Val {
+pub enum Var {
     T,
     F, // specific values corresponding to boolean true and false,
     X, // generic over T and F. Interpreted as an unspecified value.
 }
-impl PartialOrd for Val {
+impl PartialOrd for Var {
     // ordering is on SPECIFICITY: X<T, X<F, T is not comparable to F.
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        use Val::*;
+        use Var::*;
         match [self, other] {
             [a, b] if a == b => Some(cmp::Ordering::Equal),
             [X, _] => Some(cmp::Ordering::Less),
@@ -48,10 +48,10 @@ impl PartialOrd for Val {
         }
     }
 }
-impl ops::Neg for Val {
+impl ops::Neg for Var {
     type Output = Self;
     fn neg(self) -> Self::Output {
-        use Val::*;
+        use Var::*;
         match self {
             X => X,
             T => F,
@@ -59,9 +59,9 @@ impl ops::Neg for Val {
         }
     }
 }
-impl Val {
+impl Var {
     pub fn is_generic(self) -> bool {
-        self == Val::X
+        self == Var::X
     }
     pub fn is_specific(self) -> bool {
         !self.is_generic()
@@ -96,8 +96,8 @@ impl Rbpa {
             self.mask.relevant_index[i] = false;
             changed_something = true;
             for r in self.rules.iter_mut() {
-                r.guard.predicate[i] = Val::X;
-                r.assign.predicate[i] = Val::X;
+                r.guard.predicate[i] = Var::X;
+                r.assign.predicate[i] = Var::X;
             }
         }
         changed_something
@@ -157,7 +157,7 @@ impl Rbpa {
 
 #[derive(Eq, PartialEq, Copy, Clone, Hash)]
 pub struct StateSet {
-    predicate: [Val; Self::LEN],
+    predicate: [Var; Self::LEN],
 }
 impl PartialOrd for StateSet {
     fn partial_cmp(&self, rhs: &Self) -> Option<cmp::Ordering> {
@@ -189,15 +189,15 @@ impl StateSet {
             }
         }
     }
-    pub fn iter(&self) -> impl Iterator<Item = &Val> {
+    pub fn iter(&self) -> impl Iterator<Item = &Var> {
         self.predicate.iter()
     }
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Val> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Var> {
         self.predicate.iter_mut()
     }
     pub fn sisters<'a>(&'a self) -> impl Iterator<Item = Self> + 'a {
         (0..StateSet::LEN).filter_map(move |i| match -self.predicate[i] {
-            Val::X => None,
+            Var::X => None,
             t_or_f => {
                 let mut x = self.clone();
                 x.predicate[i] = t_or_f;
@@ -284,7 +284,7 @@ impl Rule {
                             return None;
                         }
                         equal_so_far = false;
-                        *g = Val::X;
+                        *g = Var::X;
                     }
                 }
                 let mut ids = self.ids.clone();
@@ -406,7 +406,7 @@ pub fn wahey() {
     println!("RULE {:?}", mem::size_of::<Rule>());
     println!("Rbpa {:?}", mem::size_of::<Rbpa>());
     println!("StateSet {:?}", mem::size_of::<StateSet>());
-    use Val::*;
+    use Var::*;
     let rba = Rbpa {
         rules: vec![
             Rule::new(ss![[X, X, F]], Some(1), ss![[X, X, T]], vec![0]),
@@ -450,7 +450,7 @@ impl StateMask {
         let mut ret = state.clone();
         for (r, &b) in izip!(ret.iter_mut(), self.relevant_index.iter()) {
             if !b {
-                *r = Val::X;
+                *r = Var::X;
             }
         }
         ret

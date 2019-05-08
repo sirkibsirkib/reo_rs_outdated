@@ -5,7 +5,6 @@ macro_rules! id_iter {
     };
 }
 
-
 #[macro_export]
 macro_rules! finalize_ports {
     ($commons:expr => $($struct:path),*) => {

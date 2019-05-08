@@ -1,22 +1,26 @@
-use crate::proto::{Getter, PortGroup, PortId, Proto, Putter, RuleId, TryClone};
+use crate::proto::{Getter, PortGroup, Proto, Putter, RuleId, TryClone};
+use crate::rbpa::Var;
 use std::marker::PhantomData;
 use std::mem;
-use std::sync::Arc;
 
 pub trait Decimal: Token {}
-pub trait Token: Sized {} 
-impl Token for () {}
-trait NoData: Token {
-    fn fresh() -> Self;
+
+// for types that have NO SIZE and thus can be created without context
+pub unsafe trait Token: Sized {
+    unsafe fn fresh() -> Self {
+        debug_assert!(mem::size_of::<Self>() == 0);
+        mem::uninitialized()
+    }
 }
+unsafe impl Token for () {}
 
 macro_rules! def_decimal {
     ($d:tt, $e:tt) => {
         pub struct $d<T>(PhantomData<T>);
         impl<T: Token> Decimal for $d<T> {}
-        impl<T: Token> Token for $d<T> {}
+        unsafe impl<T: Token> Token for $d<T> {}
         pub type $e = $d<()>;
-    }
+    };
 }
 def_decimal![D0, E0];
 def_decimal![D1, E1];
@@ -30,16 +34,15 @@ def_decimal![D8, E8];
 def_decimal![D9, E9];
 
 pub struct Safe<D: Decimal, T> {
-    port_ids: Arc<Vec<PortId>>,
+    // port_ids: Arc<Vec<PortId>>,
     inner: T,
-    d: D,
+    phantom: PhantomData<D>,
 }
 impl<D: Decimal, T> Safe<D, T> {
-    pub fn new(inner: T, port_ids: Arc<Vec<PortId>>) -> Self {
+    pub fn new(inner: T) -> Self {
         Self {
-            port_ids,
             inner,
-            d: Default::default(),
+            phantom: PhantomData::default(),
         }
     }
 }
@@ -47,40 +50,52 @@ impl<D: Decimal, T> Safe<D, T> {
 impl<D: Decimal, T: TryClone, P: Proto> Safe<D, Getter<T, P>> {
     pub fn get<R: Token>(&self, coupon: Coupon<D, R>) -> (T, R) {
         let _ = coupon;
-        (self.inner.get(), R::fresh())
+        (self.inner.get(), unsafe { R::fresh() })
     }
 }
 impl<D: Decimal, T: TryClone, P: Proto> Safe<D, Putter<T, P>> {
     pub fn put<R: Token>(&self, coupon: Coupon<D, R>, datum: T) -> R {
         let _ = coupon;
         self.inner.put(datum);
-        R::fresh()
+        unsafe { R::fresh() }
     }
 }
 
 pub struct Coupon<D: Decimal, R: Token> {
     phantom: PhantomData<(D, R)>,
 }
-
-impl<T: Token> NoData for T {
-    fn fresh() -> Self {
-        debug_assert!(mem::size_of::<Self>() == 0);
-        unsafe { mem::uninitialized() }
-    }
-}
+unsafe impl<D: Decimal, R: Token> Token for Coupon<D,R> {}
 
 pub struct T;
 pub struct F;
 pub struct X;
-pub trait Tern: Token {}
-impl Token for T {}
-impl Token for F {}
-impl Token for X {}
+unsafe impl Token for T {}
+unsafe impl Token for F {}
+unsafe impl Token for X {}
 
-pub struct Neg<T: Var> {
+pub trait Tern {
+    fn as_var() -> Var;
+}
+impl Tern for T {
+    fn as_var() -> Var {
+        Var::T
+    }
+}
+impl Tern for F {
+    fn as_var() -> Var {
+        Var::F
+    }
+}
+impl Tern for X {
+    fn as_var() -> Var {
+        Var::X
+    }
+}
+
+pub struct Neg<T: Tern> {
     phantom: PhantomData<T>,
 }
-impl<T: Var> Token for Neg<T> {}
+unsafe impl<T: Tern> Token for Neg<T> {}
 
 pub trait Nand {}
 impl Nand for F {}
@@ -99,18 +114,13 @@ impl<A: Nand> Nand for (Neg<X>, A) {}
 // both sides are NAND
 impl<A: Nand, B: Nand> Nand for (A, B) {}
 
-pub trait Var {}
-impl Var for T {}
-impl Var for F {}
-impl Var for X {}
-
 pub trait Transition<P: Proto>: Sized {
     fn from_rule_id(proto_rule_id: RuleId) -> Self;
 }
 
 pub trait Advance<P: Proto>: Sized {
     type Opts: Transition<P>;
-    fn advance<F, R>(self, port_group: PortGroup<P>, handler: F) -> R
+    fn advance<F, R>(self, port_group: &PortGroup<P>, handler: F) -> R
     where
         F: FnOnce(Self::Opts) -> R,
     {
