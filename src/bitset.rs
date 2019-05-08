@@ -1,5 +1,5 @@
-use std::fmt;
 use itertools::izip;
+use std::fmt;
 
 #[derive(Default)]
 pub struct BitSet {
@@ -20,7 +20,7 @@ impl BitSet {
     pub fn get_chunk(&self, vec_idx: usize) -> usize {
         self.data.get(vec_idx).cloned().unwrap_or(0)
     }
-    pub fn iter_chunks(&self) -> impl Iterator<Item=usize> + '_ {
+    pub fn iter_chunks(&self) -> impl Iterator<Item = usize> + '_ {
         self.data.iter().cloned()
     }
     pub fn from_usize(chunk: usize) -> Self {

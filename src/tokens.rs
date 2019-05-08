@@ -1,4 +1,4 @@
-use crate::proto::{Getter, PortId, GroupCommunicator, Proto, Putter, RuleId, TryClone};
+use crate::proto::{Getter, PortGroup, PortId, Proto, Putter, RuleId, TryClone};
 use std::marker::PhantomData;
 use std::mem;
 use std::sync::Arc;
@@ -56,7 +56,6 @@ impl<D: Decimal, T> Safe<D, T> {
         }
     }
 }
-
 
 impl<D: Decimal, T: TryClone, P: Proto> Safe<D, Getter<T, P>> {
     pub fn get<R: Token>(&self, coupon: Coupon<D, R>) -> (T, R) {
@@ -124,13 +123,13 @@ pub trait Transition<P: Proto>: Sized {
 
 pub trait Advance<P: Proto>: Sized {
     type Opts: Transition<P>;
-    fn advance<F, R>(self, p_handle: GroupCommunicator<P>, handler: F) -> R
+    fn advance<F, R>(self, port_group: PortGroup<P>, handler: F) -> R
     where
         F: FnOnce(Self::Opts) -> R,
     {
         let choice: Self::Opts = match mem::size_of::<Self::Opts>() {
             0 => unsafe { mem::uninitialized() },
-            _ => p_handle.ready_wait_determine(),
+            _ => port_group.ready_wait_determine(),
         };
         handler(choice)
     }
