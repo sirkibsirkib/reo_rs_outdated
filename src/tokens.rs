@@ -64,7 +64,7 @@ impl<D: Decimal, T: TryClone, P: Proto> Safe<D, Putter<T, P>> {
 pub struct Coupon<D: Decimal, R: Token> {
     phantom: PhantomData<(D, R)>,
 }
-unsafe impl<D: Decimal, R: Token> Token for Coupon<D,R> {}
+unsafe impl<D: Decimal, R: Token> Token for Coupon<D, R> {}
 
 pub struct T;
 pub struct F;

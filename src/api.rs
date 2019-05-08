@@ -23,7 +23,7 @@ pub trait SomeState {
 pub enum Rules1 {
     R1(Coupon<E0, State>),
 }
-impl<T: 'static +  TryClone> Transition<SyncProto<T>> for Rules1 {
+impl<T: 'static + TryClone> Transition<SyncProto<T>> for Rules1 {
     fn from_rule_id(rule_id: RuleId) -> Self {
         match rule_id {
             0 => Rules1::R1(unsafe { Coupon::fresh() }),
@@ -31,7 +31,7 @@ impl<T: 'static +  TryClone> Transition<SyncProto<T>> for Rules1 {
         }
     }
 }
-impl<T: 'static +  TryClone> Advance<SyncProto<T>> for State {
+impl<T: 'static + TryClone> Advance<SyncProto<T>> for State {
     type Opts = Rules1;
 }
 
@@ -49,7 +49,7 @@ where
     F: FnOnce(PortGroup<P<T>>, S, SafeInterface<T>),
 {
     let i = interface;
-    let port_slice: &[&Port<P<T>>] = &[&i.0,];
+    let port_slice: &[&Port<P<T>>] = &[&i.0];
     let state_predicate = S::new_predicate();
     let port_group = PortGroup::new(state_predicate, port_slice)?;
     let safe_interface = (Safe::new(i.0),);
@@ -61,14 +61,12 @@ where
     Ok(f(port_group, start_token, safe_interface))
 }
 
-
 // what the user would implement
 type Pr = SyncProto<u32>;
 fn atomic_fn(g: PortGroup<Pr>, mut start: State, (p0,): SafeInterface<u32>) {
     let g = &g;
     loop {
-        start = start
-        .advance(g, |o| match o {
+        start = start.advance(g, |o| match o {
             Rules1::R1(c) => p0.put(c, 32),
         });
     }
@@ -90,10 +88,7 @@ pub fn api_test() {
     .expect("Fail");
 }
 
-
-
-//////////////////// example 2 ///////////////// 
-
+//////////////////// example 2 /////////////////
 
 // // concrete proto. implements Proto trait
 // pub(crate) struct AltProto<T> {

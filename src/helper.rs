@@ -85,10 +85,12 @@ macro_rules! map {
     };
 }
 
-
 pub trait WithFirstTrait: Iterator + Sized {
     fn with_first(self) -> WithFirst<Self> {
-        WithFirst { first: true, it: self }
+        WithFirst {
+            first: true,
+            it: self,
+        }
     }
 }
 impl<I: Iterator> WithFirstTrait for I {}
@@ -104,7 +106,7 @@ impl<I: Iterator> Iterator for WithFirst<I> {
             (true, Some(x)) => {
                 self.first = false;
                 Some((true, x))
-            },
+            }
             (false, Some(x)) => Some((false, x)),
         }
     }

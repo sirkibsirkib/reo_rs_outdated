@@ -20,7 +20,7 @@ impl<'a> Iterator for SparseIter<'a> {
                 self.min = 0;
                 self.maj += 1;
                 self.n = self.a.data.get(self.maj).cloned();
-            } 
+            }
             match self.n {
                 Some(x) => {
                     let val = (1 << self.min) & x;
@@ -28,27 +28,26 @@ impl<'a> Iterator for SparseIter<'a> {
                     if val != 0 {
                         return Some(self.maj * BitSet::BITS_PER_CHUNK + self.min);
                     }
-                },
+                }
                 None => return None,
             }
         }
     }
 }
 
-
-pub struct AndIter<'a,'b> {
+pub struct AndIter<'a, 'b> {
     a: &'a BitSet,
     b: &'b BitSet,
     n: Option<usize>,
     maj: usize,
     min: usize,
 }
-impl<'a, 'b> AndIter<'a,'b> {
+impl<'a, 'b> AndIter<'a, 'b> {
     fn fetch_chunk(a: &BitSet, b: &BitSet, chunk_idx: usize) -> Option<usize> {
-        a.data.get(0).and_then(|x| b.data.get(0).map(|y| x&y))
+        a.data.get(0).and_then(|x| b.data.get(0).map(|y| x & y))
     }
 }
-impl<'a, 'b> Iterator for AndIter<'a,'b> {
+impl<'a, 'b> Iterator for AndIter<'a, 'b> {
     type Item = usize;
     fn next(&mut self) -> Option<usize> {
         loop {
@@ -56,7 +55,7 @@ impl<'a, 'b> Iterator for AndIter<'a,'b> {
                 self.min = 0;
                 self.maj += 1;
                 self.n = Self::fetch_chunk(self.a, self.b, self.maj);
-            } 
+            }
             match self.n {
                 Some(x) => {
                     let val = (1 << self.min) & x;
@@ -64,7 +63,7 @@ impl<'a, 'b> Iterator for AndIter<'a,'b> {
                     if val != 0 {
                         return Some(self.maj * BitSet::BITS_PER_CHUNK + self.min);
                     }
-                },
+                }
                 None => return None,
             }
         }
@@ -104,7 +103,7 @@ impl BitSet {
         }
         true
     }
-    pub fn iter_and<'a,'b: 'a>(&'a self, other: &'b Self) -> AndIter {
+    pub fn iter_and<'a, 'b: 'a>(&'a self, other: &'b Self) -> AndIter {
         AndIter {
             a: self,
             b: other,

@@ -4,9 +4,9 @@ use crate::tokens::Transition;
 use crossbeam::{Receiver, Sender};
 use hashbrown::HashMap;
 
-use parking_lot::Mutex;
-use std::{marker::PhantomData, mem, sync::Arc, fmt};
 use crate::helper::WithFirstTrait;
+use parking_lot::Mutex;
+use std::{fmt, marker::PhantomData, mem, sync::Arc};
 
 // associated with putter OR getter OR mem-in OR mem-out
 pub type PortId = usize;
@@ -104,16 +104,13 @@ pub trait Proto: Sized + 'static {
         let (proto_common, mut r_out) = ProtoCommon::new(state);
         let proto_common = Arc::new(proto_common);
         <Self as Proto>::interface_ids()
-        .iter()
-        .cloned()
-        .map(|id| {
-            let common = PortCommon::new(
-                id,
-                r_out.remove(&id).unwrap(),
-                proto_common.clone(),
-            );
-            (id, common)
-        }).collect()
+            .iter()
+            .cloned()
+            .map(|id| {
+                let common = PortCommon::new(id, r_out.remove(&id).unwrap(), proto_common.clone());
+                (id, common)
+            })
+            .collect()
     }
 }
 
@@ -177,7 +174,12 @@ impl<P: Proto> ProtoCrAll<P> {
     fn advance_state(&mut self, readable: &ProtoReadable) {
         'outer: loop {
             if let Some(rule_id) = self.committed {
-                if self.ready.iter_and(&self.tentatively_ready).next().is_none() {
+                if self
+                    .ready
+                    .iter_and(&self.tentatively_ready)
+                    .next()
+                    .is_none()
+                {
                     self.committed = None;
                     let r = &self.guards[rule_id as usize];
                     if (r.constraint)(&self.inner) {
@@ -199,11 +201,11 @@ impl<P: Proto> ProtoCrAll<P> {
                         };
                         for leader in self.ready.iter_and(&self.tentatively_ready) {
                             readable
-                            .s_out
-                            .get(&leader)
-                            .expect("HUUEEE")
-                            .send(msg.clone())
-                            .expect("LOOOOUUU");
+                                .s_out
+                                .get(&leader)
+                                .expect("HUUEEE")
+                                .send(msg.clone())
+                                .expect("LOOOOUUU");
                         }
                         self.committed = Some(rule_id as u64);
                         continue 'outer;
@@ -227,7 +229,12 @@ impl ProtoReadable {
             .send(msg)
             .expect("DEAD");
     }
-    pub unsafe fn distribute_ptr<I: Iterator<Item=PortId> + Clone>(&self, ptr: Ptr, from: PortId, to: I) {
+    pub unsafe fn distribute_ptr<I: Iterator<Item = PortId> + Clone>(
+        &self,
+        ptr: Ptr,
+        from: PortId,
+        to: I,
+    ) {
         let p_msg = OutMessage::PutAwait {
             count: to.clone().count(),
         };
@@ -327,7 +334,9 @@ impl<P: Proto> PortGroup<P> {
             cra.ready_id_remaps.insert(port, comm.leader);
         }
         for guard in cra.guards.iter_mut() {
-            guard.group_bits(comm.leader, &comm.group_ids).expect("BAD GUARD GROUPING");
+            guard
+                .group_bits(comm.leader, &comm.group_ids)
+                .expect("BAD GUARD GROUPING");
         }
 
         // 3. wait until the state predicate is satisifed
@@ -512,18 +521,14 @@ pub struct PortCommon<P: Proto> {
     proto_common: Arc<ProtoCommon<P>>,
 }
 impl<P: Proto> PortCommon<P> {
-    fn new(
-        id: PortId,
-        r_out: Receiver<OutMessage>,
-        proto_common: Arc<ProtoCommon<P>>
-    ) -> Self {
+    fn new(id: PortId, r_out: Receiver<OutMessage>, proto_common: Arc<ProtoCommon<P>>) -> Self {
         Self {
             id,
             r_out,
             proto_common,
         }
-    }  
-} 
+    }
+}
 unsafe impl<P: Proto> Send for PortCommon<P> {}
 unsafe impl<P: Proto> Sync for PortCommon<P> {}
 
@@ -565,13 +570,22 @@ impl<P: Proto> Guard<P> {
     pub fn new(
         min_ready: BitSet,
         constraint: fn(&ProtoCr<P>) -> bool,
-        action: fn(&mut ProtoCr<P>, &ProtoReadable)
+        action: fn(&mut ProtoCr<P>, &ProtoReadable),
     ) -> Self {
         let original_min_ready = min_ready.clone();
-        Self { min_ready, constraint, action, original_min_ready }
+        Self {
+            min_ready,
+            constraint,
+            action,
+            original_min_ready,
+        }
     }
 
-    pub fn group_bits(&mut self, leader: PortId, group: &BitSet) -> Result<bool,GuardGroupingError> {
+    pub fn group_bits(
+        &mut self,
+        leader: PortId,
+        group: &BitSet,
+    ) -> Result<bool, GuardGroupingError> {
         use GuardGroupingError::*;
         if !group.test(leader) {
             return Err(BadLeader);
@@ -585,19 +599,19 @@ impl<P: Proto> Guard<P> {
             }
         }
         match (overlapping, leader) {
-            (None, _) => Ok(false), 
-            (Some(o), l) if o==l => Ok(false),
+            (None, _) => Ok(false),
+            (Some(o), l) if o == l => Ok(false),
             (Some(o), l) => {
                 self.min_ready.set(l);
                 self.min_ready.set_to(o, false);
                 Ok(true)
-            },
+            }
         }
     }
     pub fn ungroup_bits(&mut self, group: &BitSet) {
         for port_id in group.iter_sparse() {
             let was = self.original_min_ready.test(port_id);
-            self.min_ready.set_to(port_id, was); 
+            self.min_ready.set_to(port_id, was);
         }
     }
 }
@@ -657,7 +671,8 @@ impl<T: 'static + TryClone> Proto for SyncProto<T> {
         finalize_ports!(
             Self::interface_ids().iter(),
             Self::new_in_map(),
-            Putter, Getter
+            Putter,
+            Getter
         )
     }
 }
