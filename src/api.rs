@@ -27,7 +27,7 @@ impl<T: 'static +  TryClone> Transition<SyncProto<T>> for Rules1 {
     fn from_rule_id(rule_id: RuleId) -> Self {
         match rule_id {
             0 => Rules1::R1(unsafe { Coupon::fresh() }),
-            _ => panic!(":("),
+            wrong => panic!("panic in Rules1 with {}", wrong),
         }
     }
 }
@@ -62,7 +62,7 @@ where
 }
 
 
-
+// what the user would implement
 type Pr = SyncProto<u32>;
 fn atomic_fn(g: PortGroup<Pr>, mut start: State, (p0,): SafeInterface<u32>) {
     let g = &g;
