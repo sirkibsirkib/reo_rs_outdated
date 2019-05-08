@@ -218,6 +218,7 @@ impl<P: Proto> ProtoCrAll<P> {
 }
 
 // read-only component: no locking needed
+#[derive(Debug)]
 pub struct ProtoReadable {
     s_out: HashMap<PortId, Sender<OutMessage>>,
 }
@@ -373,6 +374,7 @@ impl<P: Proto> Drop for PortGroup<P> {
 }
 
 // the "shared" concrete protocol object
+#[derive(Debug)]
 pub struct ProtoCommon<P: Proto> {
     readable: ProtoReadable,
     cra: Mutex<ProtoCrAll<P>>,
@@ -515,6 +517,7 @@ impl<P: Proto> ProtoCommon<P> {
     }
 }
 // common to Putter and to Getter to minimize boilerplate
+#[derive(Debug)]
 pub struct PortCommon<P: Proto> {
     id: PortId,
     r_out: Receiver<OutMessage>,
@@ -522,6 +525,7 @@ pub struct PortCommon<P: Proto> {
 }
 impl<P: Proto> PortCommon<P> {
     fn new(id: PortId, r_out: Receiver<OutMessage>, proto_common: Arc<ProtoCommon<P>>) -> Self {
+        println!("new with port_id {}", id);
         Self {
             id,
             r_out,
@@ -678,7 +682,7 @@ impl<T: 'static + TryClone> Proto for SyncProto<T> {
 }
 
 #[test]
-pub fn prod_cons() {
+pub fn prod_cons_whee() {
     let (p, g) = SyncProto::<String>::new();
     println!("INITIALIZED");
     crossbeam::scope(|s| {

@@ -7,13 +7,15 @@ macro_rules! id_iter {
 
 #[macro_export]
 macro_rules! finalize_ports {
-    ($ids:expr, $commons:expr, $($struct:tt),*) => {
+    ($ids:expr, $commons:expr, $($struct:tt),*) => {{
+        let mut _ids = $ids;
+        let mut _commons = $commons;
         (
             $(
-                unsafe { $struct ::new($commons.remove($ids.next().unwrap()).unwrap()) },
+                unsafe { $struct ::new(_commons.remove(_ids.next().unwrap()).unwrap()) },
             )*
         )
-    }
+    }}
 }
 
 #[macro_export]
