@@ -1,12 +1,13 @@
 
 
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicBool, Ordering};
-use crossbeam::{Sender, Receiver};
-use hashbrown::HashSet;
+
+
 use hashbrown::HashMap;
 use std_semaphore::Semaphore;
 // use parking_lot::Mutex;
-use std::{mem, fmt};
+use std::{fmt};
 use std::cell::UnsafeCell;
 use itertools::izip;
 
@@ -158,9 +159,8 @@ struct ByteSet {
 	data: Vec<u64>,
 }
 impl ByteSet {
-	pub const READY: u8 = 0b00000001;
-	pub const UNBLOCKED: u8 = 0b00000010;
-	pub const MOVED: u8 = 0b00000100;
+	pub const READY: u8 = 0b00001111;
+	// pub const CERTAIN: u8 = 0b11110000;
 
 	pub fn minimize(mut self) -> Self {
 		while self.data.last() == Some(&0) {
@@ -204,6 +204,14 @@ impl ByteSet {
 			}
 		}
 		true
+	}
+	pub fn atomic_drain_byte(&self, byte_id: usize) -> u8 {
+		let slice_u64 = &self.data[..];
+		let slice_u8: &[AtomicU8] = unsafe {
+			slice_u64.align_to::<AtomicU8>().1
+		};
+		let cell = slice_u8.get(byte_id).expect("OUT OF BOUNDS");
+		cell.swap(0x00, Ordering::Relaxed)
 	}
 	pub fn get_byte(&self, byte_id: usize) -> u8 {
 		let slice_u64 = &self.data[..];
@@ -256,40 +264,88 @@ impl fmt::Debug for PutterSpace {
 		Ok(())
 	}
 }
+
+unsafe impl Send for MsgDropbox {}
+unsafe impl Sync for MsgDropbox {}
+struct MsgDropbox {
+	sema: Semaphore,
+	msg: UnsafeCell<usize>,
+}
+impl Default for MsgDropbox {
+	fn default() -> Self {
+		Self {
+			sema: Semaphore::new(0),
+			msg: 0.into(),
+		}
+	}
+}
+impl MsgDropbox {
+	fn send(&self, msg: usize) {
+		unsafe { *self.msg.get() = msg }
+		self.sema.release(); // += 1
+	}
+	fn recv(&self) -> usize {
+		self.sema.acquire(); // -= 1
+		unsafe { *self.msg.get() }
+	}
+}
+
+unsafe impl Send for Ptr {}
+unsafe impl Sync for Ptr {}
+struct Ptr(UnsafeCell<*const ()>);
+impl Default for Ptr {
+	fn default() -> Self {
+		Self(UnsafeCell::new(std::ptr::null()))
+	}
+}
+impl Ptr {
+	fn write<T: Sized>(&self, datum: &T) {
+		unsafe {
+			*self.0.get() = std::mem::transmute(datum)
+		};
+	}
+	fn read_moving<T: Sized>(&self) -> T {
+		unsafe {
+			let x: *const T = std::mem::transmute(*self.0.get());
+			x.read()
+		}
+	} 
+	fn read_cloning<T: Sized + Clone>(&self) -> T {
+		unsafe {
+			let x: &T = std::mem::transmute(*self.0.get());
+			x.clone()
+		}
+	} 
+}
+
 struct PutterSpace {
 	sema: Semaphore,
 	not_yet_moved: AtomicBool,
-	ptr: *const (),
+	ptr: Ptr,
 }
 
 struct Prot {
 	rules: Vec<Rule>,
 	ready: ByteSet,
 	putter_spaces: HashMap<usize, PutterSpace>,
-	msgs: HashMap<usize, (Semaphore, UnsafeCell<usize>)>,
+	msg_dropboxes: HashMap<usize, MsgDropbox>,
 }
+
 impl Prot {
-	fn send_msg(&self, id: usize, msg: usize) {
-		let v = self.msgs.get(&id).expect("EE");
-		let v1 = v.1.get();
-		unsafe { *v1 = msg };
-		v.0.release() // += 1
-	}
-	fn get_msg(&self, id: usize) -> usize {
-		let v = self.msgs.get(&id).expect("QQ");
-		v.0.acquire(); // -= 1
-		let v1 = v.1.get();
-		unsafe { *v1 }
-	}
+	const MAX_RULE_LOOPS: usize = 10;
 	pub fn put(&self, id: usize, datum: u32) -> Option<u32> {
-		self.ready.set_byte(id, ByteSet::READY);
+
 
 		let space = self.putter_spaces.get(&id).expect("NOT A PUTTER?");
+		space.ptr.write(&datum);
 		space.not_yet_moved.store(true, Ordering::Relaxed);
+		self.ready.set_byte(id, ByteSet::READY);
 
+		println!("{:?} entering", id);
 		self.enter();
+		println!("{:?} back", id);
 
-		let awaiting_number = self.get_msg(id);
+		let awaiting_number = self.msg_dropboxes.get(&id).expect("WAH").recv();
 		for _ in 0..awaiting_number {
 			space.sema.acquire(); // -= 1
 		}
@@ -302,43 +358,62 @@ impl Prot {
 		}
 	}
 
-	pub fn get_signal(&self, id: usize) {
-		self.ready.set_byte(id, ByteSet::READY);
-		self.enter();
-		let putter = self.get_msg(id);
-		let space = self.putter_spaces.get(&putter).expect("NOT A PUTTER?");
-		space.sema.release(); // += 1
-	}
+	// pub fn get_signal(&self, id: usize) {
+	// 	self.ready.set_byte(id, ByteSet::READY);
+	// 	self.enter();
+	// 	let putter = self.msg_dropboxes.get(&id).expect("WAH").recv();
+	// 	let space = self.putter_spaces.get(&putter).expect("NOT A PUTTER?");
+	// 	space.sema.release(); // += 1
+	// }
 
 	pub fn get(&self, id: usize) -> u32 {
 		self.ready.set_byte(id, ByteSet::READY);
 
+		println!("{:?} entering", id);
 		self.enter();
-		let putter = self.get_msg(id);
+		println!("{:?} back", id);
+		let putter = self.msg_dropboxes.get(&id).expect("WAH").recv();
 		let space = self.putter_spaces.get(&putter).expect("NOT A PUTTER?");
 		let do_move = space.not_yet_moved.swap(false, Ordering::Relaxed);
 
 		let value = if do_move {
-			5
+			space.ptr.read_moving()
 		} else {
-			5.clone()
+			space.ptr.read_cloning()
 		};
 		space.sema.release(); // += 1
 		value
 	}
 	fn enter(&self) {
-		loop {
-			for (i, r) in self.rules.iter().enumerate() {
+		'reps: for _ in 0..Self::MAX_RULE_LOOPS {
+			'rules: for (i, r) in self.rules.iter().enumerate() {
 				if self.ready.is_superset(&r.guard) {
-					println!("RULE {} SAT!", i);
-					for &getter in r.getters.iter() {
-						self.send_msg(getter, r.putter);
+					println!("RULE {} LOOKS SAT!", i);
+					let got = self.ready.atomic_drain_byte(r.putter);
+					//putter reset
+					if got != ByteSet::READY {
+						println!("nvm. RULE {} NOT locked :(", i);
+						continue 'rules;
 					}
-					self.send_msg(r.putter, r.getter_count);
+					println!("RULE {} LOCKED!", i);
+					for &getter in r.getters.iter() {
+						self.ready.set_byte(getter, 0x00);
+						//getter reset
+						self.msg_dropboxes.get(&getter).expect("WAH").send(r.putter);
+					}
+					self.msg_dropboxes.get(&r.putter).expect("WAH").send(r.getter_count);
+					continue 'reps;
 				}
 			}
+			break 'reps;
 		}
 	}
+}
+enum IdType {
+	Pu,
+	Ge,
+	MemPu,
+	MemGe,
 }
 struct ProtBuilder {
 	max_id_promised: usize,
@@ -368,7 +443,7 @@ impl ProtBuilder {
 				panic!("WAS PUTTER BEFORE");
 			}
 			self.max_id_encountered = self.max_id_encountered.max(getter);
-			guard.set_byte(getter, ByteSet::READY | ByteSet::UNBLOCKED);
+			guard.set_byte(getter, ByteSet::READY);
 		}
 		let getter_count = getters_vec.len();
 
@@ -377,7 +452,7 @@ impl ProtBuilder {
 			panic!("WAS GETTER BEFORE");
 		}
 		self.max_id_encountered = self.max_id_encountered.max(putter);
-		guard.set_byte(putter, ByteSet::READY | ByteSet::UNBLOCKED);
+		guard.set_byte(putter, ByteSet::READY);
 
 		guard = guard.minimize();
 		let r = Rule {
@@ -394,12 +469,12 @@ impl ProtBuilder {
 				let space = PutterSpace {
 					sema: Semaphore::new(0),
 					not_yet_moved: false.into(),
-					ptr: std::ptr::null(),
+					ptr: Default::default(),
 				};
 				(id, space)
 			}).collect(),
-			msgs: self.is_putter.into_iter().map(|(id,_)|
-				(id, (Semaphore::new(0), 0.into()))
+			msg_dropboxes: self.is_putter.into_iter().map(|(id,_)|
+				(id, MsgDropbox::default())
 			).collect(),
 			rules: self.rules,
 			ready: ByteSet::with_len(self.max_id_encountered),
@@ -415,20 +490,18 @@ pub fn prot_test() {
 	.add_rule(0, [2].iter().cloned())
 	.build();
 
-  //   crossbeam::scope(|s| {
-  //   	s.spawn(|_| {
-		// 	for i in 0..20 {
-		// 		unsafe {
-		// 			x.get().write(i);
-		// 		}
-		// 		milli_sleep![330];
-		// 	}
-		// });
-  //   	s.spawn(|_| {
-		// 	for _ in 0..20 {
-		// 		println!("{:?}", unsafe { x.get().read() });
-		// 		milli_sleep![330];
-		// 	}
-		// });
-  //   }).expect("EY");
+    crossbeam::scope(|s| {
+    	s.spawn(|_| {
+    		for i in 0..10 {
+    			prot.put(0, i);
+    			milli_sleep![1000];
+    		}
+		});
+    	s.spawn(|_| {
+    		for _ in 0..10 {
+    			println!("got {}", prot.get(1));
+    			milli_sleep![1000];
+    		}
+		});
+    }).expect("EY");
 }
