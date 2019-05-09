@@ -141,7 +141,7 @@ pub struct StateWaiter {
 // writable component: locking needed
 #[derive(Debug)]
 pub struct ProtoCrAll<P: Proto> {
-    ready_id_remaps: HashMap<PortId, PortId>,
+    leader_of: HashMap<PortId, PortId>,
     guards: Vec<Guard<P>>,
     committed: Option<RuleId>,
     ready: BitSet,
@@ -150,6 +150,17 @@ pub struct ProtoCrAll<P: Proto> {
     inner: ProtoCr<P>,
 }
 impl<P: Proto> ProtoCrAll<P> {
+
+    fn become_ready(&mut self, id: PortId) {
+        if let Some(&l) = self.leader_of.get(&id) {
+            // am grouped
+            self.ready.set(l); // covers the short-circuit case
+            self.tentatively_ready.set_to(l, false);
+        } else {
+            // not grouped
+            self.ready.set(id);
+        }
+    }
     fn notify_waiters(&mut self, readable: &ProtoReadable) {
         let Self {
             state_waiters,
@@ -317,7 +328,7 @@ impl<P: Proto> PortGroup<P> {
             });
             if !comm
                 .proto_common
-                .share_instance(&port.get_common().proto_common)
+                .is_same_instance_as(&port.get_common().proto_common)
             {
                 return Err(DifferentProtoInstances);
             }
@@ -332,7 +343,7 @@ impl<P: Proto> PortGroup<P> {
         // 2. try register the group
         let mut cra = comm.proto_common.cra.lock();
         for port in comm.group_ids.iter_sparse() {
-            cra.ready_id_remaps.insert(port, comm.leader);
+            cra.leader_of.insert(port, comm.leader);
         }
         for guard in cra.guards.iter_mut() {
             guard
@@ -364,7 +375,7 @@ impl<P: Proto> Drop for PortGroup<P> {
     fn drop(&mut self) {
         let mut cra = self.proto_common.cra.lock();
         for port in self.group_ids.iter_sparse() {
-            debug_assert!(cra.ready_id_remaps.remove(&port).is_some());
+            debug_assert!(cra.leader_of.remove(&port).is_some());
         }
         for guard in cra.guards.iter_mut() {
             guard.ungroup_bits(&self.group_ids);
@@ -380,7 +391,7 @@ pub struct ProtoCommon<P: Proto> {
     cra: Mutex<ProtoCrAll<P>>,
 }
 impl<P: Proto> ProtoCommon<P> {
-    fn share_instance(&self, other: &Self) -> bool {
+    fn is_same_instance_as(&self, other: &Self) -> bool {
         let left: *const ProtoCommon<P> = self;
         let right: *const ProtoCommon<P> = other;
         left == right
@@ -401,7 +412,7 @@ impl<P: Proto> ProtoCommon<P> {
         };
         let guards = <P as Proto>::build_guards();
         let cra = ProtoCrAll {
-            ready_id_remaps: Default::default(),
+            leader_of: Default::default(),
             inner,
             committed: None,
             state_waiters: vec![],
@@ -421,8 +432,7 @@ impl<P: Proto> ProtoCommon<P> {
         {
             let mut cra = self.cra.lock();
             // println!("{:?} got lock", pc.id);
-            let readiness_id = cra.ready_id_remaps.get(&pc.id).cloned().unwrap_or(pc.id);
-            cra.ready.set(readiness_id);
+            cra.become_ready(pc.id);
             cra.advance_state(&self.readable);
             // println!("{:?} dropping lock", pc.id);
         }
@@ -452,8 +462,7 @@ impl<P: Proto> ProtoCommon<P> {
         {
             let mut cra = self.cra.lock();
             // println!("{:?} got lock", pc.id);
-            let readiness_id = cra.ready_id_remaps.get(&pc.id).cloned().unwrap_or(pc.id);
-            cra.ready.set(readiness_id);
+            cra.become_ready(pc.id);
             cra.advance_state(&self.readable);
             // println!("{:?} dropping lock", pc.id);
         }
@@ -482,9 +491,8 @@ impl<P: Proto> ProtoCommon<P> {
             let mut cra = self.cra.lock();
             // println!("{:?} got lock", pc.id);
 
-            let readiness_id = cra.ready_id_remaps.get(&pc.id).cloned().unwrap_or(pc.id);
-            cra.ready.set(readiness_id);
             cra.inner.generic.put.insert(pc.id, ptr);
+            cra.become_ready(pc.id);
             cra.advance_state(&self.readable);
             // println!("{:?} dropping lock", pc.id);
         }
