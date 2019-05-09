@@ -653,6 +653,7 @@ pub trait AtomicComponent {
         F: FnOnce(S, PortGroup<Self::P>, Self::Interface);
 }
 
+
 ////////////// EXAMPLE concrete ///////////////
 
 // concrete proto. implements Proto trait

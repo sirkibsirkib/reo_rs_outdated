@@ -31,4 +31,9 @@
 -- a group becoming ready sets N bits. checking readiness involves ONE ready set
 -- a group becoming ready sets 1 leader-bit. checking readiness involves N ready sets
 -- a group becoming ready sets 1 leader-bit. checking readiness involved ONE ready set BUT guards get changed
-1. changing guard ready bits. using a hashmap to remap Ready_bits {g in group} => leader
+31. changing guard ready bits. using a hashmap to remap Ready_bits {g in group} => leader
+32. who gets permission to MOVE? at most 1, but which getters are able isnt known
+33. byte-vector for ready sets. can set byte to 0xff in parallel. readying gets 8x slower.
+34. using channels for communication. can do both directions. eg: getters READ from rcvrs[putter_id]
+35. 
+

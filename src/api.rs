@@ -90,38 +90,45 @@ pub fn api_test() {
 
 //////////////////// example 2 /////////////////
 
-// // concrete proto. implements Proto trait
-// pub(crate) struct AltProto<T> {
-//     data_type: PhantomData<(T,)>,
+// concrete proto. implements Proto trait
+// pub(crate) struct XorRouter<T> {
+//     data_types: PhantomData<(T,)>,
+//     m0: Option<T>,
 // }
-// impl<T: 'static + TryClone> Proto for AltProto<T> {
-//     fn state_predicate(&self, _predicate: &StatePred) -> bool {
+// impl<T: 'static + TryClone> Proto for XorRouter<T> {
+//     fn test_state(&self, _predicate: &StatePred) -> bool {
 //         true
 //     }
 //     type Interface = (Putter<T, Self>, Getter<T, Self>);
 //     fn interface_ids() -> &'static [PortId] {
-//         &[0, 1]
+//         &[0, 1, 2]
 //     }
 //     fn build_guards() -> Vec<Guard<Self>> {
-//         vec![Guard {
-//             min_ready: bitset! {0,1},
-//             constraint: |_cr| true,
-//             action: data_move_action![1 => 0],
-//         }]
+//         vec![
+//             Guard::new(
+//                 bitset! {0,1},
+//                 |cr| cr.specific.m0,
+//                 data_move_action![0 => 1],
+//             ),
+//             Guard::new(
+//                 bitset! {0,2},
+//                 |cr| !cr.specific.m0,
+//                 data_move_action![0 => 2],
+//             ),
+//         ]
+//     }
+//     fn new_state() -> Self {
+//         Self {
+//             m0: None,
+//             data_types: Default::default(),
+//         }
 //     }
 //     fn new() -> <Self as Proto>::Interface {
-//         let proto = Self {
-//             data_type: Default::default(),
-//         };
-//         let (proto_common, mut r_out) = ProtoCommon::new(proto);
-//         let proto_common = Arc::new(proto_common);
-//         let mut commons = <Self as Proto>::interface_ids()
-//             .iter()
-//             .map(|id| PortCommon {
-//                 id: *id,
-//                 r_out: r_out.remove(id).unwrap(),
-//                 proto_common: proto_common.clone(),
-//             });
-//         finalize_ports!(commons, Putter, Getter)
+//         finalize_ports!(
+//             Self::interface_ids().iter(),
+//             Self::new_in_map(),
+//             Putter,
+//             Getter
+//         )
 //     }
 // }

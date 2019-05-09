@@ -5,3 +5,4 @@ pub mod bitset;
 pub mod proto;
 pub mod rbpa;
 pub mod tokens;
+pub mod primitives;
