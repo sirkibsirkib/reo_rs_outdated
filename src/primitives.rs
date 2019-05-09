@@ -399,38 +399,43 @@ impl Prot {
 	}
 
 	fn fire(&self, rule: &Rule) {
-		let space = self.putter_spaces.get(&rule.putter).expect("WAH");
-		if !rule.rule_type.move_possible() {
-			space.not_yet_moved.swap(false, Ordering::Relaxed);
-		}
-
-		for &mem_getter in rule.mem_getters.iter() {
-			if mem_getter != rule.putter {
-				self.ready.set_byte(mem_getter, ByteSet::PUTTY);
-			}
-		}
 		for &getter in rule.getters.iter() {
 			self.ready.set_byte(getter, 0x00);
-			//getter reset
 			self.msg_dropboxes.get(&getter).expect("WAH").send(rule.putter);
 		}
-		if rule.rule_type.drains_putter() {
-			self.ready.set_byte(mem_getter, ByteSet::GETTY);
-		}
-		if rule.rule_type == RuleType::MoveFromMem {
-			// act as mem putter
-			let awaiting_number = rule.getter_count;
-			for _ in 0..awaiting_number {
-				space.sema.acquire(); // -= 1
-			}
-			let unmoved = space.not_yet_moved.load(Ordering::Relaxed);
-			if unmoved {
-				Some(datum)s
-			} else {
-				std::mem::forget(datum);
-				None
-			}
-		}		
+		self.msg_dropboxes.get(&rule.putter).expect("WAH").send(rule.getter_count);
+		// let space = self.putter_spaces.get(&rule.putter).expect("WAH");
+		// if !rule.rule_type.move_possible() {
+		// 	space.not_yet_moved.swap(false, Ordering::Relaxed);
+		// }
+
+		// for &mem_getter in rule.mem_getters.iter() {
+		// 	if mem_getter != rule.putter {
+		// 		self.ready.set_byte(mem_getter, ByteSet::PUTTY);
+		// 	}
+		// }
+		// for &getter in rule.getters.iter() {
+		// 	self.ready.set_byte(getter, 0x00);
+		// 	//getter reset
+		// 	self.msg_dropboxes.get(&getter).expect("WAH").send(rule.putter);
+		// }
+		// if rule.rule_type.drains_putter() {
+		// 	self.ready.set_byte(mem_getter, ByteSet::GETTY);
+		// }
+		// if rule.rule_type == RuleType::MoveFromMem {
+		// 	// act as mem putter
+		// 	let awaiting_number = rule.getter_count;
+		// 	for _ in 0..awaiting_number {
+		// 		space.sema.acquire(); // -= 1
+		// 	}
+		// 	let unmoved = space.not_yet_moved.load(Ordering::Relaxed);
+		// 	if unmoved {
+		// 		Some(datum)s
+		// 	} else {
+		// 		std::mem::forget(datum);
+		// 		None
+		// 	}
+		// }		
 	}
 }
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
@@ -601,3 +606,17 @@ pub fn prot_test() {
 		});
     }).expect("EY");
 }
+
+/*
+PutterSpace has a PTR
+if this space belongs to a PORTPUTTER, the ptr is to the putter's stack
+if the space belongs to a MEMPUTTER, the ptr is to a Box<T>
+
+M1 => {M2, M3}
+
+after a transfer, getters have a Ptr to the real datum, not the datum itself*
+
+
+
+
+*/
