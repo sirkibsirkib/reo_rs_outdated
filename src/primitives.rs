@@ -159,8 +159,8 @@ struct ByteSet {
 	data: Vec<u64>,
 }
 impl ByteSet {
-	pub const READY: u8 = 0b00001111;
-	// pub const CERTAIN: u8 = 0b11110000;
+	pub const PUTTY: u8 = 0b00000001;
+	pub const GETTY: u8 = 0b00000010;
 
 	pub fn minimize(mut self) -> Self {
 		while self.data.last() == Some(&0) {
@@ -173,21 +173,14 @@ impl ByteSet {
 		self.data.len() * 8
 	}
 	pub fn with_len(len: usize) -> Self {
-		Self::from(len, std::iter::empty())
-	}
-	pub fn from<I>(len: usize, it: I) -> Self where I: IntoIterator<Item=usize> {
 		let len = if len % 8 == 0 {
 			len / 8
 		} else {
 			(len / 8) + 1
 		};
-		let me = Self {
+		Self {
 			data: std::iter::repeat(0).take(len).collect(),
-		};
-		for i in it {
-			me.set_byte(i, Self::READY);
 		}
-		me
 	}
 	pub fn is_superset(&self, other: &Self) -> bool {
 		// 1. overlapping bits
@@ -205,13 +198,13 @@ impl ByteSet {
 		}
 		true
 	}
-	pub fn atomic_drain_byte(&self, byte_id: usize) -> u8 {
+	pub fn atomic_drain_byte(&self, byte_id: usize, extract: u8) -> u8 {
 		let slice_u64 = &self.data[..];
 		let slice_u8: &[AtomicU8] = unsafe {
 			slice_u64.align_to::<AtomicU8>().1
 		};
 		let cell = slice_u8.get(byte_id).expect("OUT OF BOUNDS");
-		cell.swap(0x00, Ordering::Relaxed)
+		cell.fetch_and(!extract, Ordering::Relaxed)
 	}
 	pub fn get_byte(&self, byte_id: usize) -> u8 {
 		let slice_u64 = &self.data[..];
@@ -256,7 +249,9 @@ struct Rule {
 	guard: ByteSet,
 	putter: usize,
 	getters: Vec<usize>, // sorted, deduplicated
+	mem_getters: Vec<usize>, // sorted, deduplicated
 	getter_count: usize,
+	rule_type: RuleType,
 }
 
 impl fmt::Debug for PutterSpace {
@@ -339,7 +334,7 @@ impl Prot {
 		let space = self.putter_spaces.get(&id).expect("NOT A PUTTER?");
 		space.ptr.write(&datum);
 		space.not_yet_moved.store(true, Ordering::Relaxed);
-		self.ready.set_byte(id, ByteSet::READY);
+		self.ready.set_byte(id, ByteSet::PUTTY);
 
 		println!("{:?} entering", id);
 		self.enter();
@@ -359,7 +354,7 @@ impl Prot {
 	}
 
 	// pub fn get_signal(&self, id: usize) {
-	// 	self.ready.set_byte(id, ByteSet::READY);
+	// 	self.ready.set_byte(id, ByteSet::FULLY);
 	// 	self.enter();
 	// 	let putter = self.msg_dropboxes.get(&id).expect("WAH").recv();
 	// 	let space = self.putter_spaces.get(&putter).expect("NOT A PUTTER?");
@@ -367,7 +362,7 @@ impl Prot {
 	// }
 
 	pub fn get(&self, id: usize) -> u32 {
-		self.ready.set_byte(id, ByteSet::READY);
+		self.ready.set_byte(id, ByteSet::GETTY);
 
 		println!("{:?} entering", id);
 		self.enter();
@@ -385,40 +380,76 @@ impl Prot {
 		value
 	}
 	fn enter(&self) {
-		'reps: for _ in 0..Self::MAX_RULE_LOOPS {
-			'rules: for (i, r) in self.rules.iter().enumerate() {
-				if self.ready.is_superset(&r.guard) {
+		'reps: loop {
+			'rules: for (i, rule) in self.rules.iter().enumerate() {
+				if self.ready.is_superset(&rule.guard) {
 					println!("RULE {} LOOKS SAT!", i);
-					let got = self.ready.atomic_drain_byte(r.putter);
+					let got = self.ready.atomic_drain_byte(rule.putter, ByteSet::PUTTY);
 					//putter reset
-					if got != ByteSet::READY {
+					if got & ByteSet::PUTTY != ByteSet::PUTTY {
 						println!("nvm. RULE {} NOT locked :(", i);
 						continue 'rules;
 					}
-					println!("RULE {} LOCKED!", i);
-					for &getter in r.getters.iter() {
-						self.ready.set_byte(getter, 0x00);
-						//getter reset
-						self.msg_dropboxes.get(&getter).expect("WAH").send(r.putter);
-					}
-					self.msg_dropboxes.get(&r.putter).expect("WAH").send(r.getter_count);
+					self.fire(rule);
 					continue 'reps;
 				}
 			}
 			break 'reps;
 		}
 	}
+
+	fn fire(&self, rule: &Rule) {
+		let space = self.putter_spaces.get(&rule.putter).expect("WAH");
+		if !rule.rule_type.move_possible() {
+			space.not_yet_moved.swap(false, Ordering::Relaxed);
+		}
+
+		for &mem_getter in rule.mem_getters.iter() {
+			if mem_getter != rule.putter {
+				self.ready.set_byte(mem_getter, ByteSet::PUTTY);
+			}
+		}
+		for &getter in rule.getters.iter() {
+			self.ready.set_byte(getter, 0x00);
+			//getter reset
+			self.msg_dropboxes.get(&getter).expect("WAH").send(rule.putter);
+		}
+		if rule.rule_type.drains_putter() {
+			self.ready.set_byte(mem_getter, ByteSet::GETTY);
+		}
+		if rule.rule_type == RuleType::MoveFromMem {
+			// act as mem putter
+			let awaiting_number = rule.getter_count;
+			for _ in 0..awaiting_number {
+				space.sema.acquire(); // -= 1
+			}
+			let unmoved = space.not_yet_moved.load(Ordering::Relaxed);
+			if unmoved {
+				Some(datum)s
+			} else {
+				std::mem::forget(datum);
+				None
+			}
+		}		
+	}
 }
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
 enum IdType {
-	Pu,
-	Ge,
-	MemPu,
-	MemGe,
+	Pu, Ge, Mem
+}
+impl IdType {
+	fn needs_space(self) -> bool {
+		use IdType::*;
+		match self {
+			Pu | Mem => true,
+			Ge => false,
+		}
+	}
 }
 struct ProtBuilder {
 	max_id_promised: usize,
 	max_id_encountered: usize,
-	is_putter: HashMap<usize, bool>,
+	id_type: HashMap<usize, IdType>,
 	rules: Vec<Rule>,
 }
 impl ProtBuilder {
@@ -426,36 +457,68 @@ impl ProtBuilder {
 		Self {
 			max_id_promised: max_id,
 			max_id_encountered: 0,
-			is_putter: Default::default(),
+			id_type: Default::default(),
 			rules: Default::default(),
 		}
 	}
-	pub fn add_rule<I>(mut self, putter: usize, getters: I) -> Self
-	where I: IntoIterator<Item=usize> {
+	fn type_clash(&mut self, id: usize, id_type: IdType) -> bool {
+		*self.id_type.entry(id).or_insert(id_type) != id_type
+	}
+	pub fn add_rule<I,J>(mut self, is_mem: bool, putter: usize, getters: I, mem_getters: J) -> Self
+	where I: IntoIterator<Item=usize>, J: IntoIterator<Item=usize> {
 		let mut guard = ByteSet::with_len(self.max_id_promised + 1);
+
 
 		// getters
 		let mut getters_vec: Vec<_> = getters.into_iter().collect();
 		getters_vec.sort();
 		getters_vec.dedup();
 		for &getter in getters_vec.iter() {
-			if *self.is_putter.entry(getter).or_insert(false) {
-				panic!("WAS PUTTER BEFORE");
+			if self.type_clash(getter, IdType::Ge) {
+				panic!("Not Ge");
 			}
 			self.max_id_encountered = self.max_id_encountered.max(getter);
-			guard.set_byte(getter, ByteSet::READY);
+			guard.set_byte(getter, ByteSet::GETTY);
 		}
-		let getter_count = getters_vec.len();
+
+		// mem getters
+		let mut mem_getters_vec: Vec<_> = mem_getters.into_iter().collect();
+		mem_getters_vec.sort();
+		mem_getters_vec.dedup();
+		for &getter in mem_getters_vec.iter() {
+			if self.type_clash(getter, IdType::Mem) {
+				panic!("Not Mem");
+			}
+			self.max_id_encountered = self.max_id_encountered.max(getter);
+			guard.set_byte(getter, ByteSet::GETTY);
+		}
+
+		let getter_count = getters_vec.len() + mem_getters_vec.len();
 
 		// putter
-		if ! *self.is_putter.entry(putter).or_insert(true) {
-			panic!("WAS GETTER BEFORE");
+		let putter_type = match is_mem {
+			true => IdType::Mem,
+			false => IdType::Pu,
+		};
+		if self.type_clash(putter, putter_type) {
+			panic!("Not right putter type");
 		}
 		self.max_id_encountered = self.max_id_encountered.max(putter);
-		guard.set_byte(putter, ByteSet::READY);
+		guard.set_byte(putter, ByteSet::PUTTY);
 
 		guard = guard.minimize();
+		let rule_type = if is_mem {
+			if mem_getters_vec.contains(&putter) {
+				RuleType::CloneFromMem
+			} else {
+				RuleType::MoveFromMem
+			}
+		} else {
+			RuleType::FromPort
+		};
 		let r = Rule {
+			rule_type,
+			mem_getters: mem_getters_vec,
 			guard, putter, getters: getters_vec, getter_count,
 		};
 		self.rules.push(r);
@@ -463,8 +526,8 @@ impl ProtBuilder {
 	}
 	pub fn build(self) -> Prot {
 		Prot {
-			putter_spaces: self.is_putter.iter()
-			.filter(|(_, p)| **p)
+			putter_spaces: self.id_type.iter()
+			.filter(|(_, id_type)| id_type.needs_space())
 			.map(|(&id, _)| {
 				let space = PutterSpace {
 					sema: Semaphore::new(0),
@@ -473,7 +536,7 @@ impl ProtBuilder {
 				};
 				(id, space)
 			}).collect(),
-			msg_dropboxes: self.is_putter.into_iter().map(|(id,_)|
+			msg_dropboxes: self.id_type.into_iter().map(|(id,_)|
 				(id, MsgDropbox::default())
 			).collect(),
 			rules: self.rules,
@@ -482,12 +545,45 @@ impl ProtBuilder {
 	}
 }
 
+
+macro_rules! arrit {
+	($($el:expr),*) => {{
+		[$($el),*].iter().cloned()
+	}}
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum RuleType {
+	CloneFromMem,
+	MoveFromMem,
+	FromPort,
+}
+impl RuleType {
+	fn drains_putter(self) -> bool {
+		!self.move_possible()
+	}
+	fn move_possible(self) -> bool {
+		use RuleType::*;
+		match self {
+			CloneFromMem => true,
+			MoveFromMem | FromPort => false,
+		}
+	}
+	fn mem_putter(self) -> bool {
+		use RuleType::*;
+		match self {
+			CloneFromMem | MoveFromMem=> true,
+			FromPort => false,
+		}
+	}
+}
+
 #[test]
 pub fn prot_test() {
 	let prot = 
 	ProtBuilder::new(10)
-	.add_rule(0, [1].iter().cloned())
-	.add_rule(0, [2].iter().cloned())
+	.add_rule(false, 0, arrit![1], arrit![])
+	.add_rule(false, 0, arrit![2], arrit![])
 	.build();
 
     crossbeam::scope(|s| {
