@@ -620,3 +620,19 @@ after a transfer, getters have a Ptr to the real datum, not the datum itself*
 
 
 */
+
+#[test]
+pub fn park_test() {
+	let a = std::thread::current();
+	let b = std::thread::spawn(move || {
+		for _ in 0..10 {
+			milli_sleep![1000];
+		}
+	});
+	let now = std::time::Instant::now();
+	for _ in 0..3 {
+		b.thread().unpark();
+	}
+	println!("took {:?}", now.elapsed());
+	b.join();
+}
