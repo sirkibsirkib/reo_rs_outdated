@@ -25,32 +25,36 @@ struct Rule {
 
 unsafe impl Send for Ptr {}
 unsafe impl Sync for Ptr {}
-struct Ptr(UnsafeCell<*const ()>);
+struct Ptr {
+    p: UnsafeCell<*const ()>
+}
 impl Default for Ptr {
     fn default() -> Self {
-        Self(UnsafeCell::new(std::ptr::null()))
+        Self {
+            p: UnsafeCell::new(std::ptr::null()),
+        }
     }
 }
 impl Ptr {
     fn transfer_moving<T: Sized>(&self, dst: &Self) {
         unsafe {
-            let src: *const T = std::mem::transmute(*self.0.get());
-            let dst: *mut T = std::mem::transmute(*dst.0.get());
+            let src: *const T = std::mem::transmute(*self.p.get());
+            let dst: *mut T = std::mem::transmute(*dst.p.get());
             std::ptr::copy(src, dst, 1);
         }
     }
     fn write<T: Sized>(&self, datum: &T) {
-        unsafe { *self.0.get() = std::mem::transmute(datum) };
+        unsafe { *self.p.get() = std::mem::transmute(datum) };
     }
     fn read_moving<T: Sized>(&self) -> T {
         unsafe {
-            let x: *const T = std::mem::transmute(*self.0.get());
+            let x: *const T = std::mem::transmute(*self.p.get());
             x.read()
         }
     }
     fn read_cloning<T: Sized + Clone>(&self) -> T {
         unsafe {
-            let x: &T = std::mem::transmute(*self.0.get());
+            let x: &T = std::mem::transmute(*self.p.get());
             x.clone()
         }
     }
@@ -110,24 +114,33 @@ impl ProtoCr {
     fn fire(&self, proto: &Proto, rule: &Rule) {
         // mem getters only
         for action in rule.actions.iter() {
-            let mut mg_iter = action.getters.iter().filter(|g| proto.is_mem.contains(&action.putter));
-            // let num_tot_getters = action.getters.len();
-            // let num_mem_getters = mg_iter.clone().count();
-            // let num_prt_getters = num_tot_getters - num_mem_getters;
-
+            let mut mg_iter = action.getters.iter().filter(|&&g|  proto.mem_id(g));
+            let pg_iter = action.getters.iter().filter(|&&g| !proto.mem_id(g));
             let src_space = proto.spaces.get(&action.putter).expect("UII");
             match mg_iter.next() {
                 Some(mg) => {
                     // memory mv
                     let mv = src_space.owned.swap(false, Ordering::SeqCst);
                     assert_eq!(mv, true);
+                    let dst_space = proto.spaces.get(mg).expect("UUAAA1");
+                    src_space.ptr.transfer_moving::<u32>(&dst_space.ptr);
                 },
                 None => (),
             }
             for mg in mg_iter {
-                let dst_space = proto.spaces.get(&mg).expect("UUAAA");
+                let dst_space = proto.spaces.get(mg).expect("UUAAA2");
                 // TODO clone instead
                 src_space.ptr.transfer_moving::<u32>(&dst_space.ptr);
+            }
+            let pg_count = pg_iter.clone().count();
+            for pg in pg_iter {
+                proto.send_to(*pg, action.putter);
+            }
+            if proto.mem_id(action.putter) {
+                // mem putter
+            } else {
+                // port putter
+                proto.send_to(action.putter, pg_count);
             }
         }
     }
@@ -138,6 +151,14 @@ struct Proto {
     spaces: HashMap<PortId, PutterSpace>,
     is_mem: HashSet<PortId>,
     messaging: HashMap<PortId, MsgDropbox>,
+}
+impl Proto {
+    fn mem_id(&self, id: PortId) -> bool {
+        self.is_mem.contains(&id)
+    }
+    fn send_to(&self, id: PortId, msg: usize) {
+        self.messaging.get(&id).expect("JUU").send(msg)
+    }
 }
 
 struct MemoryDef {
