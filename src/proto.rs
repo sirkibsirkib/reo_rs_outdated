@@ -150,7 +150,6 @@ pub struct ProtoCrAll<P: Proto> {
     inner: ProtoCr<P>,
 }
 impl<P: Proto> ProtoCrAll<P> {
-
     fn become_ready(&mut self, id: PortId) {
         if let Some(&l) = self.leader_of.get(&id) {
             // am grouped
@@ -652,7 +651,6 @@ pub trait AtomicComponent {
     where
         F: FnOnce(S, PortGroup<Self::P>, Self::Interface);
 }
-
 
 ////////////// EXAMPLE concrete ///////////////
 
