@@ -170,6 +170,15 @@ enum PortRole {
     Putter,
     Getter,
 }
+
+
+/*
+[MemPutters | PortPutters | PortGetters | MemGetters]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^ message_dropbox
+ ^^^^^^^^^^^^^^^^^^^^^^^^^ putter_space
+
+~~~~~~~~~~~~| num_mem
+*/
 struct ProtoBuilder {
     memory: HashMap<PortId, MemoryDef>,
     port_type: HashMap<PortId, PortRole>,
@@ -267,6 +276,10 @@ impl ProtoBuilder {
             messaging,
         }
     }
+}
+
+trait PortData {
+    fn try_clone(&self) -> Self;
 }
 
 #[derive(derive_new::new)]

@@ -7,3 +7,4 @@ pub mod proto;
 pub mod rbpa;
 pub mod simple;
 pub mod tokens;
+pub mod mem;
