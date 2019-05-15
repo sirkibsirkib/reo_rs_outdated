@@ -308,6 +308,29 @@ struct ProtoAll {
 	r: ProtoR,
 	w: Mutex<ProtoW>,
 }
+impl ProtoAll {
+	fn new(mem_infos: Vec<TypeMemInfo>, num_port_putters: usize, num_port_getters: usize, rules: Vec<Rule>) -> Self {
+		let mem_id_gap = mem_infos.len() + num_port_putters + num_port_getters;
+
+		let (mem_data, me_pu, mem_type_info, mem_ptr_uses, ready) = build_buffer(mem_infos, mem_id_gap);
+		let po_pu = (0..num_port_putters).map(|_| PoPuSpace::new()).collect();
+		let po_ge = (0..num_port_getters).map(|_| PoGeSpace::new()).collect();
+
+		let mem_tracking = MemSlotTracking {
+			mem_ptr_uses,
+			mem_ptr_unused: mem_type_info.keys().cloned().map(|type_id| (type_id, vec![])).collect(),
+		};
+		let r = ProtoR { mem_data, me_pu, po_pu, po_ge, mem_type_info };
+		let w = Mutex::new(ProtoW {
+			rules,
+			active: ProtoActive {
+				ready,
+				mem_tracking,
+			},
+		});
+		ProtoAll {w, r}
+	}
+}
 
 
 unsafe impl<T: PortData> Send for Getter<T> {}
@@ -405,15 +428,6 @@ impl<T> Putter<T> {
 		}
 	}
 }
-
-
-/*
-who cleans up?
-
-
-
-
-*/
 
 // ACTIONS
 fn mem_to_nowhere(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId) {
@@ -539,19 +553,8 @@ impl Proto for MyProto {
 		let mem_infos = vec![
 			TypeMemInfo::new::<u32>(),
 		];
-		let po_pu_rng = 1..=2;
-		let po_ge_rng = 3..=3;
-		let mem_id_gap = *po_ge_rng.end() + 1;
-
-		let (mem_data, me_pu, mem_type_info, mem_ptr_uses, ready) = build_buffer(mem_infos, mem_id_gap);
-		let po_pu = po_pu_rng.map(|_| PoPuSpace::new()).collect();
-		let po_ge = po_ge_rng.map(|_| PoGeSpace::new()).collect();
-
-		let mem_tracking = MemSlotTracking {
-			mem_ptr_uses,
-			mem_ptr_unused: mem_type_info.keys().cloned().map(|type_id| (type_id, vec![])).collect(),
-		};
-		let r = ProtoR { mem_data, me_pu, po_pu, po_ge, mem_type_info };
+		let num_port_putters = 2;
+		let num_port_getters = 1;
 		let rules = vec![
 			Rule {
 				guard: bitset!{0, 3},
@@ -567,14 +570,7 @@ impl Proto for MyProto {
 				},
 			},
 		];
-		let w = Mutex::new(ProtoW {
-			rules,
-			active: ProtoActive {
-				ready,
-				mem_tracking,
-			},
-		});
-		let p = Arc::new(ProtoAll {w, r});
+		let p = Arc::new(ProtoAll::new(mem_infos, num_port_putters, num_port_getters, rules));
 		(
 			// 0 => m1 // putter
 			Putter {p: p.clone(), id: 1, phantom: Default::default() },
@@ -664,7 +660,7 @@ fn test_my_proto() {
 
 		s.spawn(move |_| {
 			for _ in 0..5 {
-				println!("GOT {:?} | {:?} ", g3.get(), g3.get_signal());
+				println!("GOT {:?} | {:?}", g3.get(), g3.get_signal());
 			}
 		});
 	}).expect("WENT OK");

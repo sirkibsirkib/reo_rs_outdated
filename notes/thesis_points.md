@@ -46,3 +46,22 @@
 39. define a locking quorum. chosen such that if everyone locks {your_putters} & {quorum}, there is sufficient mutex
 40. is it possible to lock a port NOT in your put set without disaster?
 41. we know that there is NO overlap between ports in different ACTIONS of a RULE
+----------------------------
+WE IGNORE
+1. synchronous region decomposition
+2. opportunities to traverse bitsets in parallel (opt for compact bitsets instead)
+
+
+WE ASSUME
+1. we want to support large data
+2. we don't want to bound the #port IDS
+3. CLONE does not alter the contents of the shallowest bytewise representation
+-- does NOT apply to highly experimental PIN types. eg for coroutines
+4. 
+
+WE SUPPORT
+1. passing values on the stack
+2. putter->getter stack passing
+3. memory->memory values are passed by reference
+4. reference-counted indirect memory passing
+5. values are allowed to be dropped in the circuit
