@@ -449,10 +449,14 @@ fn mem_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId, me_ge: &
 			first_me_ge
 		},
 	};
+	let me_pu_space = &r.me_pu[me_pu];
 	for g in me_ge_iter {
 		// 3. getter becomes FULL
-		r.me_pu[g].dup_mem_ptr(&r.me_pu[me_pu].ptr, &mut w.mem_tracking);
+		let g_space = &r.me_pu[g];
+		g_space.dup_mem_ptr(&me_pu_space.ptr, &mut w.mem_tracking);
 		w.ready.set(g); // putter UP
+		let was_owned = g_space.ptr.0.owned.swap(true, Ordering::SeqCst);
+		assert!(!was_owned);
 	}
 	mem_to_ports(r, w, me_pu, po_ge);
 }
