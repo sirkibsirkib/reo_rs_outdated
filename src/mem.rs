@@ -198,22 +198,54 @@ struct ProtoActive {
 	ready: BitSet,
 	mem_tracking: MemSlotTracking,
 }
+
+struct Commitment {
+	rule_id: usize,
+	awaiting: usize,
+}
 struct ProtoW {
 	rules: Vec<Rule>,
 	active: ProtoActive,
+	committed_rule: Option<Commitment>,
+	ready_tentative: BitSet,
 }
 impl ProtoW {
 	fn enter(&mut self, r: &ProtoR, my_id: PortId) {
 		self.active.ready.set(my_id);
+		if self.committed_rule.is_some() {
+			// some rule is waiting for completion
+			return;
+		}
+		let mut num_tenatives = 0;
 		println!("enter with id={:?}. bitset now {:?}", my_id, &self.active.ready);
 		'outer: loop {
-			'inner: for (rid, rule) in self.rules.iter().enumerate() {
+			'inner: for (rule_id, rule) in self.rules.iter().enumerate() {
 				if self.active.ready.is_superset(&rule.guard) {
-					println!("... firing {:?}. READY: {:?} GUARD {:?}", rid, &self.active.ready, &rule.guard);
-					// check guard
+					// committing to this rule!
 					self.active.ready.difference_with(&rule.guard);
+					for id in self.active.ready.iter_and(&self.ready_tentative) {
+						num_tenatives += 1;
+						match r.get_space(id) {
+							SpaceRef::PoPu(po_pu) => po_pu.dropbox.send(rule_id),
+							SpaceRef::PoGe(po_ge) => po_ge.dropbox.send(rule_id),
+							_ => panic!("bad tentative!"),
+						} 
+					}
+					// tenative ports! must wait for them to resolve
+					if num_tenatives > 0 {
+						self.committed_rule = Some(Commitment {
+							rule_id,
+							awaiting: num_tenatives,
+						});
+						println!("committed to rid {}", rule_id);
+						break 'inner;
+					}
+					// no tenatives! proceed
+
+					println!("... firing {:?}. READY: {:?} GUARD {:?}", rule_id, &self.active.ready, &rule.guard);
+
 					(rule.actions)(r, &mut self.active);
-					println!("... FIRE COMPLETE {:?}. READY: {:?} GUARD {:?}", rid, &self.active.ready, &rule.guard);
+					println!("... FIRE COMPLETE {:?}. READY: {:?} GUARD {:?}", rule_id, &self.active.ready, &rule.guard);
 					if !rule.guard.test(my_id) {
 						// job done!
 						break 'inner;
@@ -226,6 +258,18 @@ impl ProtoW {
 			println!("... exiting");
 			return
 		}
+	}
+	fn enter_committed(&mut self, r: &ProtoR, tent_it: PortId, expecting_rule: usize) {
+		let comm = self.committed_rule.as_mut().expect("BUT IT MUST BE");
+		assert_eq!(comm.rule_id, expecting_rule);
+		self.ready_tentative.set_to(tent_it, false);
+		comm.awaiting -= 1;
+		if comm.awaiting > 0 {
+			return; // someone else will finish up
+		}
+		let rule = &self.rules[comm.rule_id];
+		self.committed_rule = None;
+		(rule.actions)(r, &mut self.active);
 	}
 }
 
@@ -312,7 +356,7 @@ impl ProtoAll {
 	fn new(mem_infos: Vec<TypeMemInfo>, num_port_putters: usize, num_port_getters: usize, rules: Vec<Rule>) -> Self {
 		let mem_id_gap = mem_infos.len() + num_port_putters + num_port_getters;
 
-		let (mem_data, me_pu, mem_type_info, mem_ptr_uses, ready) = build_buffer(mem_infos, mem_id_gap);
+		let (mem_data, me_pu, mem_type_info, mem_ptr_uses, ready) = Self::build_buffer(mem_infos, mem_id_gap);
 		let po_pu = (0..num_port_putters).map(|_| PoPuSpace::new()).collect();
 		let po_ge = (0..num_port_getters).map(|_| PoGeSpace::new()).collect();
 
@@ -327,8 +371,46 @@ impl ProtoAll {
 				ready,
 				mem_tracking,
 			},
+			committed_rule: None,
+			ready_tentative: BitSet::default(),
 		});
 		ProtoAll {w, r}
+	}
+
+	fn build_buffer(infos: Vec<TypeMemInfo>, mem_id_gap: usize) -> (Vec<u8>, Vec<MePuSpace>, HashMap<TypeId, MemTypeInfo>, HashMap<*mut u8, usize>, BitSet) {
+		let mut capacity = 0;
+		let mut offsets_n_typeids = vec![];
+		let mut mem_type_info = HashMap::default();
+		let mut ready = BitSet::default();
+		for (mem_id, info) in infos.into_iter().enumerate() {
+			ready.set(mem_id + mem_id_gap);
+			let rem = capacity % info.align.max(1);
+			if rem > 0 {
+				capacity += info.align - rem;
+			}
+			println!("@ {:?} for info {:?}", capacity, &info);
+			offsets_n_typeids.push((capacity, info.type_id));
+			mem_type_info.insert(info.type_id, MemTypeInfo {
+				drop_fn: info.drop_fn,
+				bytes: info.size,
+			});
+			capacity += info.size.max(1); // make pointers unique even with 0-byte data
+		}
+		mem_type_info.shrink_to_fit();
+		println!("CAP IS {:?}", capacity);
+
+		let mut buf: Vec<u8> = Vec::with_capacity(capacity);
+		unsafe {
+			buf.set_len(capacity);
+		}
+		let mut mem_slot_uses = HashMap::default();
+		let ptrs = offsets_n_typeids.into_iter().map(|(offset, type_id)| unsafe {
+			let p = buf.as_ptr().offset(offset as isize);
+			*mem_slot_uses.entry(transmute(p)).or_insert(0) += 1;
+			let me_ptr = MePtr::new(p, false);
+			MePuSpace::new(me_ptr, type_id)
+		}).collect();
+		(buf, ptrs, mem_type_info, mem_slot_uses, ready)
 	}
 }
 
@@ -605,42 +687,6 @@ impl TypeMemInfo {
 	}
 }
 
-fn build_buffer<I>(infos: I, mem_id_gap: usize) -> (Vec<u8>, Vec<MePuSpace>, HashMap<TypeId, MemTypeInfo>, HashMap<*mut u8, usize>, BitSet)
-where I: IntoIterator<Item=TypeMemInfo> {
-	let mut capacity = 0;
-	let mut offsets_n_typeids = vec![];
-	let mut mem_type_info = HashMap::default();
-	let mut ready = BitSet::default();
-	for (mem_id, info) in infos.into_iter().enumerate() {
-		ready.set(mem_id + mem_id_gap);
-		let rem = capacity % info.align.max(1);
-		if rem > 0 {
-			capacity += info.align - rem;
-		}
-		println!("@ {:?} for info {:?}", capacity, &info);
-		offsets_n_typeids.push((capacity, info.type_id));
-		mem_type_info.insert(info.type_id, MemTypeInfo {
-			drop_fn: info.drop_fn,
-			bytes: info.size,
-		});
-		capacity += info.size.max(1); // make pointers unique even with 0-byte data
-	}
-	mem_type_info.shrink_to_fit();
-	println!("CAP IS {:?}", capacity);
-
-	let mut buf: Vec<u8> = Vec::with_capacity(capacity);
-	unsafe {
-		buf.set_len(capacity);
-	}
-	let mut mem_slot_uses = HashMap::default();
-	let ptrs = offsets_n_typeids.into_iter().map(|(offset, type_id)| unsafe {
-		let p = buf.as_ptr().offset(offset as isize);
-		*mem_slot_uses.entry(transmute(p)).or_insert(0) += 1;
-		let me_ptr = MePtr::new(p, false);
-		MePuSpace::new(me_ptr, type_id)
-	}).collect();
-	(buf, ptrs, mem_type_info, mem_slot_uses, ready)
-}
 
 #[test]
 fn test_my_proto() {

@@ -57,11 +57,13 @@ WE ASSUME
 2. we don't want to bound the #port IDS
 3. CLONE does not alter the contents of the shallowest bytewise representation
 -- does NOT apply to highly experimental PIN types. eg for coroutines
-4. 
+4. GET and PUT events and the resolution thereof 
+5. the protocol does not have to guarantee progress if nobody is calling get/put
+6. after a group COMMITS to an action, the protocol can halt until the committed action is performed
 
 WE SUPPORT
 1. passing values on the stack
 2. putter->getter stack passing
 3. memory->memory values are passed by reference
 4. reference-counted indirect memory passing
-5. values are allowed to be dropped in the circuit
+5. values are allowed to be dropped in the circuit (at THIS level)
