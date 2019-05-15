@@ -13,11 +13,13 @@ use std::mem::transmute;
 
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
-use crate::proto::PortId;
 use std::marker::PhantomData;
 use crate::bitset::BitSet;
 use std_semaphore::Semaphore;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+
+type PortId = usize;
 
 struct Ptr {
 	ptr: UnsafeCell<*mut u8>,
@@ -203,11 +205,15 @@ struct ProtoW {
 impl ProtoW {
 	fn enter(&mut self, r: &ProtoR, my_id: PortId) {
 		self.active.ready.set(my_id);
+		println!("enter with id={:?}. bitset now {:?}", my_id, &self.active.ready);
 		'outer: loop {
-			'inner: for rule in self.rules.iter() {
+			'inner: for (rid, rule) in self.rules.iter().enumerate() {
 				if self.active.ready.is_superset(&rule.guard) {
+					println!("... firing {:?}. READY: {:?} GUARD {:?}", rid, &self.active.ready, &rule.guard);
 					// check guard
+					self.active.ready.difference_with(&rule.guard);
 					(rule.actions)(r, &mut self.active);
+					println!("... FIRE COMPLETE {:?}. READY: {:?} GUARD {:?}", rid, &self.active.ready, &rule.guard);
 					if !rule.guard.test(my_id) {
 						// job done!
 						break 'inner;
@@ -217,6 +223,7 @@ impl ProtoW {
 				}
 			}
 			// none matched
+			println!("... exiting");
 			return
 		}
 	}
@@ -359,7 +366,7 @@ impl<T> Putter<T> {
 	fn put(&mut self, datum: T) -> Option<T> {
 		let po_pu = self.p.r.get_po_pu(self.id).expect("HEYa");
 
-		// 1. make ready my datum
+		// 1. make ready my datum & set owned to true
 		po_pu.ptr.stack_put(&datum);
 
 		// 2. enter, participate in protocol
@@ -395,12 +402,14 @@ who cleans up?
 
 // ACTIONS
 fn mem_to_nowhere(r: &ProtoR, me_pu: PortId) {
+	println!("mem_to_nowhere");
 	let was_owned = r.me_pu[me_pu].ptr.0.owned.swap(false, Ordering::SeqCst);
 	assert!(was_owned);
 	r.me_pu[me_pu].do_drop(r);
 }
 
 fn mem_to_ports(r: &ProtoR, me_pu: PortId, po_ge: &[PortId]) {
+	println!("mem_to_ports");
 	let new_getters_left = po_ge.len();
 	if new_getters_left == 0 {
 		return mem_to_nowhere(r, me_pu);
@@ -413,6 +422,7 @@ fn mem_to_ports(r: &ProtoR, me_pu: PortId, po_ge: &[PortId]) {
 }
 
 fn mem_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
+	println!("mem_to_mem_and_ports");
 	// me_pu owned is TRUE
 	// me_pu num_getters = 0
 	let mem_id_gap = r.mem_id_gap();
@@ -444,6 +454,7 @@ fn mem_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId, me_ge: &
 }
 
 fn port_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, po_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
+	println!("port_to_mem_and_ports");
 	let mut me_ge_iter = me_ge.iter().cloned();
 	let po_pu_space = r.get_po_pu(po_pu).expect("ECH");
 	if let Some(first_me_ge) = me_ge_iter.next() {
@@ -453,10 +464,19 @@ fn port_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, po_pu: PortId, me_ge: 
 		first_me_ge_space.raw_move_port_ptr(&po_pu_space.ptr, &r.mem_type_info, &mut w.mem_tracking);
 		let was_owned = po_pu_space.ptr.0.owned.swap(false, Ordering::SeqCst);
 		assert!(was_owned);
+
+		// 2. fill the first memcell
+		w.ready.set(first_me_ge); // putter UP
+		let was_owned = first_me_ge_space.ptr.0.owned.swap(true, Ordering::SeqCst);
+		assert!(!was_owned);
+
 		for g in me_ge_iter {
 			// 2. getter becomes FULL
-			r.me_pu[g].dup_mem_ptr(&first_me_ge_space.ptr, &mut w.mem_tracking);
+			let g_space = &r.me_pu[g];
+			g_space.dup_mem_ptr(&first_me_ge_space.ptr, &mut w.mem_tracking);
 			w.ready.set(g); // putter UP
+			let was_owned = g_space.ptr.0.owned.swap(true, Ordering::SeqCst);
+			assert!(!was_owned);
 		}
 	} else {
 		// no memory getters. stays owned
@@ -486,8 +506,9 @@ impl Proto for MyProto {
 		];
 		let po_pu_rng = 1..=2;
 		let po_ge_rng = 3..=3;
+		let mem_id_gap = *po_ge_rng.end() + 1;
 
-		let (mem_data, me_pu, mem_type_info, mem_ptr_uses) = build_buffer(mem_infos);
+		let (mem_data, me_pu, mem_type_info, mem_ptr_uses, ready) = build_buffer(mem_infos, mem_id_gap);
 		let po_pu = po_pu_rng.map(|_| PoPuSpace::new()).collect();
 		let po_ge = po_ge_rng.map(|_| PoGeSpace::new()).collect();
 
@@ -514,7 +535,7 @@ impl Proto for MyProto {
 		let w = Mutex::new(ProtoW {
 			rules,
 			active: ProtoActive {
-				ready: BitSet::default(),
+				ready,
 				mem_tracking,
 			},
 		});
@@ -553,12 +574,14 @@ impl TypeMemInfo {
 	}
 }
 
-fn build_buffer<I>(infos: I) -> (Vec<u8>, Vec<MePuSpace>, HashMap<TypeId, MemTypeInfo>, HashMap<*mut u8, usize>)
+fn build_buffer<I>(infos: I, mem_id_gap: usize) -> (Vec<u8>, Vec<MePuSpace>, HashMap<TypeId, MemTypeInfo>, HashMap<*mut u8, usize>, BitSet)
 where I: IntoIterator<Item=TypeMemInfo> {
 	let mut capacity = 0;
 	let mut offsets_n_typeids = vec![];
 	let mut mem_type_info = HashMap::default();
-	for info in infos.into_iter() {
+	let mut ready = BitSet::default();
+	for (mem_id, info) in infos.into_iter().enumerate() {
+		ready.set(mem_id + mem_id_gap);
 		let rem = capacity % info.align.max(1);
 		if rem > 0 {
 			capacity += info.align - rem;
@@ -585,7 +608,7 @@ where I: IntoIterator<Item=TypeMemInfo> {
 		let me_ptr = MePtr::new(p, false);
 		MePuSpace::new(me_ptr, type_id)
 	}).collect();
-	(buf, ptrs, mem_type_info, mem_slot_uses)
+	(buf, ptrs, mem_type_info, mem_slot_uses, ready)
 }
 
 #[test]
@@ -606,7 +629,7 @@ fn test_my_proto() {
 
 		s.spawn(move |_| {
 			for _ in 0..10 {
-				println!("{:?}", g3.get());
+				println!("GOT {:?}", g3.get());
 			}
 		});
 	}).expect("WENT OK");

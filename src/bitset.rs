@@ -44,7 +44,7 @@ pub struct AndIter<'a, 'b> {
 }
 impl<'a, 'b> AndIter<'a, 'b> {
     fn fetch_chunk(a: &BitSet, b: &BitSet, chunk_idx: usize) -> Option<usize> {
-        a.data.get(0).and_then(|x| b.data.get(0).map(|y| x & y))
+        a.data.get(chunk_idx).and_then(|x| b.data.get(0).map(|y| x & y))
     }
 }
 impl<'a, 'b> Iterator for AndIter<'a, 'b> {
@@ -137,9 +137,8 @@ impl BitSet {
     pub fn capacity(&self) -> usize {
         self.data.capacity() * Self::BITS_PER_CHUNK
     }
-    pub fn set_to(&mut self, mut idx: usize, val: bool) -> bool {
-        idx += 1;
-        let mask = idx % Self::BITS_PER_CHUNK;
+    pub fn set_to(&mut self, idx: usize, val: bool) -> bool {
+        let mask = 1 << (idx % Self::BITS_PER_CHUNK);
         let chunk_idx = idx / Self::BITS_PER_CHUNK;
         let chunk = match (val, self.data.get_mut(chunk_idx)) {
             (false, None) => return false,
@@ -149,7 +148,7 @@ impl BitSet {
                 }
                 &mut self.data[chunk_idx]
             }
-            (_, Some(c)) => &mut self.data[chunk_idx],
+            (_, Some(c)) => c,
         };
         let was_set: bool = (*chunk & mask) != 0;
         if val {
@@ -159,21 +158,11 @@ impl BitSet {
         }
         was_set
     }
-    pub fn set(&mut self, mut idx: usize) -> bool {
-        idx += 1;
-        let mask = idx % Self::BITS_PER_CHUNK;
-        let chunk_idx = idx / Self::BITS_PER_CHUNK;
-        while self.data.len() <= chunk_idx {
-            self.data.push(0);
-        }
-        let chunk = &mut self.data[chunk_idx];
-        let was_set: bool = (*chunk & mask) != 0;
-        *chunk |= mask;
-        was_set
+    pub fn set(&mut self, idx: usize) -> bool {
+        self.set_to(idx, true)
     }
-    pub fn test(&self, mut idx: usize) -> bool {
-        idx += 1;
-        let mask = idx % Self::BITS_PER_CHUNK;
+    pub fn test(&self, idx: usize) -> bool {
+        let mask = 1 << (idx % Self::BITS_PER_CHUNK);
         let chunk_idx = idx / Self::BITS_PER_CHUNK;
         match self.data.get(chunk_idx) {
             Some(chunk) => chunk & mask != 0,
@@ -221,7 +210,7 @@ impl BitSet {
 
 impl fmt::Debug for BitSet {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "bitset: [")?;
+        write!(f, "[")?;
         for b in self.data.iter().rev().take(1) {
             write!(f, "{:b}", b)?;
         }
