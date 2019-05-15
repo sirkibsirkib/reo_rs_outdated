@@ -401,19 +401,23 @@ who cleans up?
 */
 
 // ACTIONS
-fn mem_to_nowhere(r: &ProtoR, me_pu: PortId) {
+fn mem_to_nowhere(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId) {
 	println!("mem_to_nowhere");
 	let was_owned = r.me_pu[me_pu].ptr.0.owned.swap(false, Ordering::SeqCst);
 	assert!(was_owned);
+	let mem_id_gap = r.mem_id_gap();
+	w.ready.set(me_pu+mem_id_gap);
 	r.me_pu[me_pu].do_drop(r);
 }
 
-fn mem_to_ports(r: &ProtoR, me_pu: PortId, po_ge: &[PortId]) {
+fn mem_to_ports(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId, po_ge: &[PortId]) {
 	println!("mem_to_ports");
 	let new_getters_left = po_ge.len();
 	if new_getters_left == 0 {
-		return mem_to_nowhere(r, me_pu);
+		return mem_to_nowhere(r, w, me_pu);
 	}
+	let mem_id_gap = r.mem_id_gap();
+	w.ready.set(me_pu+mem_id_gap);
 	let old_getters_left = r.me_pu[me_pu].getters_left.swap(new_getters_left, Ordering::SeqCst);
 	assert_eq!(0, old_getters_left);
 	for p in po_ge {
@@ -428,7 +432,7 @@ fn mem_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId, me_ge: &
 	let mem_id_gap = r.mem_id_gap();
 	let mut me_ge_iter = me_ge.iter().cloned();
 	let me_pu = match me_ge_iter.next() {
-		None => return mem_to_ports(r, me_pu, po_ge),
+		None => return mem_to_ports(r, w, me_pu, po_ge),
 		Some(first_me_ge) if first_me_ge == me_pu => {
 			// STAY case
 			// 1. pe_pu becomes full (again. was put down by `enter`)
@@ -450,7 +454,7 @@ fn mem_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId, me_ge: &
 		r.me_pu[g].dup_mem_ptr(&r.me_pu[me_pu].ptr, &mut w.mem_tracking);
 		w.ready.set(g); // putter UP
 	}
-	mem_to_ports(r, me_pu, po_ge);
+	mem_to_ports(r, w, me_pu, po_ge);
 }
 
 fn port_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, po_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
@@ -521,7 +525,7 @@ impl Proto for MyProto {
 			Rule {
 				guard: bitset!{0, 3},
 				actions: |_r, _w| {
-					mem_to_ports(_r, 0, &[3]);
+					mem_to_ports(_r, _w, 0, &[3]);
 				},
 			},
 			Rule {
