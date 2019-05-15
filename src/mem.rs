@@ -688,6 +688,7 @@ impl TypeMemInfo {
 }
 
 
+
 #[test]
 fn test_my_proto() {
 	let (mut p1, mut p2, mut g3) = MyProto::instantiate();
@@ -710,4 +711,28 @@ fn test_my_proto() {
 			}
 		});
 	}).expect("WENT OK");
+}
+
+
+struct StateSet {
+	vals: BitSet, // 0 for False, 1 for True
+	mask: BitSet, // 1 for X (overrides val)
+}
+impl StateSet {
+	fn satisfied(&self, state: &BitSet) -> bool {
+		unimplemented!()
+	}
+}
+
+
+/*TODO
+1. port groups: creation, destruction and interaction
+2. (runtime) stateset as (mask: BitSet, vals: BitSet)
+3. imagine the token api jazz
+*/
+struct PortGroup {
+	leader: PortId,
+}
+impl PortGroup {
+
 }
