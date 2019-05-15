@@ -4,6 +4,8 @@
 
 
 
+use hashbrown::HashMap;
+use std::any::TypeId;
 use std::mem::ManuallyDrop;
 use std::cell::UnsafeCell;
 use parking_lot::Mutex;
@@ -66,29 +68,36 @@ impl PoPtr {
 	}
 }
 
+type DropFnPtr = fn(*mut ());
+
 
 struct MePuSpace {
 	ptr: MePtr,
 	getters_left: AtomicUsize, // counts down. every getter decrements by 1. last getter must clean up
-	drop_fn: fn(*mut ()), // part of cleaning up. types erased at this stage
+	type_id: TypeId,
 }
 impl MePuSpace {
-	fn new(ptr: MePtr, drop_fn: fn(*mut ())) -> Self {
+	fn new(ptr: MePtr, type_id: TypeId) -> Self {
 		Self {
 			ptr,
 			getters_left: 0.into(),
-			drop_fn,
+			type_id,
 		}
 	}
-	fn getter_done(&self) {
+	fn getter_done(&self, r: &ProtoR) {
 		let left = self.getters_left.fetch_sub(1, Ordering::SeqCst);
 		assert!(left >= 1);
-		if left == 1 {
+		let owned = self.ptr.0.owned.swap(false, Ordering::SeqCst);
+		if owned && left == 1 {
 			// I was the last. perform cleanup
-			(self.drop_fn)(unsafe {
-				*self.ptr.0.ptr.get()
-			})
+			self.do_drop(r)
 		}
+	}
+	fn do_drop(&self, r: &ProtoR) {
+		let f = r.drop_fns.get(&self.type_id).expect("BAD TYPE for FN MAP");
+		(f)(unsafe {
+			*self.ptr.0.ptr.get()
+		})
 	}
 }
 
@@ -128,10 +137,15 @@ enum SpaceRef<'a> {
 	None,
 }
 
+struct MemSlotTracking {
+	mem_ptr_uses: HashMap<*mut (), usize>,
+	mem_ptr_unused: HashMap<TypeId, Vec<*mut ()>>,
+}
+
 struct ProtoW {
 	ready: BitSet,
 	rules: Vec<Rule>,
-	free_mem_slots: AnyMap,
+	mem_slot_tracking: MemSlotTracking,
 }
 impl ProtoW {
 	fn enter(&mut self, r: &ProtoR, my_id: PortId) {
@@ -140,7 +154,7 @@ impl ProtoW {
 			'inner: for rule in self.rules.iter() {
 				if self.ready.is_superset(&rule.guard) {
 					// check guard
-					(rule.actions)(r);
+					(rule.actions)(r, &mut self.mem_slot_tracking);
 					if rule.guard.test(my_id) {
 						// job done!
 						break 'inner;
@@ -157,7 +171,7 @@ impl ProtoW {
 
 struct Rule {
 	guard: BitSet,
-	actions: fn(&ProtoR),
+	actions: fn(&ProtoR, &mut MemSlotTracking),
 }
 
 struct ProtoR {
@@ -166,6 +180,7 @@ struct ProtoR {
 	po_pu: Vec<PoPuSpace>, // id range #MePu..(#MePu+#PoPu)
  	po_ge: Vec<PoGeSpace>,   // id range (#MePu+#PoPu)..(#MePu+#PoPu+#PoGe)
  	// me_ge doesn't need a space
+ 	drop_fns: HashMap<TypeId, DropFnPtr>,
 }
 impl ProtoR {
 	fn get_space(&self, mut id: PortId) -> SpaceRef {
@@ -200,6 +215,12 @@ impl MsgDropbox {
 		unsafe { 
 			*self.msg.get()
 		}
+	}
+	fn send(&self, msg: usize) {
+		unsafe {
+			*self.msg.get() = msg;
+		}
+		self.sema.release();
 	}
 }
 
@@ -236,7 +257,7 @@ impl<T> Getter<T> {
 				let datum = me_pu.ptr.0.get_move().expect("MOVE FAILED");
 
 				// 5. perform cleanup if last getter
-				me_pu.getter_done();
+				me_pu.getter_done(&self.p.r);
 
 				datum
 			},
@@ -295,30 +316,61 @@ impl<T> Putter<T> {
 }
 
 
-
-/* ACT A "mem drain"
-1. Memory putter
-2. zero mem getters
-*/
+/*
+who cleans up?
 
 
-/* ACT B "mem swap"
-1. Memory putter x
-2. 1+ mem getters
-3. x not getting
+
+
 */
 
-/* ACT C "mem stay"
-1. Memory putter x
-2. 1+ mem getters
-3. x is getting
-*/
-/* ACT D "port put"
-1. Port putter
-*/
 
 macro_rules! action {
-	($p:expr; @MEM_DRAIN@ $me_pu:expr => $( $po_ge:expr ),*) => {{
+
+	// mem to nowhere
+	($r:expr, $w:expr; $me_pu:tt => | ) => {{
+		// invariant: num_getters==0, owned=true
+		// must change: {owned => false}
+		let was_owned = $r.me_pu[$me_pu].ptr.0.owned.swap(false, Ordering::SeqCst);
+		assert!(was_owned);
+		$r.me_pu[$me_pu].do_drop();
+	}};
+
+	// mem to ports
+	($r:expr, $w:expr; $me_pu:tt => $( $po_ge:tt ),+ | ) => {{
+		// invariant: num_getters==0, owned=true
+		// must change: {num_getters => #po_ge}
+		let new_num_getters = [$($po_ge),+].len();
+		let old_num_getters = $r.me_pu[$me_pu].num_getters.swap(num_getters, Ordering::SeqCst);
+		assert_eq!(0, old_num_getters);
+		$(
+			$r.po_ge[$po_ge].send($me_pu);
+		),+
+	}};
+
+	// mem to mem and ports
+	($r:expr, $w:expr; $me_pu:tt => $( $po_ge:tt ),* | $me_ge0:tt, $( $me_ge:tt ),*) => {{
+		// invariant: num_getters==0, owned=true
+		// must swap mems
+		// must raise mem GET bits
+		let space0 = &$r.me_pu[$me_pu];
+		let space1 = &$r.me_pu[$me_ge];
+		assert_eq!(space0.type_id, space1.type_id);
+
+		let me_pu = if $me_pu == $me_ge {
+			// keep
+			$me_pu
+		} else {
+			// swap
+			$me_ge
+		};
+		$(
+			$me_ge
+	 	),*
+	}};
+
+	// port to mem and ports
+	($p:expr, $w:expr; $me_pu:tt => $( $po_ge:tt ),* | $( $me_ge:tt ),*) => {{
 
 	}};
 }
@@ -338,33 +390,31 @@ impl Proto for MyProto {
 		let po_pu_rng = 1..=2;
 		let po_ge_rng = 3..=3;
 
-		let (mem_data, me_pu) = build_buffer(mem_infos);
+		let (mem_data, me_pu, drop_fns, mem_ptr_uses) = build_buffer(mem_infos);
 		let po_pu = po_pu_rng.map(|_| PoPuSpace::new()).collect();
 		let po_ge = po_ge_rng.map(|_| PoGeSpace::new()).collect();
-
-		let r = ProtoR { mem_data, me_pu, po_pu, po_ge };
+		let r = ProtoR { mem_data, me_pu, po_pu, po_ge, drop_fns };
 		let rules = vec![
 			Rule {
 				guard: bitset!{0, 3},
-				actions: |_p| {
-					action![_p; @MEM_DRAIN@ 0 => 3];
+				actions: |_r, _mst| {
 				},
 			},
 			Rule {
 				guard: bitset!{1, 2, 4},
-				actions: |_p| {
+				actions: |_p, _mst| {
 
 				},
 			},
 		];
+		let mem_slot_tracking = MemSlotTracking {
+			mem_ptr_uses,
+			mem_ptr_unused: HashMap::default(),
+		};
 		let w = Mutex::new(ProtoW {
 			rules,
 			ready: BitSet::default(),
-			free_mem_slots: {
-				let mut m = AnyMap::new();
-				m.insert::<Slab<u32>>(Slab::with_capacity(1));
-				m
-			},
+			mem_slot_tracking,
 		});
 		let p = Arc::new(ProtoAll {w, r});
 		(
@@ -383,10 +433,11 @@ impl Proto for MyProto {
 struct TypeMemInfo {
 	size: usize,
 	align: usize,
+	type_id: TypeId,
 	drop_fn: fn(*mut ()),
 }
 impl TypeMemInfo {
-	pub fn new<T>() -> Self {
+	pub fn new<T: 'static>() -> Self {
 		let drop_fn: fn(*mut ()) = |ptr| unsafe {
 			let ptr: &mut ManuallyDrop<T> =
 				std::mem::transmute(ptr);
@@ -395,38 +446,45 @@ impl TypeMemInfo {
 		Self {
 			size: std::mem::size_of::<T>(),
 			align: std::mem::align_of::<T>(),
+			type_id: TypeId::of::<T>(),
 			drop_fn,
 		}
 	}
 }
 
-fn build_buffer<I>(infos: I) -> (Vec<u8>, Vec<MePuSpace>) where I: IntoIterator<Item=TypeMemInfo> {
+fn build_buffer<I>(infos: I) -> (Vec<u8>, Vec<MePuSpace>, HashMap<TypeId, DropFnPtr>, HashMap<*mut (), usize>)
+where I: IntoIterator<Item=TypeMemInfo> {
 	let mut capacity = 0;
-	let mut offsets_n_drops = vec![];
+	let mut offsets_n_typeids = vec![];
+	let mut drop_fns = HashMap::default();
 	for info in infos.into_iter() {
 		let rem = capacity % info.align;
 		if rem > 0 {
 			capacity += info.align - rem;
 		}
 		println!("@ {:?} for info {:?}", capacity, &info);
-		offsets_n_drops.push((capacity, info.drop_fn));
+		offsets_n_typeids.push((capacity, info.type_id));
+		drop_fns.entry(info.type_id).or_insert(info.drop_fn);
 		capacity += info.size;
 	}
+	drop_fns.shrink_to_fit();
 	println!("CAP IS {:?}", capacity);
 
 	let mut buf: Vec<u8> = Vec::with_capacity(capacity);
 	unsafe {
 		buf.set_len(capacity);
 	}
-	let ptrs = offsets_n_drops.into_iter().map(|(offset, drop_fn)| unsafe {
+	let mut mem_slot_uses = HashMap::default();
+	let ptrs = offsets_n_typeids.into_iter().map(|(offset, type_id)| unsafe {
 		let p = buf.as_ptr().offset(offset as isize);
+		*mem_slot_uses.entry(std::mem::transmute(p)).or_insert(0) += 1;
 		let me_ptr = MePtr::new(p, false);
-		MePuSpace::new(me_ptr, drop_fn)
+		MePuSpace::new(me_ptr, type_id)
 	}).collect();
-	(buf, ptrs)
+	(buf, ptrs, drop_fns, mem_slot_uses)
 }
 
 #[test]
 fn test_my_proto() {
-	let x = MyProto::instantiate();
+	let _x = MyProto::instantiate();
 }
