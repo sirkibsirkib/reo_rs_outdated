@@ -191,22 +191,24 @@ struct MemSlotTracking {
 	mem_ptr_uses: HashMap<*mut u8, usize>,
 	mem_ptr_unused: HashMap<TypeId, Vec<*mut u8>>,
 }
-struct ProtoW {
+
+struct ProtoActive {
 	ready: BitSet,
-	rules: Vec<Rule>,
 	mem_tracking: MemSlotTracking,
+}
+struct ProtoW {
+	rules: Vec<Rule>,
+	active: ProtoActive,
 }
 impl ProtoW {
 	fn enter(&mut self, r: &ProtoR, my_id: PortId) {
-		self.ready.set(my_id);
+		self.active.ready.set(my_id);
 		'outer: loop {
-			'inner: for rid in 0..self.rules.len() {
-				let rule = &self.rules[rid];
-				if self.ready.is_superset(&rule.guard) {
+			'inner: for rule in self.rules.iter() {
+				if self.active.ready.is_superset(&rule.guard) {
 					// check guard
-					let i_am_unset = !rule.guard.test(my_id);
-					(rule.actions)(r, self);
-					if i_am_unset {
+					(rule.actions)(r, &mut self.active);
+					if !rule.guard.test(my_id) {
 						// job done!
 						break 'inner;
 					} else {
@@ -222,7 +224,7 @@ impl ProtoW {
 
 struct Rule {
 	guard: BitSet,
-	actions: fn(&ProtoR, &mut ProtoW),
+	actions: fn(&ProtoR, &mut ProtoActive),
 }
 
 struct MemTypeInfo {
@@ -403,7 +405,7 @@ fn mem_to_ports(r: &ProtoR, me_pu: PortId, po_ge: &[PortId]) {
 	}
 }
 
-fn mem_to_mem_and_ports(r: &ProtoR, w: &mut ProtoW, me_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
+fn mem_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
 	// me_pu owned is TRUE
 	// me_pu num_getters = 0
 	let mem_id_gap = r.mem_id_gap();
@@ -434,7 +436,7 @@ fn mem_to_mem_and_ports(r: &ProtoR, w: &mut ProtoW, me_pu: PortId, me_ge: &[Port
 	mem_to_ports(r, me_pu, po_ge);
 }
 
-fn port_to_mem_and_ports(r: &ProtoR, w: &mut ProtoW, po_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
+fn port_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, po_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
 	let mut me_ge_iter = me_ge.iter().cloned();
 	let po_pu_space = r.get_po_pu(po_pu).expect("ECH");
 	if let Some(first_me_ge) = me_ge_iter.next() {
@@ -503,8 +505,10 @@ impl Proto for MyProto {
 		];
 		let w = Mutex::new(ProtoW {
 			rules,
-			ready: BitSet::default(),
-			mem_tracking,
+			active: ProtoActive {
+				ready: BitSet::default(),
+				mem_tracking,
+			},
 		});
 		let p = Arc::new(ProtoAll {w, r});
 		(
