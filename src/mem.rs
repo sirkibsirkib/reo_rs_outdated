@@ -9,16 +9,15 @@ use std::any::TypeId;
 use std::mem::ManuallyDrop;
 use std::cell::UnsafeCell;
 use parking_lot::Mutex;
+use std::mem::transmute;
 
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use crate::proto::PortId;
 use std::marker::PhantomData;
 use crate::bitset::BitSet;
-use slab::Slab;
 use std_semaphore::Semaphore;
 use std::sync::atomic::{AtomicBool, Ordering};
-use anymap::AnyMap;
 
 struct Ptr {
 	ptr: UnsafeCell<*mut ()>,
@@ -27,7 +26,7 @@ struct Ptr {
 impl Ptr {
 	fn get_clone<T: Clone>(&self) -> T {
 		let t: &T = unsafe {
-			std::mem::transmute(*self.ptr.get())
+			transmute(*self.ptr.get())
 		};
 		t.clone()
 	}
@@ -37,7 +36,7 @@ impl Ptr {
 	fn get_move<T>(&self) -> Option<T> {
 		if self.try_dec() {
 			let t: *const T = unsafe {
-				std::mem::transmute(*self.ptr.get())
+				transmute(*self.ptr.get())
 			};
 			Some(unsafe { std::ptr::read(t) })
 		} else {
@@ -53,7 +52,7 @@ struct MePtr(Ptr);
 impl MePtr {
 	fn new(storage: *const u8, initialized: bool) -> Self {
 		Self(Ptr {
-			ptr: UnsafeCell::new(unsafe { std::mem::transmute(storage) }),
+			ptr: UnsafeCell::new(unsafe { transmute(storage) }),
 			owned: initialized.into(),
 		})
 	}
@@ -62,7 +61,7 @@ struct PoPtr(Ptr);
 impl PoPtr {
 	fn stack_put<T>(&self, datum_ref: &T) {
 		unsafe {
-			*self.0.ptr.get() = std::mem::transmute(datum_ref);
+			*self.0.ptr.get() = transmute(datum_ref);
 		}
 		assert_eq!(false, self.0.owned.swap(true, Ordering::SeqCst));
 	}
@@ -140,6 +139,29 @@ enum SpaceRef<'a> {
 struct MemSlotTracking {
 	mem_ptr_uses: HashMap<*mut (), usize>,
 	mem_ptr_unused: HashMap<TypeId, Vec<*mut ()>>,
+}
+impl MemSlotTracking {
+	fn adopt_mem_ptr(&mut self, owner: &MePtr, adopter: &MePuSpace) {
+		let owner_p: *mut () = unsafe {
+			*owner.0.ptr.get()
+		};
+		let adopter_p: *mut () = unsafe {
+			*owner.0.ptr.get()
+		};
+		if owner_p == adopter_p {
+			return; // nothing to do here
+		}
+		let o = self.mem_ptr_uses.get_mut(&owner_p).expect("BAD OWNER");
+		assert!(*o > 0);
+		*o += 1;
+		let a = self.mem_ptr_uses.get_mut(&adopter_p).expect("BAD ADOPTER");
+		assert!(*a > 0);
+		*a -= 1;
+		if *a == 0 {
+			self.mem_ptr_uses.remove(&adopter_p);
+			self.mem_ptr_unused.get_mut(&adopter.type_id).expect("BAD").push(adopter_p);
+		}
+	}
 }
 
 struct ProtoW {
@@ -393,6 +415,12 @@ impl Proto for MyProto {
 		let (mem_data, me_pu, drop_fns, mem_ptr_uses) = build_buffer(mem_infos);
 		let po_pu = po_pu_rng.map(|_| PoPuSpace::new()).collect();
 		let po_ge = po_ge_rng.map(|_| PoGeSpace::new()).collect();
+
+
+		let mem_slot_tracking = MemSlotTracking {
+			mem_ptr_uses,
+			mem_ptr_unused: drop_fns.keys().cloned().map(|type_id| (type_id, vec![])).collect(),
+		};
 		let r = ProtoR { mem_data, me_pu, po_pu, po_ge, drop_fns };
 		let rules = vec![
 			Rule {
@@ -407,10 +435,6 @@ impl Proto for MyProto {
 				},
 			},
 		];
-		let mem_slot_tracking = MemSlotTracking {
-			mem_ptr_uses,
-			mem_ptr_unused: HashMap::default(),
-		};
 		let w = Mutex::new(ProtoW {
 			rules,
 			ready: BitSet::default(),
@@ -439,8 +463,7 @@ struct TypeMemInfo {
 impl TypeMemInfo {
 	pub fn new<T: 'static>() -> Self {
 		let drop_fn: fn(*mut ()) = |ptr| unsafe {
-			let ptr: &mut ManuallyDrop<T> =
-				std::mem::transmute(ptr);
+			let ptr: &mut ManuallyDrop<T> = transmute(ptr);
 			ManuallyDrop::drop(ptr);
 		};
 		Self {
@@ -477,7 +500,7 @@ where I: IntoIterator<Item=TypeMemInfo> {
 	let mut mem_slot_uses = HashMap::default();
 	let ptrs = offsets_n_typeids.into_iter().map(|(offset, type_id)| unsafe {
 		let p = buf.as_ptr().offset(offset as isize);
-		*mem_slot_uses.entry(std::mem::transmute(p)).or_insert(0) += 1;
+		*mem_slot_uses.entry(transmute(p)).or_insert(0) += 1;
 		let me_ptr = MePtr::new(p, false);
 		MePuSpace::new(me_ptr, type_id)
 	}).collect();
