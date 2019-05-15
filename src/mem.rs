@@ -26,14 +26,14 @@ struct Ptr {
 	owned: AtomicBool,
 }
 impl Ptr {
-	fn get_clone<T: Clone>(&self) -> T {
+	fn get_clone<T>(&self, clone_fn: fn(&T)->T) -> T {
 		let t: &T = unsafe {
 			transmute(*self.ptr.get())
 		};
-		t.clone()
+		clone_fn(t)
 	}
-	fn get_move_else_clone<T: Clone>(&self) -> T {
-		self.get_move().unwrap_or_else(|| self.get_clone())
+	fn get_move_else_clone<T>(&self, clone_fn: fn(&T)->T) -> T {
+		self.get_move().unwrap_or_else(|| self.get_clone(clone_fn))
 	}
 	fn get_move<T>(&self) -> Option<T> {
 		if self.try_dec() {
@@ -310,38 +310,53 @@ struct ProtoAll {
 }
 
 
-unsafe impl<T> Send for Putter<T> {}
-unsafe impl<T> Sync for Putter<T> {}
-struct Getter<T> {
+unsafe impl<T: PortData> Send for Getter<T> {}
+unsafe impl<T: PortData> Sync for Getter<T> {}
+struct Getter<T: PortData> {
 	p: Arc<ProtoAll>,
 	phantom: PhantomData<T>,
 	id: PortId,
 }
-impl<T> Getter<T> {
-	fn get(&mut self) -> T {
+impl<T: PortData> Getter<T> {
+	fn get_signal(&mut self) {
+		// 1. enter, participate in protocol
+		self.p.w.lock().enter(&self.p.r, self.id);
+
+		// 2. wait for a putter
 		let po_ge = self.p.r.get_po_ge(self.id).expect("HEYa");
+		let putter_id = po_ge.dropbox.recv();
+
+		// 3. release putter
+		match self.p.r.get_space(putter_id) {
+			SpaceRef::MePu(me_pu) => me_pu.getter_done(&self.p.r),
+			SpaceRef::PoPu(po_pu) => po_pu.getters_sema.release(),
+			_ => panic!("bad putter!"),
+		}
+	}
+	fn get(&mut self) -> T {
 
 		// 1. enter, participate in protocol
 		self.p.w.lock().enter(&self.p.r, self.id);
 
-		// 3. wait for a putter
+		// 2. wait for a putter
+		let po_ge = self.p.r.get_po_ge(self.id).expect("HEYa");
 		let putter_id = po_ge.dropbox.recv();
 
 		let datum = match self.p.r.get_space(putter_id) {
 			SpaceRef::MePu(me_pu) => {
-				// 4. get datum
-				let datum = me_pu.ptr.0.get_move().expect("MOVE FAILED");
+				// 3. get datum
+				let datum = me_pu.ptr.0.get_move_else_clone(T::clone_fn);
 
-				// 5. perform cleanup if last getter
+				// 4. perform cleanup if last getter
 				me_pu.getter_done(&self.p.r);
 
 				datum
 			},
 			SpaceRef::PoPu(po_pu) => {
-				// 4. get datum
-				let datum = po_pu.ptr.0.get_move().expect("MOVE FAILED");
+				// 3. get datum
+				let datum = po_pu.ptr.0.get_move_else_clone(T::clone_fn);
 
-				// 5. release port putter
+				// 4. release port putter
 				po_pu.getters_sema.release();
 
 				datum
@@ -349,14 +364,14 @@ impl<T> Getter<T> {
 			_ => panic!("bad putter!"),
 		};
 
-		// 6. return datum
+		// 5. return datum
 		datum
 	}
 }
 
 
-unsafe impl<T> Send for Getter<T> {}
-unsafe impl<T> Sync for Getter<T> {}
+unsafe impl<T> Send for Putter<T> {}
+unsafe impl<T> Sync for Putter<T> {}
 struct Putter<T> {
 	p: Arc<ProtoAll>,
 	phantom: PhantomData<T>,
@@ -500,6 +515,18 @@ fn port_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, po_pu: PortId, me_ge: 
 	po_pu_space.dropbox.send(num_port_getters);
 }
 
+
+trait PortData: Sized {
+	fn clone_fn(_t: &Self) -> Self {
+		panic!("Don't know how to clone this!")
+	}
+}
+impl<T:Clone> PortData for T {
+	fn clone_fn(t: &Self) -> Self {
+		T::clone(t)
+	}
+} 
+
 trait Proto: Sized {
 	type Interface: Sized;
 	fn instantiate() -> Self::Interface;	
@@ -636,8 +663,8 @@ fn test_my_proto() {
 		});
 
 		s.spawn(move |_| {
-			for _ in 0..10 {
-				println!("GOT {:?}", g3.get());
+			for _ in 0..5 {
+				println!("GOT {:?} | {:?} ", g3.get(), g3.get_signal());
 			}
 		});
 	}).expect("WENT OK");
