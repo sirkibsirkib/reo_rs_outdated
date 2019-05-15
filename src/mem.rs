@@ -98,6 +98,36 @@ impl MePuSpace {
 			*self.ptr.0.ptr.get()
 		})
 	}
+	fn swap_mem_ptr(&mut self, other: &MePtr) {
+		unsafe {
+			std::mem::swap(
+				*self.ptr.0.ptr.get(),
+				*other.0.ptr.get(),
+			)
+		}
+
+	}
+	fn dup_mem_ptr(&mut self, original: &MePtr, tracking: &mut MemSlotTracking) {
+		let original_p: *mut () = unsafe {
+			*original.0.ptr.get()
+		};
+		let self_p: *mut () = unsafe {
+			*self.ptr.0.ptr.get()
+		};
+		if self_p == original_p {
+			return; // I've already go the same ptr as them
+		}
+		let o = tracking.mem_ptr_uses.get_mut(&original_p).expect("BAD OWNER");
+		assert!(*o > 0);
+		*o += 1;
+		let a = tracking.mem_ptr_uses.get_mut(&self_p).expect("BAD ADOPTER");
+		assert!(*a > 0);
+		*a -= 1;
+		if *a == 0 {
+			tracking.mem_ptr_uses.remove(&self_p);
+			tracking.mem_ptr_unused.get_mut(&self.type_id).expect("BAD").push(self_p);
+		}
+	}
 }
 
 struct PoPuSpace {
@@ -140,30 +170,6 @@ struct MemSlotTracking {
 	mem_ptr_uses: HashMap<*mut (), usize>,
 	mem_ptr_unused: HashMap<TypeId, Vec<*mut ()>>,
 }
-impl MemSlotTracking {
-	fn adopt_mem_ptr(&mut self, owner: &MePtr, adopter: &MePuSpace) {
-		let owner_p: *mut () = unsafe {
-			*owner.0.ptr.get()
-		};
-		let adopter_p: *mut () = unsafe {
-			*owner.0.ptr.get()
-		};
-		if owner_p == adopter_p {
-			return; // nothing to do here
-		}
-		let o = self.mem_ptr_uses.get_mut(&owner_p).expect("BAD OWNER");
-		assert!(*o > 0);
-		*o += 1;
-		let a = self.mem_ptr_uses.get_mut(&adopter_p).expect("BAD ADOPTER");
-		assert!(*a > 0);
-		*a -= 1;
-		if *a == 0 {
-			self.mem_ptr_uses.remove(&adopter_p);
-			self.mem_ptr_unused.get_mut(&adopter.type_id).expect("BAD").push(adopter_p);
-		}
-	}
-}
-
 struct ProtoW {
 	ready: BitSet,
 	rules: Vec<Rule>,
@@ -346,6 +352,42 @@ who cleans up?
 
 */
 
+// ACTIONS
+fn mem_to_nowhere(r: &ProtoR, me_pu: PortId) {
+	let was_owned = r.me_pu[me_pu].ptr.0.owned.swap(false, Ordering::SeqCst);
+	assert!(was_owned);
+	r.me_pu[me_pu].do_drop(r);
+}
+
+fn mem_to_ports(r: &ProtoR, me_pu: PortId, po_ge: &[PortId]) {
+	let new_getters_left = po_ge.len();
+	if new_getters_left == 0 {
+		return mem_to_nowhere(r, me_pu);
+	}
+	let old_getters_left = r.me_pu[me_pu].getters_left.swap(new_getters_left, Ordering::SeqCst);
+	assert_eq!(0, old_getters_left);
+	for p in po_ge {
+		r.po_ge[*p].dropbox.send(me_pu);
+	}
+}
+
+fn mem_to_mem_and_ports(r: &ProtoR, me_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
+	// me_pu owned is TRUE
+	// me_pu num_getters = 0
+	let mut me_ge_iter = me_ge.iter().cloned();
+	if let Some(first_me_ge) = me_ge_iter.next() {
+		// 1. swap with first mem. this mem becomes the putter
+		let real_putter = r.me_pu[me_pu].swap_mem_ptr(&r.me_pu[first_me_ge].ptr);
+		// r.read
+
+		for g in me_ge_iter {
+			r.me_pu[g].dup_mem_ptr()
+		}
+	} else {
+		return mem_to_ports(r, me_pu, po_ge);
+	}
+}
+
 
 macro_rules! action {
 
@@ -481,14 +523,14 @@ where I: IntoIterator<Item=TypeMemInfo> {
 	let mut offsets_n_typeids = vec![];
 	let mut drop_fns = HashMap::default();
 	for info in infos.into_iter() {
-		let rem = capacity % info.align;
+		let rem = capacity % info.align.max(1);
 		if rem > 0 {
 			capacity += info.align - rem;
 		}
 		println!("@ {:?} for info {:?}", capacity, &info);
 		offsets_n_typeids.push((capacity, info.type_id));
-		drop_fns.entry(info.type_id).or_insert(info.drop_fn);
-		capacity += info.size;
+		drop_fns.insert(info.type_id, info.drop_fn);
+		capacity += info.size.max(1); // make pointers unique even with 0-byte data
 	}
 	drop_fns.shrink_to_fit();
 	println!("CAP IS {:?}", capacity);
