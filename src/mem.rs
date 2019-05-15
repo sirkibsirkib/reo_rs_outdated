@@ -302,6 +302,9 @@ struct ProtoAll {
 	w: Mutex<ProtoW>,
 }
 
+
+unsafe impl<T> Send for Putter<T> {}
+unsafe impl<T> Sync for Putter<T> {}
 struct Getter<T> {
 	p: Arc<ProtoAll>,
 	phantom: PhantomData<T>,
@@ -343,6 +346,10 @@ impl<T> Getter<T> {
 		datum
 	}
 }
+
+
+unsafe impl<T> Send for Getter<T> {}
+unsafe impl<T> Sync for Getter<T> {}
 struct Putter<T> {
 	p: Arc<ProtoAll>,
 	phantom: PhantomData<T>,
@@ -484,7 +491,6 @@ impl Proto for MyProto {
 		let po_pu = po_pu_rng.map(|_| PoPuSpace::new()).collect();
 		let po_ge = po_ge_rng.map(|_| PoGeSpace::new()).collect();
 
-
 		let mem_tracking = MemSlotTracking {
 			mem_ptr_uses,
 			mem_ptr_unused: mem_type_info.keys().cloned().map(|type_id| (type_id, vec![])).collect(),
@@ -494,12 +500,14 @@ impl Proto for MyProto {
 			Rule {
 				guard: bitset!{0, 3},
 				actions: |_r, _w| {
+					mem_to_ports(_r, 0, &[3]);
 				},
 			},
 			Rule {
-				guard: bitset!{1, 2, 4},
-				actions: |_p, _w| {
-
+				guard: bitset!{1, 2, 3, 4},
+				actions: |_r, _w| {
+					port_to_mem_and_ports(_r, _w, 1, &[], &[3]);
+					port_to_mem_and_ports(_r, _w, 2, &[0], &[]);
 				},
 			},
 		];
@@ -582,5 +590,24 @@ where I: IntoIterator<Item=TypeMemInfo> {
 
 #[test]
 fn test_my_proto() {
-	let _x = MyProto::instantiate();
+	let (mut p1, mut p2, mut g3) = MyProto::instantiate();
+	crossbeam::scope(|s| {
+		s.spawn(move |_| {
+			for i in 0..5 {
+				p1.put(i);
+			}
+		});
+
+		s.spawn(move |_| {
+			for i in 0..5 {
+				p2.put(i + 10);
+			}
+		});
+
+		s.spawn(move |_| {
+			for _ in 0..10 {
+				println!("{:?}", g3.get());
+			}
+		});
+	}).expect("WENT OK");
 }
