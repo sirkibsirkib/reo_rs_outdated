@@ -38,6 +38,7 @@ impl MePuSpace {
 		}
 	}
 	fn make_empty(&self, my_id: PortId, r: &ProtoR, w: &mut ProtoActive, do_drop: bool) {
+		println!("::make_empty| id={} do_drop={}", my_id, do_drop);
 		let ptr = unsafe {
 			*self.ptr.get()
 		};
@@ -51,7 +52,7 @@ impl MePuSpace {
 			if do_drop {
 				(info.drop_fn)(ptr);
 			}
-			w.ready.set(my_id + r.mem_id_gap());
+			w.ready.set(my_id + r.mem_id_gap()); // GETTER ready
 			w.free_mems.get_mut(tid).expect("??").push(ptr);
 		}
 	}
@@ -96,6 +97,7 @@ impl PoGeSpace {
 		}
 	}
 	fn get_signal(&self, a: &ProtoAll) {
+		println!("::get_sig| (start)");
 		let msg = self.dropbox.recv();
 		let putter_id: PortId = msg & (!FLAG_YOUR_MOVE) & (!FLAG_OTH_EXIST);
 		let i_move = (msg & FLAG_YOUR_MOVE) > 0;
@@ -141,15 +143,19 @@ impl PoGeSpace {
 		}
 	}
 	fn get<T: PortData>(&self, a: &ProtoAll) -> T {
+		println!("::get| start");
 		let msg = self.dropbox.recv();
 		let putter_id: PortId = msg & (!FLAG_YOUR_MOVE) & (!FLAG_OTH_EXIST);
 		let i_move = (msg & FLAG_YOUR_MOVE) > 0;
 		let conflict = msg & FLAG_OTH_EXIST > 0;
 
+		println!("::get| putter_id={} i_move={} conflict={}", putter_id, i_move, conflict);
+
 		// I requested move, so if it was denied SOMEONE must move
 		assert!(i_move || conflict); 
 		match a.r.get_space(putter_id) {
 			SpaceRef::MePu(me_pu_space) => {
+				println!("::get| mepu branch");
 				let ptr: &T = unsafe {
 					transmute(*me_pu_space.ptr.get())
 				};
@@ -175,6 +181,7 @@ impl PoGeSpace {
 				}
 			},
 			SpaceRef::PoPu(po_pu_space) => {
+				println!("::get| popu branch");
 				let ptr: &T = unsafe {
 					transmute(*po_pu_space.ptr.get())
 				};
@@ -187,6 +194,7 @@ impl PoGeSpace {
 						std::ptr::read(ptr)
 					};
 					// 3. release putter
+					println!("::get| releasing popu");
 					po_pu_space.done_dropbox.send(1);
 					datum
 				} else {
@@ -413,7 +421,7 @@ impl ProtoAll {
 		let mut ready = BitSet::default();
 		let mut free_mems = HashMap::default();
 		for (mem_id, info) in infos.into_iter().enumerate() {
-			ready.set(mem_id + mem_id_gap);
+			ready.set(mem_id + mem_id_gap); // set GETTER
 			let rem = capacity % info.align.max(1);
 			if rem > 0 {
 				capacity += info.align - rem;
@@ -586,6 +594,7 @@ fn mem_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId, me_ge: &
 		unsafe {
 			*me_ge_space.ptr.get() = src;
 		}
+		w.ready.set(g); // PUTTER is ready
 	}
 	// 2. increment memory pointer refs of me_pu
 	let src_refs = w.mem_refs.get_mut(&src).expect("UNKNWN");
@@ -609,11 +618,14 @@ fn port_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, po_pu: PortId, me_ge: 
 
 	// 1. port getters have move-priority
 	let port_mover_id = find_mover(po_ge, r);
+	println!("::port_to_mem_and_ports| port_mover_id={:?}", port_mover_id);
 
 	// 2. populate memory cells if necessary
 	let mut me_ge_iter = me_ge.iter().cloned();
 	if let Some(first_me_ge) = me_ge_iter.next() {
+		println!("::port_to_mem_and_ports| first_me_ge={:?}", first_me_ge);
 		let first_me_ge_space = r.get_me_pu(first_me_ge).expect("wfew");
+		w.ready.set(first_me_ge); // GETTER is ready
 		let tid = &first_me_ge_space.type_id;
 		let info = r.mem_type_info.get(tid).expect("unknown type");
 		// 3. acquire a fresh ptr for this memcell
@@ -626,15 +638,18 @@ fn port_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, po_pu: PortId, me_ge: 
 			let dest = *first_me_ge_space.ptr.get();
 			if port_mover_id.is_some() {
 				// mem clone!
+				println!("::port_to_mem_and_ports| mem clone");
 				(info.clone_fn)(src, dest);
 			} else {
 				// mem move!
+				println!("::port_to_mem_and_ports| mem move");
 				std::ptr::copy(src, dest, info.bytes);
 			}
 		}
 		// 4. copy pointers to other memory cells (if any)
 		// ASSUMES all destinations have dangling pointers
 		for g in me_ge_iter {
+			println!("::port_to_mem_and_ports| mem_g={:?}", g);
 			let me_ge_space = r.get_me_pu(g).expect("gggg");
 			assert_eq!(*tid, me_ge_space.type_id);
 
@@ -642,8 +657,10 @@ fn port_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, po_pu: PortId, me_ge: 
 			unsafe {
 				*me_ge_space.ptr.get() = fresh_ptr;
 			}
+			w.ready.set(g); // GETTER is ready
 			ptr_refs += 1;
 		}
+		println!("::port_to_mem_and_ports| ptr_refs={}", ptr_refs);
 		w.mem_refs.insert(fresh_ptr, ptr_refs);
 	}
 
@@ -652,10 +669,12 @@ fn port_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, po_pu: PortId, me_ge: 
 	// tell the putter the number of MOVERS BUT don't wake them up yet!
 	match (port_mover_id, po_ge.len()) {
 		(Some(m), 1) => {
+			println!("::port_to_mem_and_ports| MOV={},L={}", m, 1);
 			// ONLY mover case. mover will wake putter
 			r.send_to_getter(m, po_pu | FLAG_YOUR_MOVE);
 		},
 		(Some(m), l) => {
+			println!("::port_to_mem_and_ports| MOV={},L={}", m, l);
 			// mover AND cloners case. mover will wake putter
 			po_pu_space.cloner_countdown.store(l-1, Ordering::SeqCst);
 			for g in po_ge.iter().cloned() {
@@ -668,6 +687,7 @@ fn port_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, po_pu: PortId, me_ge: 
 			}
 		},
 		(None, l) => {
+			println!("::port_to_mem_and_ports| MOV=.,L={}", l);
 			// no movers
 			if l == 0 {
 				// no cloners either
@@ -784,7 +804,7 @@ fn test_my_proto() {
 
 		s.spawn(move |_| {
 			for _ in 0..5 {
-				println!("GOT {:?} | {:?}", g3.get(), g3.get_signal());
+				println!("GOT {:?} | {:?}", g3.get(), g3.get());
 			}
 		});
 	}).expect("WENT OK");
