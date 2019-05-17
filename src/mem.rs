@@ -3,18 +3,22 @@
 #![allow(dead_code)]
 
 use hashbrown::HashMap;
-use std::any::TypeId;
-use std::mem::ManuallyDrop;
-use std::cell::UnsafeCell;
+use std::{
+	any::TypeId,
+	mem::{transmute, ManuallyDrop},
+	cell::UnsafeCell,
+	sync::{
+		Arc,
+		atomic::{AtomicUsize, Ordering},
+	},
+	marker::PhantomData,
+};
 use parking_lot::Mutex;
-use std::mem::transmute;
-use std::sync::Arc;
-use std::marker::PhantomData;
 use crate::bitset::BitSet;
 use std_semaphore::Semaphore;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 type PortId = usize;
+type RuleId = usize;
 type DropFnPtr = fn(*mut u8);
 type CloneFnPtr = fn(*mut u8, *mut u8);
 
@@ -49,7 +53,7 @@ impl MePuSpace {
 			if do_drop {
 				(info.drop_fn)(ptr);
 			}
-			w.ready.set(my_id + r.mem_id_gap()); // GETTER ready
+			w.ready.set(my_id + r.mem_get_id_start()); // GETTER ready
 			w.free_mems.get_mut(tid).expect("??").push(ptr);
 		}
 	}
@@ -80,7 +84,7 @@ struct PoPuSpace {
 	ptr: UnsafeCell<*mut u8>,
 	cloner_countdown: AtomicUsize,
 	mover_sema: Semaphore,
-	done_dropbox: MsgDropbox,
+	dropbox: MsgDropbox,
 }
 impl PoPuSpace {
 	fn new() -> Self {
@@ -88,7 +92,7 @@ impl PoPuSpace {
 			ptr: UnsafeCell::new(std::ptr::null_mut()),
 			cloner_countdown: 0.into(),
 			mover_sema: Semaphore::new(0),
-			done_dropbox: MsgDropbox::new(),
+			dropbox: MsgDropbox::new(),
 		}
 	}
 }
@@ -148,7 +152,7 @@ impl PoGeSpace {
 						po_pu_space.mover_sema.acquire();
 					}
 					// 3. release putter. DO drop
-					po_pu_space.done_dropbox.send(1);
+					po_pu_space.dropbox.send(1);
 				} else {
 					let was = po_pu_space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
 					if was == 1 {
@@ -213,7 +217,7 @@ impl PoGeSpace {
 					};
 					// 3. release putter
 					println!("::get| releasing popu");
-					po_pu_space.done_dropbox.send(1);
+					po_pu_space.dropbox.send(1);
 					datum
 				} else {
 					let datum = T::clone_fn(ptr);
@@ -247,20 +251,22 @@ struct Commitment {
 	rule_id: usize,
 	awaiting: usize,
 }
+
 struct ProtoW {
 	rules: Vec<Rule>,
 	active: ProtoActive,
-	committed_rule: Option<Commitment>,
+	commitment: Option<Commitment>,
 	ready_tentative: BitSet,
 }
 impl ProtoW {
+
 	fn enter(&mut self, r: &ProtoR, my_id: PortId) {
 		self.active.ready.set(my_id);
-		// if self.committed_rule.is_some() {
-		// 	// some rule is waiting for completion
-		// 	return;
-		// }
-		// let mut num_tenatives = 0;
+		if self.commitment.is_some() {
+			// some rule is waiting for completion
+			return;
+		}
+		let mut num_tenatives = 0;
 		println!("enter with id={:?}. bitset now {:?}", my_id, &self.active.ready);
 		'outer: loop {
 			'inner: for (rule_id, rule) in self.rules.iter().enumerate() {
@@ -269,24 +275,24 @@ impl ProtoW {
 					self.active.ready.difference_with(&rule.guard);
 					// TODO tentatives
 
-					// for id in self.active.ready.iter_and(&self.ready_tentative) {
-					// 	num_tenatives += 1;
-					// 	match r.get_space(id) {
-					// 		SpaceRef::PoPu(po_pu) => po_pu.dropbox.send(rule_id),
-					// 		SpaceRef::PoGe(po_ge) => po_ge.dropbox.send(rule_id),
-					// 		_ => panic!("bad tentative!"),
-					// 	} 
-					// }
-					// // tenative ports! must wait for them to resolve
-					// if num_tenatives > 0 {
-					// 	self.committed_rule = Some(Commitment {
-					// 		rule_id,
-					// 		awaiting: num_tenatives,
-					// 	});
-					// 	println!("committed to rid {}", rule_id);
-					// 	break 'inner;
-					// }
-					// // no tenatives! proceed
+					for id in self.active.ready.iter_and(&self.ready_tentative) {
+						num_tenatives += 1;
+						match r.get_space(id) {
+							SpaceRef::PoPu(po_pu) => po_pu.dropbox.send(rule_id),
+							SpaceRef::PoGe(po_ge) => po_ge.dropbox.send(rule_id),
+							_ => panic!("bad tentative!"),
+						} 
+					}
+					// tenative ports! must wait for them to resolve
+					if num_tenatives > 0 {
+						self.commitment = Some(Commitment {
+							rule_id,
+							awaiting: num_tenatives,
+						});
+						println!("committed to rid {}", rule_id);
+						break 'inner;
+					}
+					// no tenatives! proceed
 
 					println!("... firing {:?}. READY: {:?} GUARD {:?}", rule_id, &self.active.ready, &rule.guard);
 
@@ -306,7 +312,7 @@ impl ProtoW {
 		}
 	}
 	fn enter_committed(&mut self, r: &ProtoR, tent_it: PortId, expecting_rule: usize) {
-		let comm = self.committed_rule.as_mut().expect("BUT IT MUST BE");
+		let comm: &mut Commitment = self.commitment.as_mut().expect("BUT IT MUST BE");
 		assert_eq!(comm.rule_id, expecting_rule);
 		self.ready_tentative.set_to(tent_it, false);
 		comm.awaiting -= 1;
@@ -314,7 +320,7 @@ impl ProtoW {
 			return; // someone else will finish up
 		}
 		let rule = &self.rules[comm.rule_id];
-		self.committed_rule = None;
+		self.commitment = None;
 		(rule.actions)(r, &mut self.active);
 	}
 }
@@ -342,7 +348,7 @@ impl ProtoR {
 	fn send_to_getter(&self, id: PortId, msg: usize) {
 		self.get_po_ge(id).expect("NOPOGE").dropbox.send(msg)
 	}
-	fn mem_id_gap(&self) -> usize {
+	fn mem_get_id_start(&self) -> usize {
 		self.me_pu.len() + self.po_pu.len() + self.po_ge.len()
 	}
 	fn get_me_pu(&self, id: PortId) -> Option<&MePuSpace> {
@@ -353,6 +359,9 @@ impl ProtoR {
 	}
 	fn get_po_ge(&self, id: PortId) -> Option<&PoGeSpace> {
 		self.po_ge.get(id - self.me_pu.len() - self.po_pu.len())
+	}
+	fn id_is_port(&self, id: PortId) -> bool {
+		self.me_pu.len() <= id && id < self.mem_get_id_start()
 	}
 	fn get_space(&self, mut id: PortId) -> SpaceRef {
 		if id < self.me_pu.len() {
@@ -399,6 +408,83 @@ impl MsgDropbox {
 
 
 
+#[derive(Debug, Copy, Clone)]
+enum PortGroupError {
+	EmptyGroup,
+	MemId(PortId),
+	SynchronousWithRule(RuleId),
+} 
+struct PortGroup {
+	p: Arc<ProtoAll>,
+	leader: PortId,
+	disambiguation: HashMap<RuleId, PortId>,
+}
+impl PortGroup {
+	fn new(p: &Arc<ProtoAll>, port_set: &BitSet) -> Result<PortGroup, PortGroupError> {
+		use PortGroupError::*;
+		let mut w = p.w.lock();
+		// 1. check that NO rule contains multiple ports in the set
+		for (rule_id, rule) in w.rules.iter().enumerate() {
+			if rule.guard.iter_and(port_set).count() > 1 {
+				return Err(SynchronousWithRule(rule_id))
+			}
+		}
+		// 2. check no group id is associated with memory
+		for id in port_set.iter_sparse() {
+			if !p.r.id_is_port(id) {
+				return Err(MemId(id))
+			}
+		}
+		match port_set.iter_sparse().next() {
+			Some(leader) => {
+				let mut disambiguation = HashMap::new();
+				// 2. change occurrences of any port IDs in the set to leader
+				for (rule_id, rule) in w.rules.iter_mut().enumerate() {
+					if let Some(specific_port) = rule.guard.iter_and(port_set).next() {
+						disambiguation.insert(rule_id, specific_port);
+						rule.guard.set_to(specific_port, false);
+						rule.guard.set(leader);
+					}
+				}
+				Ok(PortGroup {
+					p: p.clone(),
+					leader,
+					disambiguation,
+				})
+			},
+			None => Err(EmptyGroup),
+		}
+	}
+	fn await_disambiguate_commit(&self) -> PortId {
+		let space = self.p.r.get_space(self.leader);
+		{
+			let mut w = self.p.w.lock();
+			w.ready_tentative.set(self.leader);
+			w.active.ready.set(self.leader);
+		}
+		let rule_id = match space {
+			SpaceRef::PoPu(po_pu_space) => po_pu_space.dropbox.recv(),
+			SpaceRef::PoGe(po_ge_space) => po_ge_space.dropbox.recv(),
+			_ => panic!("BAD ID"),
+		};
+		*self.disambiguation.get(&rule_id).expect("SHOULD BE OK")
+	}
+}
+impl Drop for PortGroup {
+	// TODO ensure you can't change leaders or something whacky
+	fn drop(&mut self) {
+		let mut w = self.p.w.lock();
+		for (rule_id, rule) in w.rules.iter_mut().enumerate() {
+			if let Some(&specific_port) = self.disambiguation.get(&rule_id) {
+				if self.leader != specific_port {
+					rule.guard.set_to(self.leader, false);
+					rule.guard.set(specific_port);
+				}
+			}
+		}
+	}
+}
+
 // [MePu | PoPu | PoGe | MeGe]
 struct ProtoAll {
 	r: ProtoR,
@@ -406,9 +492,9 @@ struct ProtoAll {
 }
 impl ProtoAll {
 	fn new(mem_infos: Vec<BuildMemInfo>, num_port_putters: usize, num_port_getters: usize, rules: Vec<Rule>) -> Self {
-		let mem_id_gap = mem_infos.len() + num_port_putters + num_port_getters;
+		let mem_get_id_start = mem_infos.len() + num_port_putters + num_port_getters;
 
-		let (mem_data, me_pu, mem_type_info, free_mems, ready) = Self::build_buffer(mem_infos, mem_id_gap);
+		let (mem_data, me_pu, mem_type_info, free_mems, ready) = Self::build_buffer(mem_infos, mem_get_id_start);
 		let po_pu = (0..num_port_putters).map(|_| PoPuSpace::new()).collect();
 		let po_ge = (0..num_port_getters).map(|_| PoGeSpace::new()).collect();
 		let r = ProtoR { mem_data, me_pu, po_pu, po_ge, mem_type_info };
@@ -419,13 +505,12 @@ impl ProtoAll {
 				free_mems,
 				mem_refs: HashMap::default(),
 			},
-			committed_rule: None,
+			commitment: None,
 			ready_tentative: BitSet::default(),
 		});
 		ProtoAll {w, r}
 	}
-
-	fn build_buffer(infos: Vec<BuildMemInfo>, mem_id_gap: usize) ->
+	fn build_buffer(infos: Vec<BuildMemInfo>, mem_get_id_start: usize) ->
 	(
 		Vec<u8>, // buffer
 		Vec<MePuSpace>,
@@ -439,7 +524,7 @@ impl ProtoAll {
 		let mut ready = BitSet::default();
 		let mut free_mems = HashMap::default();
 		for (mem_id, info) in infos.into_iter().enumerate() {
-			ready.set(mem_id + mem_id_gap); // set GETTER
+			ready.set(mem_id + mem_get_id_start); // set GETTER
 			let rem = capacity % info.align.max(1);
 			if rem > 0 {
 				capacity += info.align - rem;
@@ -523,7 +608,7 @@ impl<T> Putter<T> {
 		self.p.w.lock().enter(&self.p.r, self.id);
 
 		// 3. wait for my value to be consumed
-		let msg = po_pu.done_dropbox.recv();
+		let msg = po_pu.dropbox.recv();
 		match msg {
 			0 => Some(datum),
 			1 => {
@@ -545,7 +630,7 @@ impl<T> Putter<T> {
 		self.p.w.lock().enter(&self.p.r, self.id);
 
 		// 3. wait for my value to be consumed
-		let msg = po_pu.done_dropbox.recv();
+		let msg = po_pu.dropbox.recv();
 		std::mem::forget(datum);
 		assert!(msg == 0 || msg == 1); // sanity check
 	}
@@ -701,7 +786,7 @@ fn port_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, po_pu: PortId, me_ge: 
 			// no movers
 			if l == 0 {
 				// no cloners either
-				po_pu_space.done_dropbox.send(0);
+				po_pu_space.dropbox.send(0);
 			} else {
 				po_pu_space.cloner_countdown.store(l, Ordering::SeqCst);
 				for g in po_ge.iter().cloned() {
