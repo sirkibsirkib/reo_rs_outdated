@@ -1,46 +1,66 @@
-Question:
-given a putter P, and a set of getters G:
 
-we know ahead of time the size of G.
-every one in G can decide YES or NO they want to MOVE.
-
-each getter must MOVE or CLONE
-it's not safe to CLONE once someone has MOVED
-
-anyone is able to CLONE, but MOVE is preferable
-
-Solve:
-1. P must know if ANY chose MOVE
-2. P must know when everyone is done cloning and moving
+Simple idea:
+1. getters announce their intention to move (or not) by marking a flag in their PoGe space.
+2. the protocol traverses the PoGe spaces anyways to send messages. in this traversal,
+	the protocol determines who moves (if anyone).
+	the protocol tailors messages to getters
 
 
---------------------------------- SOLUTION
-Assume:
-1. proto knows the number of getters, N
-2. proto has < 2^31 ports per rule
-	(2^32 is how much we bump up)
-0 - - - - - - Nmax - - - - - 2^32
+# Port-putter
+the protocol traverses getters. it decides which getter will move (if any).
 
+## CASE A: N>=1 cloners and 1 mover
+getter-messages carry three bits of information:
+	`(you_move:bool, other_role_exists:bool, rule_id:u62)`
+	the first 2 flags are represented as `(1 << 63)` and `(1 << 62)` respectively.
+	NEW ASSUMPTION: always `Rule_Id < (1 << 62)`
 
-```rust
-MoveGuard(AtomicUsize);
-```
-Process:
-1. N getters call get() and fall asleep on their Dropbox
-1. one putter calls put() and falls asleep on their Dropbox
-1. one of these ports becomes the proto, and sees everyone is ready.
-1. proto initializes the MoveGuard of the putter to value N
-1. proto sends putter identity to every getter
-1. every getter wakes up and finds the putter they want to get from in their Dropbox
-1. every getter calls check() on the MoveGuard of the putter
--- if they wish to move: fetch_add(2^32 - 1)
--- if they dont wish to: fetch_sub(1)
-1. every getter checks the returned result 'r' to determine two things:
--- they were the last if r % (2^32) == 1
--- someone had requested move before them if r > 2^31
-1. the getter that determines that they are last notifies the putter
-1. at most 1 getter exists for which:
--- no previous getter wanted to move
--- they themselves want to move
--- ... this getter waits for the putter
-1. putter wakes up and checks if anyone performed move (r > 0). if so, they send 
+1. proto inits `putter.clone_countdown` to #cloners.
+	proto prepares (but does not send) putter msg `1` ("someone_moving==true")
+	proto sends `(0, 1, rule_id)` to each cloner
+	proto sends `(1, 1, rule_id)` to the mover
+2. getters that receive `(1, 0, rule_id)` know they are cloners
+	they clone first and store the result
+	then they perform `x = fetch_sub(1)` on `putter.clone_countdown` 
+	if this cloner was last:
+		(1 mover case!)
+		this getter releases `putter.mover_sema`
+3. the getter that receives `(1, 1, rule_id)` has been designated the mover,
+	they acquire `putter.mover_sema`
+	they wake up, perform the move
+	they send the prepared message to the putter
+4. the putter receives a prepared message of `1` and knows the datum has been moved
+
+## CASE B: 0 cloners and 1 mover
+
+1. <!-- proto inits `putter.clone_countdown` to #cloners. -->
+	proto prepares (but does not send) putter msg `1` ("someone_moving==true")
+	<!-- proto sends `(0, 1, rule_id)` to each cloner -->
+	proto sends `(1, 0, rule_id)` to the mover
+3. the getter that receives `(1, 0, rule_id)` has been designated the mover,
+	they conclude that there are no cloners
+	they perform the move
+	they send the prepared message to the putter
+4. the putter receives a prepared message of `1` and knows the datum has been moved
+	putter returns
+
+## CASE C: N>=1 cloners and 0 movers
+
+1. proto inits `putter.clone_countdown` to #cloners.
+	proto prepares (but does not send) putter msg `0` ("someone_moving==false")
+	proto sends `(0, 0, rule_id)` to each cloner
+2. getters that receive `(0, 0, rule_id)` know they are cloners
+	they clone first and store the result
+	then they perform `x = fetch_sub(1)` on `putter.clone_countdown` 
+	if this cloner was last:
+		(no movers case!)
+		this getter sends the prepared message to the putter
+4. the putter receives a prepared message of `0` and knows the datum has NOT been moved
+	putter returns the datum or drops it. idc
+
+# Mem-Putter
+in this case, there is no putter waiting. 
+Everything is the same, except there is no putter-msg-dropbox
+the one that usually wakes the putter instead frees the memory. this involves:
+1. dropping the memory if there was no mover
+2. marking the memory as free
