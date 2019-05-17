@@ -37,7 +37,7 @@ impl MePuSpace {
 			type_id,
 		}
 	}
-	fn make_empty(&self, r: &ProtoR, w: &mut ProtoActive, do_drop: bool) {
+	fn make_empty(&self, my_id: PortId, r: &ProtoR, w: &mut ProtoActive, do_drop: bool) {
 		let ptr = unsafe {
 			*self.ptr.get()
 		};
@@ -51,6 +51,7 @@ impl MePuSpace {
 			if do_drop {
 				(info.drop_fn)(ptr);
 			}
+			w.ready.set(my_id + r.mem_id_gap());
 			w.free_mems.get_mut(tid).expect("??").push(ptr);
 		}
 	}
@@ -111,7 +112,7 @@ impl PoGeSpace {
 						me_pu_space.mover_sema.acquire();
 					}
 					// 2. release putter
-					me_pu_space.make_empty(&a.r, &mut a.w.lock().active, true);
+					me_pu_space.make_empty(putter_id, &a.r, &mut a.w.lock().active, true);
 				} else {
 					let was = me_pu_space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
 					if was == 1 {
@@ -161,7 +162,7 @@ impl PoGeSpace {
 						std::ptr::read(ptr)
 					};
 					// 3. release putter. DON'T DROP
-					me_pu_space.make_empty(&a.r, &mut a.w.lock().active, false);
+					me_pu_space.make_empty(putter_id, &a.r, &mut a.w.lock().active, false);
 					datum
 				} else {
 					let datum = T::clone_fn(ptr);
@@ -381,19 +382,16 @@ impl ProtoAll {
 	fn new(mem_infos: Vec<BuildMemInfo>, num_port_putters: usize, num_port_getters: usize, rules: Vec<Rule>) -> Self {
 		let mem_id_gap = mem_infos.len() + num_port_putters + num_port_getters;
 
-		let (mem_data, me_pu, mem_type_info, mem_refs, ready) = Self::build_buffer(mem_infos, mem_id_gap);
+		let (mem_data, me_pu, mem_type_info, free_mems, ready) = Self::build_buffer(mem_infos, mem_id_gap);
 		let po_pu = (0..num_port_putters).map(|_| PoPuSpace::new()).collect();
 		let po_ge = (0..num_port_getters).map(|_| PoGeSpace::new()).collect();
-		let free_mems = mem_type_info.keys().map(|&type_id| {
-			(type_id, vec![])
-		}).collect();
 		let r = ProtoR { mem_data, me_pu, po_pu, po_ge, mem_type_info };
 		let w = Mutex::new(ProtoW {
 			rules,
 			active: ProtoActive {
 				ready,
 				free_mems,
-				mem_refs,
+				mem_refs: HashMap::default(),
 			},
 			committed_rule: None,
 			ready_tentative: BitSet::default(),
@@ -406,13 +404,14 @@ impl ProtoAll {
 		Vec<u8>, // buffer
 		Vec<MePuSpace>,
 		HashMap<TypeId, MemTypeInfo>,
-		HashMap<*mut u8, usize>,
+		HashMap<TypeId, Vec<*mut u8>>,
 		BitSet,
 	) {
 		let mut capacity = 0;
 		let mut offsets_n_typeids = vec![];
 		let mut mem_type_info = HashMap::default();
 		let mut ready = BitSet::default();
+		let mut free_mems = HashMap::default();
 		for (mem_id, info) in infos.into_iter().enumerate() {
 			ready.set(mem_id + mem_id_gap);
 			let rem = capacity % info.align.max(1);
@@ -435,13 +434,12 @@ impl ProtoAll {
 		unsafe {
 			buf.set_len(capacity);
 		}
-		let mut mem_refs = HashMap::default();
 		let ptrs = offsets_n_typeids.into_iter().map(|(offset, type_id)| unsafe {
 			let ptr: *mut u8 = buf.as_mut_ptr().offset(offset as isize);
-			mem_refs.insert(ptr, 1);
+			free_mems.entry(type_id).or_insert(vec![]).push(ptr);
 			MePuSpace::new(ptr, type_id)
 		}).collect();
-		(buf, ptrs, mem_type_info, mem_refs, ready)
+		(buf, ptrs, mem_type_info, free_mems, ready)
 	}
 }
 
@@ -530,7 +528,7 @@ impl<T> Putter<T> {
 // ACTIONS
 fn mem_to_nowhere(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId) {
 	let me_pu_space = r.get_me_pu(me_pu).expect("fewh");
-	me_pu_space.make_empty(r, w, true);
+	me_pu_space.make_empty(me_pu, r, w, true);
 }
 
 fn mem_to_ports(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId, po_ge: &[PortId]) {
@@ -561,7 +559,7 @@ fn mem_to_ports(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId, po_ge: &[PortId]
 			// no movers
 			if l == 0 {
 				// no cloners either
-				me_pu_space.make_empty(r, w, true);
+				me_pu_space.make_empty(me_pu, r, w, true);
 			} else {
 				me_pu_space.cloner_countdown.store(l, Ordering::SeqCst);
 				for g in po_ge.iter().cloned() {
