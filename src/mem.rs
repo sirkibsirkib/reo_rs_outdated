@@ -15,7 +15,6 @@ use std_semaphore::Semaphore;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 type PortId = usize;
-type UntypedPtr = *mut u8;
 type DropFnPtr = fn(*mut u8);
 type CloneFnPtr = fn(*mut u8, *mut u8);
 
@@ -39,9 +38,7 @@ impl MePuSpace {
 	}
 	fn make_empty(&self, my_id: PortId, r: &ProtoR, w: &mut ProtoActive, do_drop: bool) {
 		println!("::make_empty| id={} do_drop={}", my_id, do_drop);
-		let ptr = unsafe {
-			*self.ptr.get()
-		};
+		let ptr = self.get_ptr();
 		let src_refs = w.mem_refs.get_mut(&ptr).expect("UNKNWN");
 		let tid = &self.type_id;
 		*src_refs -= 1;
@@ -55,6 +52,27 @@ impl MePuSpace {
 			w.ready.set(my_id + r.mem_id_gap()); // GETTER ready
 			w.free_mems.get_mut(tid).expect("??").push(ptr);
 		}
+	}
+}
+
+trait HasRacePtr {
+	fn set_ptr(&self, ptr: *mut u8);
+	fn get_ptr(&self) -> *mut u8;
+}
+impl HasRacePtr for PoPuSpace {
+	fn set_ptr(&self, ptr: *mut u8) {
+		unsafe { *self.ptr.get() = ptr }
+	}
+	fn get_ptr(&self) -> *mut u8 {
+		unsafe { *self.ptr.get() }
+	}
+}
+impl HasRacePtr for MePuSpace {
+	fn set_ptr(&self, ptr: *mut u8) {
+		unsafe { *self.ptr.get() = ptr }
+	}
+	fn get_ptr(&self) -> *mut u8 {
+		unsafe { *self.ptr.get() }
 	}
 }
 
@@ -157,7 +175,7 @@ impl PoGeSpace {
 			SpaceRef::MePu(me_pu_space) => {
 				println!("::get| mepu branch");
 				let ptr: &T = unsafe {
-					transmute(*me_pu_space.ptr.get())
+					transmute(me_pu_space.get_ptr())
 				};
 				if i_move {
 					if conflict {
@@ -183,7 +201,7 @@ impl PoGeSpace {
 			SpaceRef::PoPu(po_pu_space) => {
 				println!("::get| popu branch");
 				let ptr: &T = unsafe {
-					transmute(*po_pu_space.ptr.get())
+					transmute(po_pu_space.get_ptr())
 				};
 				if i_move {
 					if conflict {
@@ -498,7 +516,7 @@ impl<T> Putter<T> {
 
 		// 1. make ready my datum & set owned to true
 		unsafe {
-			*po_pu.ptr.get() = transmute(&datum);	
+			po_pu.set_ptr(transmute(&datum));	
 		}
 
 		// 2. enter, participate in protocol
@@ -520,7 +538,7 @@ impl<T> Putter<T> {
 
 		// 1. make ready my datum & set owned to true
 		unsafe {
-			*po_pu.ptr.get() = transmute(&datum);	
+			po_pu.set_ptr(transmute(&datum));	
 		}
 
 		// 2. enter, participate in protocol
@@ -582,18 +600,14 @@ fn mem_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId, me_ge: &
 	println!("mem_to_mem_and_ports");
 	let me_pu_space = r.get_me_pu(me_pu).expect("fewh");
 	let tid = &me_pu_space.type_id;
-	let src = unsafe {
-		*me_pu_space.ptr.get()
-	};
+	let src = me_pu_space.get_ptr();
 
 	// 1. copy pointers to other memory cells
 	// ASSUMES destinations have dangling pointers TODO checks
 	for g in me_ge.iter().cloned() {
 		let me_ge_space = r.get_me_pu(g).expect("gggg");
 		assert_eq!(*tid, me_ge_space.type_id);
-		unsafe {
-			*me_ge_space.ptr.get() = src;
-		}
+		me_ge_space.set_ptr(src);
 		w.ready.set(g); // PUTTER is ready
 	}
 	// 2. increment memory pointer refs of me_pu
@@ -632,19 +646,17 @@ fn port_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, po_pu: PortId, me_ge: 
 		// ASSUMES this memcell has a dangling ptr. TODO use Option<NonNull<_>> later for checking
 		let fresh_ptr = w.free_mems.get_mut(tid).expect("HFEH").pop().expect("NO FREE PTRS, FAM");
 		let mut ptr_refs = 1;
-		unsafe {
-			*first_me_ge_space.ptr.get() = fresh_ptr;
-			let src = *po_pu_space.ptr.get();
-			let dest = *first_me_ge_space.ptr.get();
-			if port_mover_id.is_some() {
-				// mem clone!
-				println!("::port_to_mem_and_ports| mem clone");
-				(info.clone_fn)(src, dest);
-			} else {
-				// mem move!
-				println!("::port_to_mem_and_ports| mem move");
-				std::ptr::copy(src, dest, info.bytes);
-			}
+		first_me_ge_space.set_ptr(fresh_ptr);
+		let src = po_pu_space.get_ptr();
+		let dest = first_me_ge_space.get_ptr();
+		if port_mover_id.is_some() {
+			// mem clone!
+			println!("::port_to_mem_and_ports| mem clone");
+			(info.clone_fn)(src, dest);
+		} else {
+			// mem move!
+			println!("::port_to_mem_and_ports| mem move");
+			unsafe { std::ptr::copy(src, dest, info.bytes) };
 		}
 		// 4. copy pointers to other memory cells (if any)
 		// ASSUMES all destinations have dangling pointers
@@ -654,9 +666,7 @@ fn port_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, po_pu: PortId, me_ge: 
 			assert_eq!(*tid, me_ge_space.type_id);
 
 			// 5. dec refs for existing ptr. free if refs are now 0
-			unsafe {
-				*me_ge_space.ptr.get() = fresh_ptr;
-			}
+			me_ge_space.set_ptr(fresh_ptr);
 			w.ready.set(g); // GETTER is ready
 			ptr_refs += 1;
 		}
