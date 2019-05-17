@@ -1,7 +1,9 @@
-use crate::proto::{Getter, PortGroup, Proto, Putter, RuleId, TryClone};
+use crate::proto::{Getter, PortGroup, Proto, Putter, PortData};
 use crate::rbpa::Var;
 use std::marker::PhantomData;
 use std::mem;
+
+use crate::{RuleId, PortId};
 
 pub trait Decimal: Token {}
 
@@ -39,7 +41,7 @@ pub struct Safe<D: Decimal, T> {
     phantom: PhantomData<D>,
 }
 impl<D: Decimal, T> Safe<D, T> {
-    pub fn new(inner: T) -> Self {
+    pub unsafe fn new(inner: T) -> Self {
         Self {
             inner,
             phantom: PhantomData::default(),
@@ -47,13 +49,13 @@ impl<D: Decimal, T> Safe<D, T> {
     }
 }
 
-impl<D: Decimal, T: TryClone, P: Proto> Safe<D, Getter<T, P>> {
+impl<D: Decimal, T: PortData> Safe<D, Getter<T>> {
     pub fn get<R: Token>(&self, coupon: Coupon<D, R>) -> (T, R) {
         let _ = coupon;
         (self.inner.get(), unsafe { R::fresh() })
     }
 }
-impl<D: Decimal, T: TryClone, P: Proto> Safe<D, Putter<T, P>> {
+impl<D: Decimal, T: PortData> Safe<D, Putter<T>> {
     pub fn put<R: Token>(&self, coupon: Coupon<D, R>, datum: T) -> R {
         let _ = coupon;
         self.inner.put(datum);
@@ -120,7 +122,7 @@ pub trait Transition<P: Proto>: Sized {
 
 pub trait Advance<P: Proto>: Sized {
     type Opts: Transition<P>;
-    fn advance<F, R>(self, port_group: &PortGroup<P>, handler: F) -> R
+    fn advance<F, R>(self, port_group: &PortGroup, handler: F) -> R
     where
         F: FnOnce(Self::Opts) -> R,
     {

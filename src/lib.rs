@@ -4,7 +4,10 @@ pub mod helper;
 pub mod bitset;
 // pub mod primitives;
 // pub mod proto;
-// pub mod rbpa;
-// pub mod simple;
-// pub mod tokens;
-pub mod mem;
+pub mod rbpa;
+pub mod tokens;
+pub mod proto;
+
+
+pub type PortId = usize;
+pub type RuleId = usize;

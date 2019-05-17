@@ -1,9 +1,7 @@
-use crate::proto::RuleId;
+use crate::{RuleId, PortId};
 use hashbrown::HashSet;
 use itertools::izip;
 use std::{cmp, fmt, mem, ops};
-
-type PortId = u32;
 
 // macros
 macro_rules! ss {
