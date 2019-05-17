@@ -201,10 +201,19 @@ impl BitSet {
         }
     }
     pub fn difference_with(&mut self, other: &Self) {
-        for (s, &o) in self.data.iter_mut().zip(other.data.iter()) {
+        for (s, &o) in izip!(self.data.iter_mut(), other.data.iter()) {
             *s &= !o
         }
         self.strip_trailing_zeroes();
+    }
+    pub fn or_with(&mut self, other: &Self) {
+        for (s, &o) in izip!(self.data.iter_mut(), other.data.iter()) {
+            *s |= o
+        }
+        if other.data.len() > self.data.len() {
+            self.data.extend_from_slice(&other.data[..]);
+            self.strip_trailing_zeroes();
+        }
     }
 }
 

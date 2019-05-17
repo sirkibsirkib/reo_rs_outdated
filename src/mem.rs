@@ -416,8 +416,10 @@ enum PortGroupError {
 } 
 struct PortGroup {
 	p: Arc<ProtoAll>,
+	members: HashSet<PortId>,
 	leader: PortId,
-	disambiguation: HashMap<RuleId, PortId>,
+
+	// disambiguation: HashMap<RuleId, PortId>,
 }
 impl PortGroup {
 	fn new(p: &Arc<ProtoAll>, port_set: &BitSet) -> Result<PortGroup, PortGroupError> {
