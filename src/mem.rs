@@ -8,59 +8,19 @@ use std::mem::ManuallyDrop;
 use std::cell::UnsafeCell;
 use parking_lot::Mutex;
 use std::mem::transmute;
-
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::marker::PhantomData;
 use crate::bitset::BitSet;
 use std_semaphore::Semaphore;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 type PortId = usize;
 type UntypedPtr = *mut u8;
-
-// struct Ptr {
-// 	ptr: UnsafeCell<*mut u8>,
-// 	owned: AtomicBool,
-// }
-// impl Ptr {
-// 	fn get_clone<T>(&self, clone_fn: fn(&T)->T) -> T {
-// 		let t: &T = unsafe {
-// 			transmute(*self.ptr.get())
-// 		};
-// 		clone_fn(t)
-// 	}
-// 	fn get_move_else_clone<T>(&self, clone_fn: fn(&T)->T) -> T {
-// 		self.get_move().unwrap_or_else(|| self.get_clone(clone_fn))
-// 	}
-// 	fn get_move<T>(&self) -> Option<T> {
-// 		if self.try_dec() {
-// 			let t: *const T = unsafe {
-// 				transmute(*self.ptr.get())
-// 			};
-// 			Some(unsafe { std::ptr::read(t) })
-// 		} else {
-// 			None
-// 		}
-// 	}
-// 	fn try_dec(&self) -> bool {
-// 		self.owned.swap(false, Ordering::SeqCst)
-// 	}
-// }
-
-// struct MePtr(Ptr);
-// impl MePtr {
-// 	fn new(storage: *const u8, initialized: bool) -> Self {
-// 		Self(Ptr {
-// 			ptr: UnsafeCell::new(unsafe { transmute(storage) }),
-// 			owned: initialized.into(),
-// 		})
-// 	}
-// }
-
 type DropFnPtr = fn(*mut u8);
 type CloneFnPtr = fn(*mut u8, *mut u8);
 
+const FLAG_YOUR_MOVE: usize = (1 << 63);
+const FLAG_OTH_EXIST: usize = (1 << 62);
 
 struct MePuSpace {
 	ptr: UnsafeCell<*mut u8>, // acts as *mut T AND key to mem_slot_meta_map
@@ -88,95 +48,13 @@ impl MePuSpace {
 			// contents need to be dropped! ptr needs to be made free
 			let info = r.mem_type_info.get(tid).expect("unknown type 2");
 			w.mem_refs.remove(&ptr).expect("hhh");
-			if make_empty {
+			if do_drop {
 				(info.drop_fn)(ptr);
 			}
-			w.free_mems.get(tid).expect("??").push(ptr);
+			w.free_mems.get_mut(tid).expect("??").push(ptr);
 		}
 	}
-	// fn do_drop(&self, r: &ProtoR) {
-	// 	let f = r.mem_type_info.get(&self.type_id).expect("BAD TYPE for FN MAP").drop_fn;
-	// 	(f)(unsafe {
-	// 		*self.ptr.0.ptr.get()
-	// 	})
-	// }
-	// fn swap_mem_ptr(&self, other: &MePtr) {
-	// 	unsafe {
-	// 		std::mem::swap(
-	// 			&mut *self.ptr.0.ptr.get(),
-	// 			&mut *other.0.ptr.get(),
-	// 		)
-	// 	}
-	// }
-	// fn raw_move_port_ptr(&self, ptr: &PoPtr, mem_type_info: &HashMap<TypeId, MemTypeInfo>, tracking: &mut MemSlotTracking) {
-	// 	let bytes = mem_type_info.get(&self.type_id).expect("HEYYAY").bytes;
-	// 	unsafe {
-	// 		let mut raw_dest = *self.ptr.0.ptr.get();
-	// 		// 1. ensure the dest ptr has exactly ONE user
-	// 		let current_uses = tracking.mem_ptr_uses.get_mut(&raw_dest).expect("HHHF");
-	// 		assert!(*current_uses >= 1);
-	// 		if *current_uses > 1 {
-	// 			// 2. stop using this current ptr
-	// 			*current_uses -= 1;
-	// 			// 3. get a new (currently unused) pointer, mark it as having 1 user
-	// 			let fresh_raw_ptr = tracking.mem_ptr_unused.get_mut(&self.type_id).expect("BLAR").pop().expect("HG");
-	// 			tracking.mem_ptr_uses.insert(fresh_raw_ptr, 1);
-	// 			*self.ptr.0.ptr.get() = fresh_raw_ptr;
-	// 			raw_dest = fresh_raw_ptr;
-	// 		}
-	// 		let raw_src = *ptr.0.ptr.get();
-	// 		// 4. copy value from the stack to where the raw mem_ptr points
-	// 		std::ptr::copy(raw_src, raw_dest, bytes);
-	// 	}
-	// }
-	// fn dup_mem_ptr(&self, original: &MePtr, tracking: &mut MemSlotTracking) {
-	// 	let original_p: *mut u8 = unsafe {
-	// 		*original.0.ptr.get()
-	// 	};
-	// 	let self_p: *mut u8 = unsafe {
-	// 		*self.ptr.0.ptr.get()
-	// 	};
-	// 	if self_p == original_p {
-	// 		return; // I've already go the same ptr as them
-	// 	}
-	// 	let o = tracking.mem_ptr_uses.get_mut(&original_p).expect("BAD OWNER");
-	// 	assert!(*o > 0);
-	// 	*o += 1;
-	// 	let a = tracking.mem_ptr_uses.get_mut(&self_p).expect("BAD ADOPTER");
-	// 	assert!(*a > 0);
-	// 	*a -= 1;
-	// 	if *a == 0 {
-	// 		tracking.mem_ptr_uses.remove(&self_p);
-	// 		tracking.mem_ptr_unused.get_mut(&self.type_id).expect("BAD").push(self_p);
-	// 	}
-	// }
 }
-
-
-// struct PoPtr {
-// 	ptr: UnsafeCell<*mut u8>,
-// }
-// impl PoPtr {
-// 	fn new() -> Self {
-// 		Self {
-// 			ptr: UnsafeCell::new(std::ptr::null_mut()),
-// 			owned: false.into(),
-// 		}
-// 	}
-// 	fn stack_put<T>(&self, datum_ref: &T) {
-// 		unsafe {
-// 			*self.ptr.get() = transmute(datum_ref);
-// 		}
-// 		assert_eq!(false, self.owned.swap(true, Ordering::SeqCst));
-// 	}
-// 	fn port_get<T>(&self, clone_fn: fn(&T)->T) -> T {
-// 		let prev_owned = self.owned.swap(false, Ordering::SeqCst);
-// 		if prev_owned {
-// 			// move
-			
-// 		}
-// 	}
-// }
 
 struct PoPuSpace {
 	ptr: UnsafeCell<*mut u8>,
@@ -207,7 +85,9 @@ impl PoGeSpace {
 		}
 	}
 	fn get_move_intention(&self) -> bool {
-		*self.move_intention.get()
+		unsafe {
+			*self.move_intention.get()
+		}
 	}
 	fn set_move_intention(&self, move_intention: bool) {
 		unsafe {
@@ -349,11 +229,11 @@ struct ProtoW {
 impl ProtoW {
 	fn enter(&mut self, r: &ProtoR, my_id: PortId) {
 		self.active.ready.set(my_id);
-		if self.committed_rule.is_some() {
-			// some rule is waiting for completion
-			return;
-		}
-		let mut num_tenatives = 0;
+		// if self.committed_rule.is_some() {
+		// 	// some rule is waiting for completion
+		// 	return;
+		// }
+		// let mut num_tenatives = 0;
 		println!("enter with id={:?}. bitset now {:?}", my_id, &self.active.ready);
 		'outer: loop {
 			'inner: for (rule_id, rule) in self.rules.iter().enumerate() {
@@ -532,7 +412,6 @@ impl ProtoAll {
 		let mut capacity = 0;
 		let mut offsets_n_typeids = vec![];
 		let mut mem_type_info = HashMap::default();
-		let mut mem_refs: HashMap<*mut u8, usize> = HashMap::default();
 		let mut ready = BitSet::default();
 		for (mem_id, info) in infos.into_iter().enumerate() {
 			ready.set(mem_id + mem_id_gap);
@@ -656,9 +535,6 @@ fn mem_to_nowhere(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId) {
 
 fn mem_to_ports(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId, po_ge: &[PortId]) {
 	let me_pu_space = r.get_me_pu(me_pu).expect("fewh");
-	let src = unsafe {
-		*me_pu_space.ptr.get()
-	};
 
 	// 1. port getters have move-priority
 	let port_mover_id = find_mover(po_ge, r);
@@ -681,17 +557,18 @@ fn mem_to_ports(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId, po_ge: &[PortId]
 				r.send_to_getter(g, payload);
 			}
 		},
-		(None, l) if l>=1 => {
-			// ONLY cloners case. last cloner will wake putter
-			me_pu_space.cloner_countdown.store(l, Ordering::SeqCst);
-			for g in po_ge.iter().cloned() {
-				r.send_to_getter(g, me_pu);
+		(None, l) => {
+			// no movers
+			if l == 0 {
+				// no cloners either
+				me_pu_space.make_empty(r, w, true);
+			} else {
+				me_pu_space.cloner_countdown.store(l, Ordering::SeqCst);
+				for g in po_ge.iter().cloned() {
+					r.send_to_getter(g, me_pu);
+				}
 			}
 		},
-		(None, 0) => {
-			// zero getters at all case.
-			me_pu_space.make_empty(r, w, true);
-		}
 	}
 }
 
@@ -718,8 +595,6 @@ fn mem_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId, me_ge: &
 	mem_to_ports(r, w, me_pu, po_ge);
 }
 
-const FLAG_YOUR_MOVE: usize = (1 << 63);
-const FLAG_OTH_EXIST: usize = (1 << 62);
 
 fn find_mover(getters: &[PortId], r: &ProtoR) -> Option<PortId> {
 	getters.iter().filter(|id| {
@@ -745,7 +620,7 @@ fn port_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, po_pu: PortId, me_ge: 
 		let info = r.mem_type_info.get(tid).expect("unknown type");
 		// 3. acquire a fresh ptr for this memcell
 		// ASSUMES this memcell has a dangling ptr. TODO use Option<NonNull<_>> later for checking
-		let fresh_ptr = w.free_mems.get(tid).expect("HFEH").pop().expect("NO FREE PTRS, FAM");
+		let fresh_ptr = w.free_mems.get_mut(tid).expect("HFEH").pop().expect("NO FREE PTRS, FAM");
 		let mut ptr_refs = 1;
 		unsafe {
 			*first_me_ge_space.ptr.get() = fresh_ptr;
@@ -794,18 +669,18 @@ fn port_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, po_pu: PortId, me_ge: 
 				r.send_to_getter(g, payload);
 			}
 		},
-		(None, l) if l>=1 => {
-			// ONLY cloners case. last cloner will wake putter
-			po_pu_space.cloner_countdown.store(l, Ordering::SeqCst);
-			for g in po_ge.iter().cloned() {
-				r.send_to_getter(g, po_pu);
+		(None, l) => {
+			// no movers
+			if l == 0 {
+				// no cloners either
+				po_pu_space.done_dropbox.send(0);
+			} else {
+				po_pu_space.cloner_countdown.store(l, Ordering::SeqCst);
+				for g in po_ge.iter().cloned() {
+					r.send_to_getter(g, po_pu);
+				}
 			}
 		},
-		(None, 0) => {
-			// zero getters at all case.
-			// wake up the putter myself.
-			po_pu_space.done_dropbox.send(0);
-		}
 	}
 }
 
@@ -918,27 +793,27 @@ fn test_my_proto() {
 }
 
 
-struct StateSet {
-	vals: BitSet, // 0 for False, 1 for True
-	mask: BitSet, // 1 for X (overrides val)
-}
-impl StateSet {
-	fn satisfied(&self, state: &BitSet) -> bool {
-		unimplemented!()
-	}
-}
+// struct StateSet {
+// 	vals: BitSet, // 0 for False, 1 for True
+// 	mask: BitSet, // 1 for X (overrides val)
+// }
+// impl StateSet {
+// 	fn satisfied(&self, state: &BitSet) -> bool {
+// 		unimplemented!()
+// 	}
+// }
 
 
-/*TODO
-1. port groups: creation, destruction and interaction
-2. (runtime) stateset as (mask: BitSet, vals: BitSet)
-3. imagine the token api jazz
-*/
-struct PortGroup {
-	leader: PortId,
-}
-impl PortGroup {
+// TODO
+// 1. port groups: creation, destruction and interaction
+// 2. (runtime) stateset as (mask: BitSet, vals: BitSet)
+// 3. imagine the token api jazz
 
-}
+// struct PortGroup {
+// 	leader: PortId,
+// }
+// impl PortGroup {
 
-// TODO instead of a hashmap for typeids, rather use Rc
+// }
+
+// // TODO instead of a hashmap for typeids, rather use Rc
