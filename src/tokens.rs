@@ -36,26 +36,36 @@ def_decimal![D8, E8];
 def_decimal![D9, E9];
 
 pub struct Safe<D: Decimal, T> {
-    // port_ids: Arc<Vec<PortId>>,
+    original_id: PortId,
     inner: T,
     phantom: PhantomData<D>,
 }
-impl<D: Decimal, T> Safe<D, T> {
-    pub unsafe fn new(inner: T) -> Self {
+
+impl<D: Decimal, T: PortData> Safe<D, Getter<T>> {
+    pub unsafe fn new(mut inner: Getter<T>, leader: PortId) -> Self {
+        let original_id = inner.id;
+        inner.id = leader;
         Self {
             inner,
             phantom: PhantomData::default(),
+            original_id,
         }
     }
-}
-
-impl<D: Decimal, T: PortData> Safe<D, Getter<T>> {
     pub fn get<R: Token>(&self, coupon: Coupon<D, R>) -> (T, R) {
         let _ = coupon;
         (self.inner.get(), unsafe { R::fresh() })
     }
 }
 impl<D: Decimal, T: PortData> Safe<D, Putter<T>> {
+    pub unsafe fn new(mut inner: Putter<T>, leader: PortId) -> Self {
+        let original_id = inner.id;
+        inner.id = leader;
+        Self {
+            inner,
+            phantom: PhantomData::default(),
+            original_id,
+        }
+    }
     pub fn put<R: Token>(&self, coupon: Coupon<D, R>, datum: T) -> R {
         let _ = coupon;
         self.inner.put(datum);
@@ -128,7 +138,10 @@ pub trait Advance<P: Proto>: Sized {
     {
         let choice: Self::Opts = match mem::size_of::<Self::Opts>() {
             0 => unsafe { mem::uninitialized() },
-            _ => port_group.ready_wait_determine(),
+            _ => {
+                let rule_id = port_group.ready_wait_determine_commit();
+                Transition::from_rule_id(rule_id)
+            },
         };
         handler(choice)
     }

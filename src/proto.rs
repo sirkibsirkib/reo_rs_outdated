@@ -2,7 +2,6 @@
 ////////// DEBUG DEBUG
 #![allow(dead_code)]
 
-use crate::tokens::Safe;
 use crate::{PortId, RuleId};
 use hashbrown::HashMap;
 use std::{
@@ -11,7 +10,7 @@ use std::{
 	cell::UnsafeCell,
 	sync::{
 		Arc,
-		atomic::{AtomicUsize, Ordering},
+		atomic::{AtomicUsize, Ordering, AtomicPtr},
 	},
 	marker::PhantomData,
 };
@@ -26,7 +25,7 @@ const FLAG_YOUR_MOVE: usize = (1 << 63);
 const FLAG_OTH_EXIST: usize = (1 << 62);
 
 struct MePuSpace {
-	ptr: UnsafeCell<*mut u8>, // acts as *mut T AND key to mem_slot_meta_map
+	ptr: AtomicPtr<u8>, // acts as *mut T AND key to mem_slot_meta_map
 	cloner_countdown: AtomicUsize,
 	mover_sema: Semaphore,
 	type_id: TypeId,
@@ -65,23 +64,23 @@ trait HasRacePtr {
 }
 impl HasRacePtr for PoPuSpace {
 	fn set_ptr(&self, ptr: *mut u8) {
-		unsafe { *self.ptr.get() = ptr }
+		self.ptr.store(ptr, Ordering::SeqCst);
 	}
 	fn get_ptr(&self) -> *mut u8 {
-		unsafe { *self.ptr.get() }
+		self.ptr.load(Ordering::SeqCst)
 	}
 }
 impl HasRacePtr for MePuSpace {
 	fn set_ptr(&self, ptr: *mut u8) {
-		unsafe { *self.ptr.get() = ptr }
+		self.ptr.store(ptr, Ordering::SeqCst);
 	}
 	fn get_ptr(&self) -> *mut u8 {
-		unsafe { *self.ptr.get() }
+		self.ptr.load(Ordering::SeqCst)
 	}
 }
 
 struct PoPuSpace {
-	ptr: UnsafeCell<*mut u8>,
+	ptr: AtomicPtr<u8>,
 	cloner_countdown: AtomicUsize,
 	mover_sema: Semaphore,
 	dropbox: MsgDropbox,
@@ -89,7 +88,7 @@ struct PoPuSpace {
 impl PoPuSpace {
 	fn new() -> Self {
 		Self {
-			ptr: UnsafeCell::new(std::ptr::null_mut()),
+			ptr: AtomicPtr::new(std::ptr::null_mut()),
 			cloner_countdown: 0.into(),
 			mover_sema: Semaphore::new(0),
 			dropbox: MsgDropbox::new(),
@@ -259,7 +258,6 @@ struct ProtoW {
 	ready_tentative: BitSet,
 }
 impl ProtoW {
-
 	fn enter(&mut self, r: &ProtoR, my_id: PortId) {
 		self.active.ready.set(my_id);
 		if self.commitment.is_some() {
@@ -270,9 +268,11 @@ impl ProtoW {
 		println!("enter with id={:?}. bitset now {:?}", my_id, &self.active.ready);
 		'outer: loop {
 			'inner: for (rule_id, rule) in self.rules.iter().enumerate() {
-				if self.active.ready.is_superset(&rule.guard) {
+				if self.active.ready.is_superset(&rule.guard_ready) && (rule.guard_fn)(r) {
 					// committing to this rule!
-					self.active.ready.difference_with(&rule.guard);
+
+					// make all the guarded bits UNready at once.
+					self.active.ready.difference_with(&rule.guard_ready);
 					// TODO tentatives
 
 					for id in self.active.ready.iter_and(&self.ready_tentative) {
@@ -294,11 +294,11 @@ impl ProtoW {
 					}
 					// no tenatives! proceed
 
-					println!("... firing {:?}. READY: {:?} GUARD {:?}", rule_id, &self.active.ready, &rule.guard);
+					println!("... firing {:?}. READY: {:?} GUARD {:?}", rule_id, &self.active.ready, &rule.guard_ready);
 
-					(rule.actions)(r, &mut self.active);
-					println!("... FIRE COMPLETE {:?}. READY: {:?} GUARD {:?}", rule_id, &self.active.ready, &rule.guard);
-					if !rule.guard.test(my_id) {
+					(rule.fire_fn)(r, &mut self.active);
+					println!("... FIRE COMPLETE {:?}. READY: {:?} GUARD {:?}", rule_id, &self.active.ready, &rule.guard_ready);
+					if !rule.guard_ready.test(my_id) {
 						// job done!
 						break 'inner;
 					} else {
@@ -321,13 +321,14 @@ impl ProtoW {
 		}
 		let rule = &self.rules[comm.rule_id];
 		self.commitment = None;
-		(rule.actions)(r, &mut self.active);
+		(rule.fire_fn)(r, &mut self.active);
 	}
 }
 
 struct Rule {
-	guard: BitSet,
-	actions: fn(&ProtoR, &mut ProtoActive),
+	guard_ready: BitSet,
+	guard_fn: fn(&ProtoR) -> bool,
+	fire_fn: fn(&ProtoR, &mut ProtoActive),
 }
 
 struct MemTypeInfo {
@@ -363,19 +364,14 @@ impl ProtoR {
 	fn id_is_port(&self, id: PortId) -> bool {
 		self.me_pu.len() <= id && id < self.mem_get_id_start()
 	}
-	fn get_space(&self, mut id: PortId) -> SpaceRef {
-		if id < self.me_pu.len() {
-			return SpaceRef::MePu(unsafe { self.me_pu.get_unchecked(id) })
-		}
-		id -= self.me_pu.len();
-		if id < self.po_pu.len() {
-			return SpaceRef::PoPu(unsafe { self.po_pu.get_unchecked(id) })
-		}
-		id -= self.po_pu.len();
-		if id < self.po_ge.len() {
-			return SpaceRef::PoGe(unsafe { self.po_ge.get_unchecked(id) })
-		}
-		SpaceRef::None
+	fn get_space(&self, id: PortId) -> SpaceRef {
+		use SpaceRef::*;
+		let mpl = self.me_pu.len();
+		let ppl = self.po_pu.len();
+		self.me_pu.get(id).map(MePu)
+		.or(self.po_pu.get(id - mpl).map(PoPu))
+		.or(self.po_ge.get(id - mpl - ppl).map(PoGe))
+		.unwrap_or(None)
 	}
 }
 
@@ -426,12 +422,12 @@ pub struct PortGroup {
 	disambiguation: HashMap<RuleId, PortId>,
 }
 impl PortGroup {
-	fn new(p: &Arc<ProtoAll>, port_set: &BitSet) -> Result<PortGroup, PortGroupError> {
+	unsafe fn new(p: &Arc<ProtoAll>, port_set: &BitSet) -> Result<PortGroup, PortGroupError> {
 		use PortGroupError::*;
 		let mut w = p.w.lock();
 		// 1. check that NO rule contains multiple ports in the set
 		for (rule_id, rule) in w.rules.iter().enumerate() {
-			if rule.guard.iter_and(port_set).count() > 1 {
+			if rule.guard_ready.iter_and(port_set).count() > 1 {
 				return Err(SynchronousWithRule(rule_id))
 			}
 		}
@@ -446,10 +442,10 @@ impl PortGroup {
 				let mut disambiguation = HashMap::new();
 				// 2. change occurrences of any port IDs in the set to leader
 				for (rule_id, rule) in w.rules.iter_mut().enumerate() {
-					if let Some(specific_port) = rule.guard.iter_and(port_set).next() {
+					if let Some(specific_port) = rule.guard_ready.iter_and(port_set).next() {
 						disambiguation.insert(rule_id, specific_port);
-						rule.guard.set_to(specific_port, false);
-						rule.guard.set(leader);
+						rule.guard_ready.set_to(specific_port, false);
+						rule.guard_ready.set(leader);
 					}
 				}
 				Ok(PortGroup {
@@ -461,7 +457,7 @@ impl PortGroup {
 			None => Err(EmptyGroup),
 		}
 	}
-	pub fn await_disambiguate_commit(&self) -> PortId {
+	pub fn ready_wait_determine_commit(&self) -> PortId {
 		let space = self.p.r.get_space(self.leader);
 		{
 			let mut w = self.p.w.lock();
@@ -483,8 +479,8 @@ impl Drop for PortGroup {
 		for (rule_id, rule) in w.rules.iter_mut().enumerate() {
 			if let Some(&specific_port) = self.disambiguation.get(&rule_id) {
 				if self.leader != specific_port {
-					rule.guard.set_to(self.leader, false);
-					rule.guard.set(specific_port);
+					rule.guard_ready.set_to(self.leader, false);
+					rule.guard_ready.set(specific_port);
 				}
 			}
 		}
@@ -547,12 +543,18 @@ impl ProtoAll {
 		mem_type_info.shrink_to_fit();
 		println!("CAP IS {:?}", capacity);
 
-		let mut buf: Vec<u8> = Vec::with_capacity(capacity);
+		// meta-offset used to ensure the start of the vec alsigns to 64-bits (covers all cases)
+		// almost always unnecessary
+		let mut buf: Vec<u8> = Vec::with_capacity(capacity + 8);
+		let mut meta_offset: isize = 0;
+		while (unsafe { buf.as_ptr().offset(meta_offset) }) as usize % 8 != 0 {
+			meta_offset += 1;
+		}
 		unsafe {
 			buf.set_len(capacity);
 		}
 		let ptrs = offsets_n_typeids.into_iter().map(|(offset, type_id)| unsafe {
-			let ptr: *mut u8 = buf.as_mut_ptr().offset(offset as isize);
+			let ptr: *mut u8 = buf.as_mut_ptr().offset(offset as isize + meta_offset);
 			free_mems.entry(type_id).or_insert(vec![]).push(ptr);
 			MePuSpace::new(ptr, type_id)
 		}).collect();
@@ -566,7 +568,7 @@ unsafe impl<T: PortData> Sync for Getter<T> {}
 pub struct Getter<T: PortData> {
 	p: Arc<ProtoAll>,
 	phantom: PhantomData<T>,
-	id: PortId,
+	pub(crate) id: PortId,
 }
 impl<T: PortData> Getter<T> {
 	pub fn get_signal(&mut self) {
@@ -599,7 +601,7 @@ unsafe impl<T> Sync for Putter<T> {}
 pub struct Putter<T> {
 	p: Arc<ProtoAll>,
 	phantom: PhantomData<T>,
-	id: PortId,
+	pub(crate) id: PortId,
 }
 impl<T> Putter<T> {
 	pub fn put(&mut self, datum: T) -> Option<T> {
@@ -830,14 +832,16 @@ impl Proto for MyProto {
 		let num_port_getters = 1;
 		let rules = vec![
 			Rule {
-				guard: bitset!{0, 3},
-				actions: |_r, _w| {
+				guard_ready: bitset!{0, 3},
+				guard_fn: |_r| true,
+				fire_fn: |_r, _w| {
 					mem_to_ports(_r, _w, 0, &[3]);
 				},
 			},
 			Rule {
-				guard: bitset!{1, 2, 3, 4},
-				actions: |_r, _w| {
+				guard_ready: bitset!{1, 2, 3, 4},
+				guard_fn: |_r| true,
+				fire_fn: |_r, _w| {
 					port_to_mem_and_ports(_r, _w, 1, &[], &[3]);
 					port_to_mem_and_ports(_r, _w, 2, &[0], &[]);
 				},
@@ -910,27 +914,3 @@ fn test_my_proto() {
 		});
 	}).expect("WENT OK");
 }
-// struct StateSet {
-// 	vals: BitSet, // 0 for False, 1 for True
-// 	mask: BitSet, // 1 for X (overrides val)
-// }
-// impl StateSet {
-// 	fn satisfied(&self, state: &BitSet) -> bool {
-// 		unimplemented!()
-// 	}
-// }
-
-
-// TODO
-// 1. port groups: creation, destruction and interaction
-// 2. (runtime) stateset as (mask: BitSet, vals: BitSet)
-// 3. imagine the token api jazz
-
-// struct PortGroup {
-// 	leader: PortId,
-// }
-// impl PortGroup {
-
-// }
-
-// // TODO instead of a hashmap for typeids, rather use Rc

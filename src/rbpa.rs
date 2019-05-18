@@ -1,12 +1,13 @@
-use crate::{RuleId, PortId};
+use smallvec::{SmallVec, smallvec};
+use crate::{AbstractRuleId, PortId};
 use hashbrown::HashSet;
 use itertools::izip;
 use std::{cmp, fmt, mem, ops};
 
 // macros
 macro_rules! ss {
-    ($arr:expr) => {{
-        StateSet { predicate: $arr }
+    ($( $arr:expr ),* ) => {{
+        StateSet { predicate: smallvec![ $($arr),*] }
     }};
 }
 
@@ -34,6 +35,7 @@ pub enum Var {
     F, // specific values corresponding to boolean true and false,
     X, // generic over T and F. Interpreted as an unspecified value.
 }
+
 impl PartialOrd for Var {
     // ordering is on SPECIFICITY: X<T, X<F, T is not comparable to F.
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
@@ -75,7 +77,7 @@ pub struct Rbpa {
     /*  A mask for which memory-variable indices are _irrelevant_.
     where the value is `false`, T==F==X. */
     mask: StateMask,
-    rules: Vec<Rule>,
+    rules: Vec<AbstractRule>,
 }
 impl Rbpa {
     pub fn mask_irrelevant_vars(&mut self) -> bool {
@@ -153,9 +155,9 @@ impl Rbpa {
     }
 }
 
-#[derive(Eq, PartialEq, Copy, Clone, Hash)]
+#[derive(Eq, PartialEq, Clone, Hash)]
 pub struct StateSet {
-    predicate: [Var; Self::LEN],
+    predicate: SmallVec<[Var;16]>,
 }
 impl PartialOrd for StateSet {
     fn partial_cmp(&self, rhs: &Self) -> Option<cmp::Ordering> {
@@ -214,14 +216,14 @@ impl fmt::Debug for StateSet {
 }
 
 #[derive(Clone)]
-struct Rule {
+struct AbstractRule {
     // invariant: an X in assignment implies an X in guard at same position
     guard: StateSet,
     port: Option<PortId>,
     assign: StateSet,
-    ids: Vec<RuleId>,
+    ids: Vec<AbstractRuleId>,
 }
-impl Rule {
+impl AbstractRule {
     // apply the given rule to this state set. Return the new state set
     pub fn apply(&self, set: &StateSet) -> Option<StateSet> {
         let mut res = set.clone();
@@ -256,7 +258,7 @@ impl Rule {
     }
 
     // if these two rules can be represented by one, return that rule
-    pub fn try_merge(&self, other: &Self) -> Option<Rule> {
+    pub fn try_merge(&self, other: &Self) -> Option<AbstractRule> {
         let g_cmp = self.guard.partial_cmp(&other.guard);
         let a_cmp = self.assign.partial_cmp(&other.assign);
 
@@ -287,7 +289,7 @@ impl Rule {
                 }
                 let mut ids = self.ids.clone();
                 ids.extend(&other.ids[..]);
-                Some(Rule::new(
+                Some(AbstractRule::new(
                     guard,
                     self.port.clone(),
                     self.assign.clone(),
@@ -299,7 +301,7 @@ impl Rule {
     }
     // return a new rule that represents two rules applied in the sequence: [self, other]
     // prodecure fails if provided rules that cannot be composed. Eg: [F->F, T->T]
-    pub fn compose(&self, other: &Self) -> Option<Rule> {
+    pub fn compose(&self, other: &Self) -> Option<AbstractRule> {
         // println!("composing {:?} and {:?}", self, other);
         if !self.can_precede(other) {
             return None;
@@ -335,13 +337,13 @@ impl Rule {
                 }
             }
         }
-        Some(Rule::new(guard, port, assign, other.ids.clone()))
+        Some(AbstractRule::new(guard, port, assign, other.ids.clone()))
     }
     pub fn new(
         guard: StateSet,
         port: Option<PortId>,
         mut assign: StateSet,
-        ids: Vec<RuleId>,
+        ids: Vec<AbstractRuleId>,
     ) -> Self {
         assign.make_specific_wrt(&guard);
         Self {
@@ -368,7 +370,7 @@ impl Rule {
         true
     }
 }
-impl fmt::Debug for Rule {
+impl fmt::Debug for AbstractRule {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self.port {
             Some(p) => write!(f, "{:?} ={:?}=> {:?}", &self.guard, p, &self.assign)?,
@@ -401,16 +403,16 @@ pub fn project(mut r: Rbpa, atomic_ports: HashSet<PortId>) -> Rbpa {
 }
 
 pub fn wahey() {
-    println!("RULE {:?}", mem::size_of::<Rule>());
+    println!("RULE {:?}", mem::size_of::<AbstractRule>());
     println!("Rbpa {:?}", mem::size_of::<Rbpa>());
     println!("StateSet {:?}", mem::size_of::<StateSet>());
     use Var::*;
     let rba = Rbpa {
         rules: vec![
-            Rule::new(ss![[X, X, F]], Some(1), ss![[X, X, T]], vec![0]),
-            Rule::new(ss![[X, F, T]], Some(1), ss![[X, T, F]], vec![1]),
-            Rule::new(ss![[F, T, T]], Some(3), ss![[T, F, F]], vec![2]),
-            Rule::new(ss![[T, T, T]], Some(4), ss![[F, F, F]], vec![3]),
+            AbstractRule::new(ss![X, X, F], Some(1), ss![X, X, T], vec![0]),
+            AbstractRule::new(ss![X, F, T], Some(1), ss![X, T, F], vec![1]),
+            AbstractRule::new(ss![F, T, T], Some(3), ss![T, F, F], vec![2]),
+            AbstractRule::new(ss![T, T, T], Some(4), ss![F, F, F], vec![3]),
         ],
         mask: StateMask {
             relevant_index: [true; StateSet::LEN],
@@ -424,11 +426,9 @@ pub fn wahey() {
     let atomic_ports = hashset! {1,2};
     let start = std::time::Instant::now();
     let rba2 = project(rba, atomic_ports.clone());
-    // rba2.broaden_rules(&[ss![[F,F,F]]]);
-    // println!("AFTER BROADENING {:#?}", &rba2);
     println!("ELAPSED {:?}", start.elapsed());
     println!("AFTER: {:#?}", rba2);
-    pair_test(ss![[F, F, F]], org, rba2, atomic_ports);
+    pair_test(ss![F, F, F], org, rba2, atomic_ports);
 }
 
 #[derive(Clone, derive_new::new)]
@@ -469,7 +469,7 @@ pub fn pair_test(mut state: StateSet, rba: Rbpa, atomic: Rbpa, atomic_ports: Has
         try_order.shuffle(&mut rng);
         for rule in try_order.iter().map(|&i| &rba.rules[i]) {
             if let Some(new_state) = rule.apply(&state) {
-                state = new_state;
+                state = new_state.clone();
                 while trace_atomic.len() < trace.len() {
                     trace_atomic.push(' ');
                 }
@@ -484,11 +484,11 @@ pub fn pair_test(mut state: StateSet, rba: Rbpa, atomic: Rbpa, atomic_ports: Has
                         'inner: for rule2 in atomic.rules.iter().filter(|r| r.port == Some(p)) {
                             if let Some(new_atomic_state) = rule2.apply(&atomic_state) {
                                 let new_atomic_state = atomic.mask.mask(new_atomic_state);
-                                if new_atomic_state != atomic.mask.mask(new_state) {
+                                if new_atomic_state != atomic.mask.mask(new_state.clone()) {
                                     continue 'inner;
                                 } else {
                                     // match!
-                                    atomic_state = new_atomic_state;
+                                    atomic_state = new_atomic_state.clone();
                                     trace_atomic
                                         .push_str(&format!(" --{}-> {:?}", p, &new_atomic_state));
                                     continue 'outer;
