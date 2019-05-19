@@ -296,7 +296,10 @@ impl ProtoW {
 
 					println!("... firing {:?}. READY: {:?} GUARD {:?}", rule_id, &self.active.ready, &rule.guard_ready);
 
-					(rule.fire_fn)(r, &mut self.active);
+					(rule.fire_fn)(Firer {
+						r,
+						w: &mut self.active,
+					});
 					println!("... FIRE COMPLETE {:?}. READY: {:?} GUARD {:?}", rule_id, &self.active.ready, &rule.guard_ready);
 					if !rule.guard_ready.test(my_id) {
 						// job done!
@@ -321,14 +324,17 @@ impl ProtoW {
 		}
 		let rule = &self.rules[comm.rule_id];
 		self.commitment = None;
-		(rule.fire_fn)(r, &mut self.active);
+		(rule.fire_fn)(Firer {
+			r,
+			w: &mut self.active,
+		});
 	}
 }
 
 struct Rule {
 	guard_ready: BitSet,
 	guard_fn: fn(&ProtoR) -> bool,
-	fire_fn: fn(&ProtoR, &mut ProtoActive),
+	fire_fn: fn(Firer),
 }
 
 struct MemTypeInfo {
@@ -644,164 +650,170 @@ impl<T> Putter<T> {
 	}
 }
 
-// ACTIONS
-fn mem_to_nowhere(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId) {
-	let me_pu_space = r.get_me_pu(me_pu).expect("fewh");
-	me_pu_space.make_empty(me_pu, r, w, true);
+
+struct Firer<'a> {
+	r: &'a ProtoR,
+	w: &'a mut ProtoActive,
 }
+impl<'a> Firer<'a> {
+	fn mem_to_nowhere(&mut self, me_pu: PortId) {
+		let me_pu_space = self.r.get_me_pu(me_pu).expect("fewh");
+		me_pu_space.make_empty(me_pu, self.r, self.w, true);
+	}
 
-fn mem_to_ports(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId, po_ge: &[PortId]) {
-	let me_pu_space = r.get_me_pu(me_pu).expect("fewh");
+	fn mem_to_ports(&mut self, me_pu: PortId, po_ge: &[PortId]) {
+		let me_pu_space = self.r.get_me_pu(me_pu).expect("fewh");
 
-	// 1. port getters have move-priority
-	let port_mover_id = find_mover(po_ge, r);
+		// 1. port getters have move-priority
+		let port_mover_id = self.find_mover(po_ge);
 
-	// 3. instruct port-getters. delegate clearing putters to them (unless 0 getters)
-	match (port_mover_id, po_ge.len()) {
-		(Some(m), 1) => {
-			// ONLY mover case. mover will wake putter
-			r.send_to_getter(m, me_pu | FLAG_YOUR_MOVE);
-		},
-		(Some(m), l) => {
-			// mover AND cloners case. mover will wake putter
-			me_pu_space.cloner_countdown.store(l-1, Ordering::SeqCst);
-			for g in po_ge.iter().cloned() {
-				let payload = if g==m {
-					me_pu | FLAG_OTH_EXIST | FLAG_YOUR_MOVE
-				} else {
-					me_pu | FLAG_OTH_EXIST
-				};
-				r.send_to_getter(g, payload);
-			}
-		},
-		(None, l) => {
-			// no movers
-			if l == 0 {
-				// no cloners either
-				me_pu_space.make_empty(me_pu, r, w, true);
-			} else {
-				me_pu_space.cloner_countdown.store(l, Ordering::SeqCst);
+		// 3. instruct port-getters. delegate clearing putters to them (unless 0 getters)
+		match (port_mover_id, po_ge.len()) {
+			(Some(m), 1) => {
+				// ONLY mover case. mover will wake putter
+				self.r.send_to_getter(m, me_pu | FLAG_YOUR_MOVE);
+			},
+			(Some(m), l) => {
+				// mover AND cloners case. mover will wake putter
+				me_pu_space.cloner_countdown.store(l-1, Ordering::SeqCst);
 				for g in po_ge.iter().cloned() {
-					r.send_to_getter(g, me_pu);
+					let payload = if g==m {
+						me_pu | FLAG_OTH_EXIST | FLAG_YOUR_MOVE
+					} else {
+						me_pu | FLAG_OTH_EXIST
+					};
+					self.r.send_to_getter(g, payload);
 				}
-			}
-		},
-	}
-}
-
-fn mem_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, me_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
-	println!("mem_to_mem_and_ports");
-	let me_pu_space = r.get_me_pu(me_pu).expect("fewh");
-	let tid = &me_pu_space.type_id;
-	let src = me_pu_space.get_ptr();
-
-	// 1. copy pointers to other memory cells
-	// ASSUMES destinations have dangling pointers TODO checks
-	for g in me_ge.iter().cloned() {
-		let me_ge_space = r.get_me_pu(g).expect("gggg");
-		assert_eq!(*tid, me_ge_space.type_id);
-		me_ge_space.set_ptr(src);
-		w.ready.set(g); // PUTTER is ready
-	}
-	// 2. increment memory pointer refs of me_pu
-	let src_refs = w.mem_refs.get_mut(&src).expect("UNKNWN");
-	*src_refs += me_ge.len();
-	mem_to_ports(r, w, me_pu, po_ge);
-}
-
-
-fn find_mover(getters: &[PortId], r: &ProtoR) -> Option<PortId> {
-	getters.iter().filter(|id| {
-		let po_ge = r.get_po_ge(**id).expect("bad id");
-		po_ge.get_move_intention()
-	}).next().or(getters.get(0)).cloned()
-}
-
-fn port_to_mem_and_ports(r: &ProtoR, w: &mut ProtoActive, po_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
-	println!("port_to_mem_and_ports");
-
-	assert!(po_pu < FLAG_OTH_EXIST && po_pu < FLAG_YOUR_MOVE);
-	let po_pu_space = r.get_po_pu(po_pu).expect("ECH");
-
-	// 1. port getters have move-priority
-	let port_mover_id = find_mover(po_ge, r);
-	println!("::port_to_mem_and_ports| port_mover_id={:?}", port_mover_id);
-
-	// 2. populate memory cells if necessary
-	let mut me_ge_iter = me_ge.iter().cloned();
-	if let Some(first_me_ge) = me_ge_iter.next() {
-		println!("::port_to_mem_and_ports| first_me_ge={:?}", first_me_ge);
-		let first_me_ge_space = r.get_me_pu(first_me_ge).expect("wfew");
-		w.ready.set(first_me_ge); // GETTER is ready
-		let tid = &first_me_ge_space.type_id;
-		let info = r.mem_type_info.get(tid).expect("unknown type");
-		// 3. acquire a fresh ptr for this memcell
-		// ASSUMES this memcell has a dangling ptr. TODO use Option<NonNull<_>> later for checking
-		let fresh_ptr = w.free_mems.get_mut(tid).expect("HFEH").pop().expect("NO FREE PTRS, FAM");
-		let mut ptr_refs = 1;
-		first_me_ge_space.set_ptr(fresh_ptr);
-		let src = po_pu_space.get_ptr();
-		let dest = first_me_ge_space.get_ptr();
-		if port_mover_id.is_some() {
-			// mem clone!
-			println!("::port_to_mem_and_ports| mem clone");
-			(info.clone_fn)(src, dest);
-		} else {
-			// mem move!
-			println!("::port_to_mem_and_ports| mem move");
-			unsafe { std::ptr::copy(src, dest, info.bytes) };
+			},
+			(None, l) => {
+				// no movers
+				if l == 0 {
+					// no cloners either
+					me_pu_space.make_empty(me_pu, self.r, self.w, true);
+				} else {
+					me_pu_space.cloner_countdown.store(l, Ordering::SeqCst);
+					for g in po_ge.iter().cloned() {
+						self.r.send_to_getter(g, me_pu);
+					}
+				}
+			},
 		}
-		// 4. copy pointers to other memory cells (if any)
-		// ASSUMES all destinations have dangling pointers
-		for g in me_ge_iter {
-			println!("::port_to_mem_and_ports| mem_g={:?}", g);
-			let me_ge_space = r.get_me_pu(g).expect("gggg");
+	}
+
+	fn mem_to_mem_and_ports(&mut self, me_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
+		println!("mem_to_mem_and_ports");
+		let me_pu_space = self.r.get_me_pu(me_pu).expect("fewh");
+		let tid = &me_pu_space.type_id;
+		let src = me_pu_space.get_ptr();
+
+		// 1. copy pointers to other memory cells
+		// ASSUMES destinations have dangling pointers TODO checks
+		for g in me_ge.iter().cloned() {
+			let me_ge_space = self.r.get_me_pu(g).expect("gggg");
 			assert_eq!(*tid, me_ge_space.type_id);
-
-			// 5. dec refs for existing ptr. free if refs are now 0
-			me_ge_space.set_ptr(fresh_ptr);
-			w.ready.set(g); // GETTER is ready
-			ptr_refs += 1;
+			me_ge_space.set_ptr(src);
+			self.w.ready.set(g); // PUTTER is ready
 		}
-		println!("::port_to_mem_and_ports| ptr_refs={}", ptr_refs);
-		w.mem_refs.insert(fresh_ptr, ptr_refs);
+		// 2. increment memory pointer refs of me_pu
+		let src_refs = self.w.mem_refs.get_mut(&src).expect("UNKNWN");
+		*src_refs += me_ge.len();
+		self.mem_to_ports(me_pu, po_ge);
 	}
 
-	// 2. instruct port-getters. delegate waking putter to them (unless 0 getters)
 
-	// tell the putter the number of MOVERS BUT don't wake them up yet!
-	match (port_mover_id, po_ge.len()) {
-		(Some(m), 1) => {
-			println!("::port_to_mem_and_ports| MOV={},L={}", m, 1);
-			// ONLY mover case. mover will wake putter
-			r.send_to_getter(m, po_pu | FLAG_YOUR_MOVE);
-		},
-		(Some(m), l) => {
-			println!("::port_to_mem_and_ports| MOV={},L={}", m, l);
-			// mover AND cloners case. mover will wake putter
-			po_pu_space.cloner_countdown.store(l-1, Ordering::SeqCst);
-			for g in po_ge.iter().cloned() {
-				let payload = if g==m {
-					po_pu | FLAG_OTH_EXIST | FLAG_YOUR_MOVE
-				} else {
-					po_pu | FLAG_OTH_EXIST
-				};
-				r.send_to_getter(g, payload);
-			}
-		},
-		(None, l) => {
-			println!("::port_to_mem_and_ports| MOV=.,L={}", l);
-			// no movers
-			if l == 0 {
-				// no cloners either
-				po_pu_space.dropbox.send(0);
+	fn find_mover(&self, getters: &[PortId]) -> Option<PortId> {
+		getters.iter().filter(|id| {
+			let po_ge = self.r.get_po_ge(**id).expect("bad id");
+			po_ge.get_move_intention()
+		}).next().or(getters.get(0)).cloned()
+	}
+
+	fn port_to_mem_and_ports(&mut self, po_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
+		println!("port_to_mem_and_ports");
+
+		assert!(po_pu < FLAG_OTH_EXIST && po_pu < FLAG_YOUR_MOVE);
+		let po_pu_space = self.r.get_po_pu(po_pu).expect("ECH");
+
+		// 1. port getters have move-priority
+		let port_mover_id = self.find_mover(po_ge);
+		println!("::port_to_mem_and_ports| port_mover_id={:?}", port_mover_id);
+
+		// 2. populate memory cells if necessary
+		let mut me_ge_iter = me_ge.iter().cloned();
+		if let Some(first_me_ge) = me_ge_iter.next() {
+			println!("::port_to_mem_and_ports| first_me_ge={:?}", first_me_ge);
+			let first_me_ge_space = self.r.get_me_pu(first_me_ge).expect("wfew");
+			self.w.ready.set(first_me_ge); // GETTER is ready
+			let tid = &first_me_ge_space.type_id;
+			let info = self.r.mem_type_info.get(tid).expect("unknown type");
+			// 3. acquire a fresh ptr for this memcell
+			// ASSUMES this memcell has a dangling ptr. TODO use Option<NonNull<_>> later for checking
+			let fresh_ptr = self.w.free_mems.get_mut(tid).expect("HFEH").pop().expect("NO FREE PTRS, FAM");
+			let mut ptr_refs = 1;
+			first_me_ge_space.set_ptr(fresh_ptr);
+			let src = po_pu_space.get_ptr();
+			let dest = first_me_ge_space.get_ptr();
+			if port_mover_id.is_some() {
+				// mem clone!
+				println!("::port_to_mem_and_ports| mem clone");
+				(info.clone_fn)(src, dest);
 			} else {
-				po_pu_space.cloner_countdown.store(l, Ordering::SeqCst);
-				for g in po_ge.iter().cloned() {
-					r.send_to_getter(g, po_pu);
-				}
+				// mem move!
+				println!("::port_to_mem_and_ports| mem move");
+				unsafe { std::ptr::copy(src, dest, info.bytes) };
 			}
-		},
+			// 4. copy pointers to other memory cells (if any)
+			// ASSUMES all destinations have dangling pointers
+			for g in me_ge_iter {
+				println!("::port_to_mem_and_ports| mem_g={:?}", g);
+				let me_ge_space = self.r.get_me_pu(g).expect("gggg");
+				assert_eq!(*tid, me_ge_space.type_id);
+
+				// 5. dec refs for existing ptr. free if refs are now 0
+				me_ge_space.set_ptr(fresh_ptr);
+				self.w.ready.set(g); // GETTER is ready
+				ptr_refs += 1;
+			}
+			println!("::port_to_mem_and_ports| ptr_refs={}", ptr_refs);
+			self.w.mem_refs.insert(fresh_ptr, ptr_refs);
+		}
+
+		// 2. instruct port-getters. delegate waking putter to them (unless 0 getters)
+
+		// tell the putter the number of MOVERS BUT don't wake them up yet!
+		match (port_mover_id, po_ge.len()) {
+			(Some(m), 1) => {
+				println!("::port_to_mem_and_ports| MOV={},L={}", m, 1);
+				// ONLY mover case. mover will wake putter
+				self.r.send_to_getter(m, po_pu | FLAG_YOUR_MOVE);
+			},
+			(Some(m), l) => {
+				println!("::port_to_mem_and_ports| MOV={},L={}", m, l);
+				// mover AND cloners case. mover will wake putter
+				po_pu_space.cloner_countdown.store(l-1, Ordering::SeqCst);
+				for g in po_ge.iter().cloned() {
+					let payload = if g==m {
+						po_pu | FLAG_OTH_EXIST | FLAG_YOUR_MOVE
+					} else {
+						po_pu | FLAG_OTH_EXIST
+					};
+					self.r.send_to_getter(g, payload);
+				}
+			},
+			(None, l) => {
+				println!("::port_to_mem_and_ports| MOV=.,L={}", l);
+				// no movers
+				if l == 0 {
+					// no cloners either
+					po_pu_space.dropbox.send(0);
+				} else {
+					po_pu_space.cloner_countdown.store(l, Ordering::SeqCst);
+					for g in po_ge.iter().cloned() {
+						self.r.send_to_getter(g, po_pu);
+					}
+				}
+			},
+		}
 	}
 }
 
@@ -834,16 +846,16 @@ impl Proto for MyProto {
 			Rule {
 				guard_ready: bitset!{0, 3},
 				guard_fn: |_r| true,
-				fire_fn: |_r, _w| {
-					mem_to_ports(_r, _w, 0, &[3]);
+				fire_fn: |mut _f| {
+					_f.mem_to_ports(0, &[3]);
 				},
 			},
 			Rule {
 				guard_ready: bitset!{1, 2, 3, 4},
 				guard_fn: |_r| true,
-				fire_fn: |_r, _w| {
-					port_to_mem_and_ports(_r, _w, 1, &[], &[3]);
-					port_to_mem_and_ports(_r, _w, 2, &[0], &[]);
+				fire_fn: |mut _f| {
+					_f.port_to_mem_and_ports(1, &[], &[3]);
+					_f.port_to_mem_and_ports(2, &[0], &[]);
 				},
 			},
 		];
@@ -888,8 +900,6 @@ impl BuildMemInfo {
 		}
 	}
 }
-
-
 
 #[test]
 fn test_my_proto() {
