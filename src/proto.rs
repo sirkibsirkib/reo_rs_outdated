@@ -2,6 +2,8 @@
 ////////// DEBUG DEBUG
 #![allow(dead_code)]
 
+use smallvec::SmallVec;
+use core::ops::Range;
 use crate::{PortId, RuleId};
 use hashbrown::HashMap;
 use std::{
@@ -52,7 +54,7 @@ impl MePuSpace {
 			if do_drop {
 				(info.drop_fn)(ptr);
 			}
-			w.ready.set(my_id + r.mem_get_id_start()); // GETTER ready
+			w.ready.set(r.mem_getter_id(my_id)); // GETTER ready
 			w.free_mems.get_mut(tid).expect("??").push(ptr);
 		}
 	}
@@ -296,7 +298,7 @@ impl ProtoW {
 
 					println!("... firing {:?}. READY: {:?} GUARD {:?}", rule_id, &self.active.ready, &rule.guard_ready);
 
-					(rule.fire_fn)(Firer {
+					rule.fire(Firer {
 						r,
 						w: &mut self.active,
 					});
@@ -324,18 +326,13 @@ impl ProtoW {
 		}
 		let rule = &self.rules[comm.rule_id];
 		self.commitment = None;
-		(rule.fire_fn)(Firer {
+		rule.fire(Firer {
 			r,
 			w: &mut self.active,
 		});
 	}
 }
 
-struct Rule {
-	guard_ready: BitSet,
-	guard_fn: fn(&ProtoR) -> bool,
-	fire_fn: fn(Firer),
-}
 
 struct MemTypeInfo {
 	drop_fn: DropFnPtr,
@@ -345,9 +342,9 @@ struct MemTypeInfo {
 
 struct ProtoR {
 	mem_data: Vec<u8>,
-	me_pu: Vec<MePuSpace>,  // id range 0..#MePu
-	po_pu: Vec<PoPuSpace>, // id range #MePu..(#MePu+#PoPu)
- 	po_ge: Vec<PoGeSpace>,   // id range (#MePu+#PoPu)..(#MePu+#PoPu+#PoGe)
+	po_pu: Vec<PoPuSpace>, // id range 0..#PoPu
+ 	po_ge: Vec<PoGeSpace>, // id range #PoPu..(#PoPu + #PoGe)
+	me_pu: Vec<MePuSpace>, // id range (#PoPu + #PoGe)..(#PoPu + #PoGe + #MePu)
  	// me_ge doesn't need a space
  	mem_type_info: HashMap<TypeId, MemTypeInfo>,
 }
@@ -355,28 +352,29 @@ impl ProtoR {
 	fn send_to_getter(&self, id: PortId, msg: usize) {
 		self.get_po_ge(id).expect("NOPOGE").dropbox.send(msg)
 	}
-	fn mem_get_id_start(&self) -> usize {
-		self.me_pu.len() + self.po_pu.len() + self.po_ge.len()
-	}
-	fn get_me_pu(&self, id: PortId) -> Option<&MePuSpace> {
-		self.me_pu.get(id)
+	#[inline]
+	fn mem_getter_id(&self, id: PortId) -> PortId {
+		id + self.me_pu.len()
 	}
 	fn get_po_pu(&self, id: PortId) -> Option<&PoPuSpace> {
-		self.po_pu.get(id - self.me_pu.len())
+		self.po_pu.get(id)
 	}
 	fn get_po_ge(&self, id: PortId) -> Option<&PoGeSpace> {
-		self.po_ge.get(id - self.me_pu.len() - self.po_pu.len())
+		self.po_ge.get(id - self.po_pu.len())
+	}
+	fn get_me_pu(&self, id: PortId) -> Option<&MePuSpace> {
+		self.me_pu.get(id - self.po_pu.len() - self.po_ge.len())
 	}
 	fn id_is_port(&self, id: PortId) -> bool {
-		self.me_pu.len() <= id && id < self.mem_get_id_start()
+		id < (self.po_pu.len() + self.po_ge.len())
 	}
 	fn get_space(&self, id: PortId) -> SpaceRef {
 		use SpaceRef::*;
-		let mpl = self.me_pu.len();
 		let ppl = self.po_pu.len();
-		self.me_pu.get(id).map(MePu)
-		.or(self.po_pu.get(id - mpl).map(PoPu))
-		.or(self.po_ge.get(id - mpl - ppl).map(PoGe))
+		let pgl = self.po_ge.len();
+		self.po_pu.get(id).map(PoPu)
+		.or(self.po_ge.get(id - ppl).map(PoGe))
+		.or(self.me_pu.get(id - ppl - pgl).map(MePu))
 		.unwrap_or(None)
 	}
 }
@@ -501,6 +499,13 @@ struct ProtoAll {
 impl ProtoAll {
 	fn new(mem_infos: Vec<BuildMemInfo>, num_port_putters: usize, num_port_getters: usize, rules: Vec<Rule>) -> Self {
 		let mem_get_id_start = mem_infos.len() + num_port_putters + num_port_getters;
+		// let po_pu_rng = 0..num_port_putters;
+		// let po_ge_rng = num_port_putters..(num_port_putters + num_port_getters);
+		// let end = num_port_putters + num_port_getters + mem_infos.len();
+		// let mem_rng = (num_port_putters + num_port_getters)..end;
+		// let rules = abstract_actions.iter().map(|action_list| {
+		// 	prepare_rule(action_list, po_pu_rng.clone(), po_ge_rng.clone(), mem_rng.clone()).expect("BAD ACTION")
+		// }).collect();
 
 		let (mem_data, me_pu, mem_type_info, free_mems, ready) = Self::build_buffer(mem_infos, mem_get_id_start);
 		let po_pu = (0..num_port_putters).map(|_| PoPuSpace::new()).collect();
@@ -651,17 +656,17 @@ impl<T> Putter<T> {
 }
 
 
-struct Firer<'a> {
+pub struct Firer<'a> {
 	r: &'a ProtoR,
 	w: &'a mut ProtoActive,
 }
 impl<'a> Firer<'a> {
-	fn mem_to_nowhere(&mut self, me_pu: PortId) {
+	pub fn mem_to_nowhere(&mut self, me_pu: PortId) {
 		let me_pu_space = self.r.get_me_pu(me_pu).expect("fewh");
 		me_pu_space.make_empty(me_pu, self.r, self.w, true);
 	}
 
-	fn mem_to_ports(&mut self, me_pu: PortId, po_ge: &[PortId]) {
+	pub fn mem_to_ports(&mut self, me_pu: PortId, po_ge: &[PortId]) {
 		let me_pu_space = self.r.get_me_pu(me_pu).expect("fewh");
 
 		// 1. port getters have move-priority
@@ -700,7 +705,7 @@ impl<'a> Firer<'a> {
 		}
 	}
 
-	fn mem_to_mem_and_ports(&mut self, me_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
+	pub fn mem_to_mem_and_ports(&mut self, me_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
 		println!("mem_to_mem_and_ports");
 		let me_pu_space = self.r.get_me_pu(me_pu).expect("fewh");
 		let tid = &me_pu_space.type_id;
@@ -728,7 +733,7 @@ impl<'a> Firer<'a> {
 		}).next().or(getters.get(0)).cloned()
 	}
 
-	fn port_to_mem_and_ports(&mut self, po_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
+	pub fn port_to_mem_and_ports(&mut self, po_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
 		println!("port_to_mem_and_ports");
 
 		assert!(po_pu < FLAG_OTH_EXIST && po_pu < FLAG_YOUR_MOVE);
@@ -818,6 +823,18 @@ impl<'a> Firer<'a> {
 }
 
 
+struct Rule {
+	guard_ready: BitSet,
+	guard_fn: fn(&ProtoR) -> bool,
+	fire_fn: fn(Firer),
+}
+impl Rule {
+	fn fire(&self, mut f: Firer) {
+		(self.fire_fn)(f)
+	}
+}
+
+
 pub trait PortData: Sized {
 	fn clone_fn(_t: &Self) -> Self {
 		panic!("Don't know how to clone this!")
@@ -837,40 +854,50 @@ struct MyProto;
 impl Proto for MyProto {
 	type Interface = (Putter<u32>, Putter<u32>, Getter<u32>);
 	fn instantiate() -> Self::Interface {
-		let mem_infos = vec![
+		let num_port_putters = 2; // 0..=1
+		let num_port_getters = 1; // 2..=2
+		let mem_infos = vec![ // 3..=3  (3..=4 bits)
 			BuildMemInfo::new::<u32>(),
 		];
-		let num_port_putters = 2;
-		let num_port_getters = 1;
 		let rules = vec![
-			Rule {
-				guard_ready: bitset!{0, 3},
+			Rule { // p0 -> g2, p1 -> m3(4)
+				guard_ready: bitset!{0,1,2,4},
 				guard_fn: |_r| true,
 				fire_fn: |mut _f| {
-					_f.mem_to_ports(0, &[3]);
+					_f.port_to_mem_and_ports(0, &[], &[2]);
+					_f.port_to_mem_and_ports(1, &[3], &[]);
 				},
 			},
-			Rule {
-				guard_ready: bitset!{1, 2, 3, 4},
+			Rule { // m3 -> g2
+				guard_ready: bitset!{2, 3},
 				guard_fn: |_r| true,
 				fire_fn: |mut _f| {
-					_f.port_to_mem_and_ports(1, &[], &[3]);
-					_f.port_to_mem_and_ports(2, &[0], &[]);
+					_f.mem_to_ports(3, &[2]);
 				},
 			},
 		];
+
 		let p = Arc::new(ProtoAll::new(mem_infos, num_port_putters, num_port_getters, rules));
 		(
-			// 0 => m1 // putter
+			Putter {p: p.clone(), id: 0, phantom: Default::default() },
 			Putter {p: p.clone(), id: 1, phantom: Default::default() },
-			Putter {p: p.clone(), id: 2, phantom: Default::default() },
-			Getter {p: p.clone(), id: 3, phantom: Default::default() },
+			Getter {p: p.clone(), id: 2, phantom: Default::default() },
+			// 3 => m1 // putter
 			// 4 => m1^ // getter
 		)
 	}
 }
 
 
+// let abstract_rules: &[&[AbstractAction]] = &[
+// 	&[ // rule 0: {p0 -> g2, p1 -> m3}
+// 		AbstractAction::new(0, &[2], &[]),
+// 		AbstractAction::new(1, &[3], &[]),
+// 	],
+// 	&[ // rule 1: {m3 -> g2}
+// 		AbstractAction::new(3, &[], &[2]),
+// 	],
+// ];
 
 #[derive(Debug)]
 struct BuildMemInfo {

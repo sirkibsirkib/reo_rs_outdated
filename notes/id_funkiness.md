@@ -61,14 +61,17 @@ this is what the proto structure will actually use internally
 
 #### SpaceStructs
 
+`
 0 <-- id space --> 
 [port-putters][port-getters][memory-ids]
  | | | | | | | | | | | | | | | | | | | |
  | | | | | | | | | | | | | | | | | | | |
 [port-putters][port-getters][memory-ids]
+`
 
 #### ReadySet
 
+`
 0 <-- id space --> 
 [port-putters][port-getters][memory-ids]
  | | | | | | | | | | | | | | |\|\|\|\|\|
@@ -84,3 +87,22 @@ this is what the proto structure will actually use internally
  | | | | | | | | | | | | | | | | | | | |\ \ \ \ \
  | | | | | | | | | | | | | | | | | | | | \ \ \ \ \ 
 [port-putters][port-getters][memory-put][memory-get]
+`
+
+## Another trade-off:
+how to do split the work between the Reo compiler and the reo lib?
+EG: Reo compiler does more work:
++ better runtime performance
++ reo lib is more flexible
+- more unsafe functions in reo lib's API
+- reo compiler is more complex and obtuse
+
+what does the compiler have to PROBABLY do anyway?
+1. make sure IDs are consecutive eg: {1,6,8} => [0,1,2]
+
+what would be the best for safety?
+1. reo generates something like:
+	rule!{
+		0 => 1,2,3,4;
+		2 => 2,4;
+	}
