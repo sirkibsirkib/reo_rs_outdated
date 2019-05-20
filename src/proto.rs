@@ -25,19 +25,23 @@ type CloneFnPtr = fn(*mut u8, *mut u8);
 const FLAG_YOUR_MOVE: usize = (1 << 63);
 const FLAG_OTH_EXIST: usize = (1 << 62);
 
-struct MePuSpace {
+/// tracks the datum associated with this memory cell (if any).
+
+struct MemoSpace {
 	ptr: AtomicPtr<u8>, // acts as *mut T AND key to mem_slot_meta_map
 	cloner_countdown: AtomicUsize,
 	mover_sema: Semaphore,
 	type_id: TypeId,
+	type_info: Arc<MemTypeInfo>,
 }
-impl MePuSpace {
-	fn new(ptr: *mut u8, type_id: TypeId) -> Self {
+impl MemoSpace {
+	fn new(ptr: *mut u8, type_id: TypeId, type_info: Arc<MemTypeInfo>) -> Self {
 		Self {
 			ptr: ptr.into(),
 			cloner_countdown: 0.into(),
 			mover_sema: Semaphore::new(0),
 			type_id,
+			type_info,
 		}
 	}
 	fn make_empty(&self, my_id: PortId, r: &ProtoR, w: &mut ProtoActive, do_drop: bool) {
@@ -48,10 +52,9 @@ impl MePuSpace {
 		*src_refs -= 1;
 		if *src_refs == 0 {
 			// contents need to be dropped! ptr needs to be made free
-			let info = r.mem_type_info.get(tid).expect("unknown type 2");
 			w.mem_refs.remove(&ptr).expect("hhh");
 			if do_drop {
-				(info.drop_fn)(ptr);
+				(self.type_info.drop_fn)(ptr);
 			}
 			w.ready.set(r.mem_getter_id(my_id)); // GETTER ready
 			w.free_mems.get_mut(tid).expect("??").push(ptr);
@@ -59,6 +62,7 @@ impl MePuSpace {
 	}
 }
 
+// trait to cut down boilerplate in the rest of the lib
 trait HasRacePtr {
 	fn set_ptr(&self, ptr: *mut u8);
 	fn get_ptr(&self) -> *mut u8;
@@ -71,7 +75,7 @@ impl HasRacePtr for PoPuSpace {
 		self.ptr.load(Ordering::SeqCst)
 	}
 }
-impl HasRacePtr for MePuSpace {
+impl HasRacePtr for MemoSpace {
 	fn set_ptr(&self, ptr: *mut u8) {
 		self.ptr.store(ptr, Ordering::SeqCst);
 	}
@@ -129,25 +133,25 @@ impl PoGeSpace {
 		// move then means "drop"
 		assert!(i_move || conflict); 
 		match a.r.get_space(putter_id) {
-			SpaceRef::MePu(me_pu_space) => {
+			SpaceRef::Memo(memo_space) => {
 				if i_move {
 					if conflict {
 						// 1. must wait for cloners to finish
-						me_pu_space.mover_sema.acquire();
+						memo_space.mover_sema.acquire();
 					}
 					{
 						let mut w = a.w.lock();
 						// 2. release putter. DO DROP
-						me_pu_space.make_empty(putter_id, &a.r, &mut w.active, true);
+						memo_space.make_empty(putter_id, &a.r, &mut w.active, true);
 						// 3. notify state waiters
 						let ProtoW { ref active, ref mut awaiting_states, .. } = &mut w as &mut ProtoW;
 						ProtoW::notify_state_waiters(&active.ready, awaiting_states, &a.r);
 					}
 				} else {
-					let was = me_pu_space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
+					let was = memo_space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
 					if was == 1 {
 						// I was last! release mover (who MUST exist)
-						me_pu_space.mover_sema.release();
+						memo_space.mover_sema.release();
 					}
 				}
 			},
@@ -182,15 +186,15 @@ impl PoGeSpace {
 		// I requested move, so if it was denied SOMEONE must move
 		assert!(i_move || conflict); 
 		match a.r.get_space(putter_id) {
-			SpaceRef::MePu(me_pu_space) => {
+			SpaceRef::Memo(memo_space) => {
 				println!("::get| mepu branch");
 				let ptr: &T = unsafe {
-					transmute(me_pu_space.get_ptr())
+					transmute(memo_space.get_ptr())
 				};
 				if i_move {
 					if conflict {
 						// must wait for cloners to finish
-						me_pu_space.mover_sema.acquire();
+						memo_space.mover_sema.acquire();
 					}
 					let datum = unsafe {
 						std::ptr::read(ptr)
@@ -199,7 +203,7 @@ impl PoGeSpace {
 					{
 						let mut w = a.w.lock();
 						// 2. release putter. DO NOT drop
-						me_pu_space.make_empty(putter_id, &a.r, &mut w.active, false);
+						memo_space.make_empty(putter_id, &a.r, &mut w.active, false);
 						// 3. notify state waiters
 						let ProtoW { ref active, ref mut awaiting_states, .. } = &mut w as &mut ProtoW;
 						ProtoW::notify_state_waiters(&active.ready, awaiting_states, &a.r);
@@ -207,10 +211,10 @@ impl PoGeSpace {
 					datum
 				} else {
 					let datum = T::clone_fn(ptr);
-					let was = me_pu_space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
+					let was = memo_space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
 					if was == 1 {
 						// I was last! release mover (who MUST exist)
-						me_pu_space.mover_sema.release();
+						memo_space.mover_sema.release();
 					}
 					datum
 				}
@@ -248,7 +252,7 @@ impl PoGeSpace {
 }
 
 enum SpaceRef<'a> {
-	MePu(&'a MePuSpace),
+	Memo(&'a MemoSpace),
 	PoPu(&'a PoPuSpace),
 	PoGe(&'a PoGeSpace),
 	None,
@@ -377,9 +381,9 @@ struct ProtoR {
 	mem_data: Vec<u8>,
 	po_pu: Vec<PoPuSpace>, // id range 0..#PoPu
  	po_ge: Vec<PoGeSpace>, // id range #PoPu..(#PoPu + #PoGe)
-	me_pu: Vec<MePuSpace>, // id range (#PoPu + #PoGe)..(#PoPu + #PoGe + #MePu)
+	me_pu: Vec<MemoSpace>, // id range (#PoPu + #PoGe)..(#PoPu + #PoGe + #Memo)
  	// me_ge doesn't need a space
- 	mem_type_info: HashMap<TypeId, MemTypeInfo>,
+ 	// mem_type_info: HashMap<TypeId, MemTypeInfo>,
 }
 impl ProtoR {
 	fn send_to_getter(&self, id: PortId, msg: usize) {
@@ -395,7 +399,7 @@ impl ProtoR {
 	fn get_po_ge(&self, id: PortId) -> Option<&PoGeSpace> {
 		self.po_ge.get(id - self.po_pu.len())
 	}
-	fn get_me_pu(&self, id: PortId) -> Option<&MePuSpace> {
+	fn get_me_pu(&self, id: PortId) -> Option<&MemoSpace> {
 		self.me_pu.get(id - self.po_pu.len() - self.po_ge.len())
 	}
 	fn id_is_port(&self, id: PortId) -> bool {
@@ -407,7 +411,7 @@ impl ProtoR {
 		let pgl = self.po_ge.len();
 		self.po_pu.get(id).map(PoPu)
 		.or(self.po_ge.get(id - ppl).map(PoGe))
-		.or(self.me_pu.get(id - ppl - pgl).map(MePu))
+		.or(self.me_pu.get(id - ppl - pgl).map(Memo))
 		.unwrap_or(None)
 	}
 }
@@ -542,7 +546,7 @@ impl Drop for PortGroup {
 	}
 }
 
-// [MePu | PoPu | PoGe | MeGe]
+// [Memo | PoPu | PoGe | MeGe]
 struct ProtoAll {
 	r: ProtoR,
 	w: Mutex<ProtoW>,
@@ -558,10 +562,10 @@ impl ProtoAll {
 		// 	prepare_rule(action_list, po_pu_rng.clone(), po_ge_rng.clone(), mem_rng.clone()).expect("BAD ACTION")
 		// }).collect();
 
-		let (mem_data, me_pu, mem_type_info, free_mems, ready) = Self::build_buffer(mem_infos, mem_get_id_start);
+		let (mem_data, me_pu, free_mems, ready) = Self::build_buffer(mem_infos, mem_get_id_start);
 		let po_pu = (0..num_port_putters).map(|_| PoPuSpace::new()).collect();
 		let po_ge = (0..num_port_getters).map(|_| PoGeSpace::new()).collect();
-		let r = ProtoR { mem_data, me_pu, po_pu, po_ge, mem_type_info };
+		let r = ProtoR { mem_data, me_pu, po_pu, po_ge };
 		let w = Mutex::new(ProtoW {
 			rules,
 			active: ProtoActive {
@@ -578,14 +582,13 @@ impl ProtoAll {
 	fn build_buffer(infos: Vec<BuildMemInfo>, mem_get_id_start: usize) ->
 	(
 		Vec<u8>, // buffer
-		Vec<MePuSpace>,
-		HashMap<TypeId, MemTypeInfo>,
+		Vec<MemoSpace>,
 		HashMap<TypeId, Vec<*mut u8>>,
 		BitSet,
 	) {
 		let mut capacity = 0;
 		let mut offsets_n_typeids = vec![];
-		let mut mem_type_info = HashMap::default();
+		let mut mem_type_info: HashMap<TypeId, Arc<MemTypeInfo>> = HashMap::default();
 		let mut ready = BitSet::default();
 		let mut free_mems = HashMap::default();
 		for (mem_id, info) in infos.into_iter().enumerate() {
@@ -596,14 +599,13 @@ impl ProtoAll {
 			}
 			println!("@ {:?} for info {:?}", capacity, &info);
 			offsets_n_typeids.push((capacity, info.type_id));
-			mem_type_info.entry(info.type_id).or_insert(MemTypeInfo {
+			mem_type_info.entry(info.type_id).or_insert_with(|| Arc::new(MemTypeInfo {
 				drop_fn: info.drop_fn,
 				clone_fn: info.clone_fn,
 				bytes: info.size,
-			});
+			}));
 			capacity += info.size.max(1); // make pointers unique even with 0-byte data
 		}
-		mem_type_info.shrink_to_fit();
 		println!("CAP IS {:?}", capacity);
 
 		// meta-offset used to ensure the start of the vec alsigns to 64-bits (covers all cases)
@@ -619,9 +621,10 @@ impl ProtoAll {
 		let ptrs = offsets_n_typeids.into_iter().map(|(offset, type_id)| unsafe {
 			let ptr: *mut u8 = buf.as_mut_ptr().offset(offset as isize + meta_offset);
 			free_mems.entry(type_id).or_insert(vec![]).push(ptr);
-			MePuSpace::new(ptr, type_id)
+			let type_info = mem_type_info.get(&type_id).expect("Missed a type").clone();
+			MemoSpace::new(ptr, type_id, type_info)
 		}).collect();
-		(buf, ptrs, mem_type_info, free_mems, ready)
+		(buf, ptrs, free_mems, ready)
 	}
 }
 
@@ -714,12 +717,12 @@ pub struct Firer<'a> {
 }
 impl<'a> Firer<'a> {
 	pub fn mem_to_nowhere(&mut self, me_pu: PortId) {
-		let me_pu_space = self.r.get_me_pu(me_pu).expect("fewh");
-		me_pu_space.make_empty(me_pu, self.r, self.w, true);
+		let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
+		memo_space.make_empty(me_pu, self.r, self.w, true);
 	}
 
 	pub fn mem_to_ports(&mut self, me_pu: PortId, po_ge: &[PortId]) {
-		let me_pu_space = self.r.get_me_pu(me_pu).expect("fewh");
+		let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
 
 		// 1. port getters have move-priority
 		let port_mover_id = self.find_mover(po_ge);
@@ -732,7 +735,7 @@ impl<'a> Firer<'a> {
 			},
 			(Some(m), l) => {
 				// mover AND cloners case. mover will wake putter
-				me_pu_space.cloner_countdown.store(l-1, Ordering::SeqCst);
+				memo_space.cloner_countdown.store(l-1, Ordering::SeqCst);
 				for g in po_ge.iter().cloned() {
 					let payload = if g==m {
 						me_pu | FLAG_OTH_EXIST | FLAG_YOUR_MOVE
@@ -746,9 +749,9 @@ impl<'a> Firer<'a> {
 				// no movers
 				if l == 0 {
 					// no cloners either
-					me_pu_space.make_empty(me_pu, self.r, self.w, true);
+					memo_space.make_empty(me_pu, self.r, self.w, true);
 				} else {
-					me_pu_space.cloner_countdown.store(l, Ordering::SeqCst);
+					memo_space.cloner_countdown.store(l, Ordering::SeqCst);
 					for g in po_ge.iter().cloned() {
 						self.r.send_to_getter(g, me_pu);
 					}
@@ -759,9 +762,9 @@ impl<'a> Firer<'a> {
 
 	pub fn mem_to_mem_and_ports(&mut self, me_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
 		println!("mem_to_mem_and_ports");
-		let me_pu_space = self.r.get_me_pu(me_pu).expect("fewh");
-		let tid = &me_pu_space.type_id;
-		let src = me_pu_space.get_ptr();
+		let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
+		let tid = &memo_space.type_id;
+		let src = memo_space.get_ptr();
 
 		// 1. copy pointers to other memory cells
 		// ASSUMES destinations have dangling pointers TODO checks
@@ -802,7 +805,7 @@ impl<'a> Firer<'a> {
 			let first_me_ge_space = self.r.get_me_pu(first_me_ge).expect("wfew");
 			self.w.ready.set(first_me_ge); // GETTER is ready
 			let tid = &first_me_ge_space.type_id;
-			let info = self.r.mem_type_info.get(tid).expect("unknown type");
+			let info = &first_me_ge_space.type_info;
 			// 3. acquire a fresh ptr for this memcell
 			// ASSUMES this memcell has a dangling ptr. TODO use Option<NonNull<_>> later for checking
 			let fresh_ptr = self.w.free_mems.get_mut(tid).expect("HFEH").pop().expect("NO FREE PTRS, FAM");
