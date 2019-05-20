@@ -2,7 +2,6 @@
 ////////// DEBUG DEBUG
 #![allow(dead_code)]
 
-use smallvec::SmallVec;
 use core::ops::Range;
 use crate::{PortId, RuleId};
 use hashbrown::HashMap;
@@ -109,14 +108,14 @@ impl PoGeSpace {
 			move_intention: false.into(),
 		}
 	}
-	fn get_move_intention(&self) -> bool {
-		unsafe {
-			*self.move_intention.get()
-		}
-	}
 	fn set_move_intention(&self, move_intention: bool) {
 		unsafe {
 			*self.move_intention.get() = move_intention
+		}
+	}
+	fn get_move_intention(&self) -> bool {
+		unsafe {
+			*self.move_intention.get()
 		}
 	}
 	fn get_signal(&self, a: &ProtoAll) {
@@ -136,8 +135,14 @@ impl PoGeSpace {
 						// 1. must wait for cloners to finish
 						me_pu_space.mover_sema.acquire();
 					}
-					// 2. release putter
-					me_pu_space.make_empty(putter_id, &a.r, &mut a.w.lock().active, true);
+					{
+						let mut w = a.w.lock();
+						// 2. release putter. DO DROP
+						me_pu_space.make_empty(putter_id, &a.r, &mut w.active, true);
+						// 3. notify state waiters
+						let ProtoW { ref active, ref mut awaiting_states, .. } = &mut w as &mut ProtoW;
+						ProtoW::notify_state_waiters(&active.ready, awaiting_states, &a.r);
+					}
 				} else {
 					let was = me_pu_space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
 					if was == 1 {
@@ -152,8 +157,8 @@ impl PoGeSpace {
 						// must wait for cloners to finish
 						po_pu_space.mover_sema.acquire();
 					}
-					// 3. release putter. DO drop
-					po_pu_space.dropbox.send(1);
+					// 3. release putter. let them know NOBODY moved (do drop)
+					po_pu_space.dropbox.send(0);
 				} else {
 					let was = po_pu_space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
 					if was == 1 {
@@ -191,7 +196,14 @@ impl PoGeSpace {
 						std::ptr::read(ptr)
 					};
 					// 3. release putter. DON'T DROP
-					me_pu_space.make_empty(putter_id, &a.r, &mut a.w.lock().active, false);
+					{
+						let mut w = a.w.lock();
+						// 2. release putter. DO NOT drop
+						me_pu_space.make_empty(putter_id, &a.r, &mut w.active, false);
+						// 3. notify state waiters
+						let ProtoW { ref active, ref mut awaiting_states, .. } = &mut w as &mut ProtoW;
+						ProtoW::notify_state_waiters(&active.ready, awaiting_states, &a.r);
+					}
 					datum
 				} else {
 					let datum = T::clone_fn(ptr);
@@ -216,7 +228,7 @@ impl PoGeSpace {
 					let datum = unsafe {
 						std::ptr::read(ptr)
 					};
-					// 3. release putter
+					// 3. release putter. let them know someone DID move (don't drop)
 					println!("::get| releasing popu");
 					po_pu_space.dropbox.send(1);
 					datum
@@ -253,13 +265,33 @@ struct Commitment {
 	awaiting: usize,
 }
 
+struct StateWaiter {
+	state: BitSet,
+	whom: PortId,
+}
 struct ProtoW {
 	rules: Vec<Rule>,
 	active: ProtoActive,
 	commitment: Option<Commitment>,
 	ready_tentative: BitSet,
+	awaiting_states: Vec<StateWaiter>
 }
 impl ProtoW {
+	fn notify_state_waiters(ready: &BitSet, awaiting_states: &mut Vec<StateWaiter>, r: &ProtoR) {
+		awaiting_states.retain(|awaiting_state| {
+			let retain = if ready.is_superset(&awaiting_state.state) {
+				match r.get_space(awaiting_state.whom) {
+					SpaceRef::PoPu(space) => space.dropbox.sema.release(),
+					SpaceRef::PoGe(space) => space.dropbox.sema.release(),
+					_ => panic!("bad state-waiter PortId!"),
+				};
+				false
+			} else {
+				true
+			};
+			retain
+		})
+	}
 	fn enter(&mut self, r: &ProtoR, my_id: PortId) {
 		self.active.ready.set(my_id);
 		if self.commitment.is_some() {
@@ -302,6 +334,7 @@ impl ProtoW {
 						r,
 						w: &mut self.active,
 					});
+					Self::notify_state_waiters(&self.active.ready, &mut self.awaiting_states, r);
 					println!("... FIRE COMPLETE {:?}. READY: {:?} GUARD {:?}", rule_id, &self.active.ready, &rule.guard_ready);
 					if !rule.guard_ready.test(my_id) {
 						// job done!
@@ -426,6 +459,24 @@ pub struct PortGroup {
 	disambiguation: HashMap<RuleId, PortId>,
 }
 impl PortGroup {
+
+	/// block until the protocol is in this state
+	unsafe fn await_state(&self, state_pred: BitSet) {
+		// TODO check the given state pred is OK? maybe unnecessary since function is internal
+		{
+			let w = self.p.w.lock();
+			if w.active.ready.is_superset(&state_pred) {
+				return; // already in the desired state
+			}
+		} // release lock
+		let space = self.p.r.get_space(self.leader);
+		match space {
+			SpaceRef::PoPu(po_pu_space) => po_pu_space.dropbox.sema.acquire(),
+			SpaceRef::PoGe(po_ge_space) => po_ge_space.dropbox.sema.acquire(),
+			_ => panic!("BAD ID"),
+		}
+		// I received a notification that the state is ready!
+	}
 	unsafe fn new(p: &Arc<ProtoAll>, port_set: &BitSet) -> Result<PortGroup, PortGroupError> {
 		use PortGroupError::*;
 		let mut w = p.w.lock();
@@ -520,6 +571,7 @@ impl ProtoAll {
 			},
 			commitment: None,
 			ready_tentative: BitSet::default(),
+			awaiting_states: vec![],
 		});
 		ProtoAll {w, r}
 	}
@@ -829,7 +881,7 @@ struct Rule {
 	fire_fn: fn(Firer),
 }
 impl Rule {
-	fn fire(&self, mut f: Firer) {
+	fn fire(&self, f: Firer) {
 		(self.fire_fn)(f)
 	}
 }
@@ -850,6 +902,12 @@ pub trait Proto: Sized {
 	type Interface: Sized;
 	fn instantiate() -> Self::Interface;	
 }
+
+fn in_rng(x: &Range<usize>, y: usize) -> bool {
+	x.start <= y && y < x.end
+}
+
+
 struct MyProto;
 impl Proto for MyProto {
 	type Interface = (Putter<u32>, Putter<u32>, Getter<u32>);
@@ -860,7 +918,7 @@ impl Proto for MyProto {
 			BuildMemInfo::new::<u32>(),
 		];
 		let rules = vec![
-			Rule { // p0 -> g2, p1 -> m3(4)
+			Rule {
 				guard_ready: bitset!{0,1,2,4},
 				guard_fn: |_r| true,
 				fire_fn: |mut _f| {
@@ -950,4 +1008,10 @@ fn test_my_proto() {
 			}
 		});
 	}).expect("WENT OK");
+}
+
+
+// assume for now that the bitset has the right shape.
+pub struct ProtoState {
+	data: BitSet,
 }

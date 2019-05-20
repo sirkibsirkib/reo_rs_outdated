@@ -6,9 +6,6 @@ pub mod proto;
 pub type PortId = usize;
 pub type RuleId = usize;
 
-/// temporarily omitted
+// temporarily omitted
 // pub mod rbpa;
 // pub mod tokens;
-
-/// experimental
-pub mod bitfield;
