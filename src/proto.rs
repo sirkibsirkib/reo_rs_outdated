@@ -31,16 +31,14 @@ struct MemoSpace {
 	ptr: AtomicPtr<u8>, // acts as *mut T AND key to mem_slot_meta_map
 	cloner_countdown: AtomicUsize,
 	mover_sema: Semaphore,
-	type_id: TypeId,
 	type_info: Arc<MemTypeInfo>,
 }
 impl MemoSpace {
-	fn new(ptr: *mut u8, type_id: TypeId, type_info: Arc<MemTypeInfo>) -> Self {
+	fn new(ptr: *mut u8, type_info: Arc<MemTypeInfo>) -> Self {
 		Self {
 			ptr: ptr.into(),
 			cloner_countdown: 0.into(),
 			mover_sema: Semaphore::new(0),
-			type_id,
 			type_info,
 		}
 	}
@@ -48,7 +46,7 @@ impl MemoSpace {
 		println!("::make_empty| id={} do_drop={}", my_id, do_drop);
 		let ptr = self.get_ptr();
 		let src_refs = w.mem_refs.get_mut(&ptr).expect("UNKNWN");
-		let tid = &self.type_id;
+		let tid = &self.type_info.type_id;
 		*src_refs -= 1;
 		if *src_refs == 0 {
 			// contents need to be dropped! ptr needs to be made free
@@ -372,6 +370,7 @@ impl ProtoW {
 
 
 struct MemTypeInfo {
+	type_id: TypeId,
 	drop_fn: DropFnPtr,
 	clone_fn: CloneFnPtr,
 	bytes: usize,
@@ -603,6 +602,7 @@ impl ProtoAll {
 				drop_fn: info.drop_fn,
 				clone_fn: info.clone_fn,
 				bytes: info.size,
+				type_id: info.type_id,
 			}));
 			capacity += info.size.max(1); // make pointers unique even with 0-byte data
 		}
@@ -622,7 +622,7 @@ impl ProtoAll {
 			let ptr: *mut u8 = buf.as_mut_ptr().offset(offset as isize + meta_offset);
 			free_mems.entry(type_id).or_insert(vec![]).push(ptr);
 			let type_info = mem_type_info.get(&type_id).expect("Missed a type").clone();
-			MemoSpace::new(ptr, type_id, type_info)
+			MemoSpace::new(ptr, type_info)
 		}).collect();
 		(buf, ptrs, free_mems, ready)
 	}
@@ -763,14 +763,14 @@ impl<'a> Firer<'a> {
 	pub fn mem_to_mem_and_ports(&mut self, me_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
 		println!("mem_to_mem_and_ports");
 		let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
-		let tid = &memo_space.type_id;
+		let tid = &memo_space.type_info.type_id;
 		let src = memo_space.get_ptr();
 
 		// 1. copy pointers to other memory cells
 		// ASSUMES destinations have dangling pointers TODO checks
 		for g in me_ge.iter().cloned() {
 			let me_ge_space = self.r.get_me_pu(g).expect("gggg");
-			assert_eq!(*tid, me_ge_space.type_id);
+			assert_eq!(*tid, me_ge_space.type_info.type_id);
 			me_ge_space.set_ptr(src);
 			self.w.ready.set(g); // PUTTER is ready
 		}
@@ -804,7 +804,7 @@ impl<'a> Firer<'a> {
 			println!("::port_to_mem_and_ports| first_me_ge={:?}", first_me_ge);
 			let first_me_ge_space = self.r.get_me_pu(first_me_ge).expect("wfew");
 			self.w.ready.set(first_me_ge); // GETTER is ready
-			let tid = &first_me_ge_space.type_id;
+			let tid = &first_me_ge_space.type_info.type_id;
 			let info = &first_me_ge_space.type_info;
 			// 3. acquire a fresh ptr for this memcell
 			// ASSUMES this memcell has a dangling ptr. TODO use Option<NonNull<_>> later for checking
@@ -827,7 +827,7 @@ impl<'a> Firer<'a> {
 			for g in me_ge_iter {
 				println!("::port_to_mem_and_ports| mem_g={:?}", g);
 				let me_ge_space = self.r.get_me_pu(g).expect("gggg");
-				assert_eq!(*tid, me_ge_space.type_id);
+				assert_eq!(*tid, me_ge_space.type_info.type_id);
 
 				// 5. dec refs for existing ptr. free if refs are now 0
 				me_ge_space.set_ptr(fresh_ptr);
