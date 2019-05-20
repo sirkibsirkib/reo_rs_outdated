@@ -1194,7 +1194,8 @@ fn test_my_proto() {
 
 		s.spawn(move |_| {
 			for _ in 0..5 {
-				println!("GOT {:?} | {:?}", g3.get_signal(), g3.get_signal());
+				// g3.get_signal(); g3.get_signal();
+				println!("GOT {:?} | {:?}", g3.get(), g3.get_signal());
 				// milli_sleep!(2000);
 			}
 		});
