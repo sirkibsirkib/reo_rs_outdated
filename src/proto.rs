@@ -25,6 +25,7 @@ type CloneFnPtr = fn(*mut u8, *mut u8);
 const FLAG_YOUR_MOVE: usize = (1 << 63);
 const FLAG_OTH_EXIST: usize = (1 << 62);
 
+// contains all the information a memcell needs such that it can erase the type
 #[derive(Debug, Clone, Copy)]
 struct MemTypeInfo {
 	type_id: TypeId,
@@ -33,7 +34,6 @@ struct MemTypeInfo {
 	bytes: usize,
 	align: usize,
 }
-
 impl MemTypeInfo {
 	pub fn new<T: 'static + PortData>() -> Self {
 		let drop_fn: DropFnPtr = |ptr| unsafe {
@@ -72,7 +72,7 @@ impl MemoSpace {
 		}
 	}
 	fn make_empty(&self, my_id: PortId, r: &ProtoR, w: &mut ProtoActive, do_drop: bool) {
-		println!("::make_empty| id={} do_drop={}", my_id, do_drop);
+		// println!("::make_empty| id={} do_drop={}", my_id, do_drop);
 		let ptr = self.get_ptr();
 		let src_refs = w.mem_refs.get_mut(&ptr).expect("UNKNWN");
 		let tid = &self.type_info.type_id;
@@ -150,7 +150,7 @@ impl PoGeSpace {
 		}
 	}
 	fn get_signal(&self, a: &ProtoAll) {
-		println!("::get_sig| (start)");
+		// println!("::get_sig| (start)");
 		let msg = self.dropbox.recv();
 		let putter_id: PortId = msg & (!FLAG_YOUR_MOVE) & (!FLAG_OTH_EXIST);
 		let i_move = (msg & FLAG_YOUR_MOVE) > 0;
@@ -158,7 +158,7 @@ impl PoGeSpace {
 
 		// it's possible I am assigned "move duty" even if I didn't want it.
 		// move then means "drop"
-		assert!(i_move || conflict); 
+		debug_assert!(i_move || conflict); 
 		match a.r.get_space(putter_id) {
 			SpaceRef::Memo(memo_space) => {
 				if i_move {
@@ -202,19 +202,19 @@ impl PoGeSpace {
 		}
 	}
 	fn get<T: PortData>(&self, a: &ProtoAll) -> T {
-		println!("::get| start");
+		// println!("::get| start");
 		let msg = self.dropbox.recv();
 		let putter_id: PortId = msg & (!FLAG_YOUR_MOVE) & (!FLAG_OTH_EXIST);
 		let i_move = (msg & FLAG_YOUR_MOVE) > 0;
 		let conflict = msg & FLAG_OTH_EXIST > 0;
 
-		println!("::get| putter_id={} i_move={} conflict={}", putter_id, i_move, conflict);
+		// println!("::get| putter_id={} i_move={} conflict={}", putter_id, i_move, conflict);
 
 		// I requested move, so if it was denied SOMEONE must move
-		assert!(i_move || conflict); 
+		debug_assert!(i_move || conflict); 
 		match a.r.get_space(putter_id) {
 			SpaceRef::Memo(memo_space) => {
-				println!("::get| mepu branch");
+				// println!("::get| mepu branch");
 				let ptr: &T = unsafe {
 					transmute(memo_space.get_ptr())
 				};
@@ -247,7 +247,7 @@ impl PoGeSpace {
 				}
 			},
 			SpaceRef::PoPu(po_pu_space) => {
-				println!("::get| popu branch");
+				// println!("::get| popu branch");
 				let ptr: &T = unsafe {
 					transmute(po_pu_space.get_ptr())
 				};
@@ -260,7 +260,7 @@ impl PoGeSpace {
 						std::ptr::read(ptr)
 					};
 					// 3. release putter. let them know someone DID move (don't drop)
-					println!("::get| releasing popu");
+					// println!("::get| releasing popu");
 					po_pu_space.dropbox.send(1);
 					datum
 				} else {
@@ -312,8 +312,8 @@ impl ProtoW {
 		awaiting_states.retain(|awaiting_state| {
 			let retain = if ready.is_superset(&awaiting_state.state) {
 				match r.get_space(awaiting_state.whom) {
-					SpaceRef::PoPu(space) => space.dropbox.sema.release(),
-					SpaceRef::PoGe(space) => space.dropbox.sema.release(),
+					SpaceRef::PoPu(space) => space.dropbox.send_nothing(),
+					SpaceRef::PoGe(space) => space.dropbox.send_nothing(),
 					_ => panic!("bad state-waiter PortId!"),
 				};
 				false
@@ -330,7 +330,7 @@ impl ProtoW {
 			return;
 		}
 		let mut num_tenatives = 0;
-		println!("enter with id={:?}. bitset now {:?}", my_id, &self.active.ready);
+		// println!("enter with id={:?}. bitset now {:?}", my_id, &self.active.ready);
 		'outer: loop {
 			'inner: for (rule_id, rule) in self.rules.iter().enumerate() {
 				if self.active.ready.is_superset(&rule.guard_ready) && (rule.guard_fn)(r) {
@@ -354,19 +354,19 @@ impl ProtoW {
 							rule_id,
 							awaiting: num_tenatives,
 						});
-						println!("committed to rid {}", rule_id);
+						// println!("committed to rid {}", rule_id);
 						break 'inner;
 					}
 					// no tenatives! proceed
 
-					println!("... firing {:?}. READY: {:?} GUARD {:?}", rule_id, &self.active.ready, &rule.guard_ready);
+					// println!("... firing {:?}. READY: {:?} GUARD {:?}", rule_id, &self.active.ready, &rule.guard_ready);
 
 					rule.fire(Firer {
 						r,
 						w: &mut self.active,
 					});
 					Self::notify_state_waiters(&self.active.ready, &mut self.awaiting_states, r);
-					println!("... FIRE COMPLETE {:?}. READY: {:?} GUARD {:?}", rule_id, &self.active.ready, &rule.guard_ready);
+					// println!("... FIRE COMPLETE {:?}. READY: {:?} GUARD {:?}", rule_id, &self.active.ready, &rule.guard_ready);
 					if !rule.guard_ready.test(my_id) {
 						// job done!
 						break 'inner;
@@ -376,13 +376,13 @@ impl ProtoW {
 				}
 			}
 			// none matched
-			println!("... exiting");
+			// println!("... exiting");
 			return
 		}
 	}
 	fn enter_committed(&mut self, r: &ProtoR, tent_it: PortId, expecting_rule: usize) {
 		let comm: &mut Commitment = self.commitment.as_mut().expect("BUT IT MUST BE");
-		assert_eq!(comm.rule_id, expecting_rule);
+		debug_assert_eq!(comm.rule_id, expecting_rule);
 		self.ready_tentative.set_to(tent_it, false);
 		comm.awaiting -= 1;
 		if comm.awaiting > 0 {
@@ -439,29 +439,27 @@ impl ProtoR {
 }
 
 struct MsgDropbox {
-	sema: Semaphore,
-	msg: UnsafeCell<usize>,
+	s: crossbeam::Sender<usize>,
+	r: crossbeam::Receiver<usize>,
 }
 impl MsgDropbox {
 	fn new() -> Self {
-		Self {
-			sema: Semaphore::new(0),
-			msg: 0.into(),
-		}
+		let (s, r) = crossbeam::channel::bounded(1);
+		Self { s, r }
 	}
 	#[inline]
 	fn recv(&self) -> usize {
-		self.sema.acquire();
-		unsafe { 
-			*self.msg.get()
-		}
+		self.r.recv().unwrap()
 	}
 	#[inline]
 	fn send(&self, msg: usize) {
-		unsafe {
-			*self.msg.get() = msg;
-		}
-		self.sema.release();
+		self.s.try_send(msg).expect("Msgbox was full!")
+	}
+	fn send_nothing(&self) {
+		self.send(!0)
+	}
+	fn recv_nothing(&self) {
+		debug_assert_eq!(self.recv(), !0);
 	}
 }
 
@@ -497,8 +495,8 @@ impl PortGroup {
 		} // release lock
 		let space = self.p.r.get_space(self.leader);
 		match space {
-			SpaceRef::PoPu(po_pu_space) => po_pu_space.dropbox.sema.acquire(),
-			SpaceRef::PoGe(po_ge_space) => po_ge_space.dropbox.sema.acquire(),
+			SpaceRef::PoPu(po_pu_space) => po_pu_space.dropbox.recv_nothing(),
+			SpaceRef::PoGe(po_ge_space) => po_ge_space.dropbox.recv_nothing(),
 			_ => panic!("BAD ID"),
 		}
 		// I received a notification that the state is ready!
@@ -619,12 +617,12 @@ impl ProtoAll {
 			if rem > 0 {
 				capacity += info.align - rem;
 			}
-			println!("@ {:?} for info {:?}", capacity, &info);
+			// println!("@ {:?} for info {:?}", capacity, &info);
 			offsets_n_typeids.push((capacity, info.type_id));
 			mem_type_info.entry(info.type_id).or_insert_with(|| Arc::new(info));
 			capacity += info.bytes.max(1); // make pointers unique even with 0-byte data
 		}
-		println!("CAP IS {:?}", capacity);
+		// println!("CAP IS {:?}", capacity);
 
 		// meta-offset used to ensure the start of the vec alsigns to 64-bits (covers all cases)
 		// almost always unnecessary
@@ -691,7 +689,7 @@ impl<T> Putter<T> {
 	pub fn put(&mut self, datum: T) -> Option<T> {
 		let po_pu = self.p.r.get_po_pu(self.id).expect("HEYa");
 
-		// 1. make ready my datum & set owned to true
+		// 1. make ready my datum
 		unsafe {
 			po_pu.set_ptr(transmute(&datum));	
 		}
@@ -700,14 +698,15 @@ impl<T> Putter<T> {
 		self.p.w.lock().enter(&self.p.r, self.id);
 
 		// 3. wait for my value to be consumed
-		let msg = po_pu.dropbox.recv();
-		match msg {
+		let num_movers_msg = po_pu.dropbox.recv();
+		println!("putter got msg={}", num_movers_msg);
+		match num_movers_msg {
 			0 => Some(datum),
 			1 => {
 				std::mem::forget(datum);
 				None
 			},
-			_ => panic!("putter got a bad msg"),
+			_ => panic!("putter got a bad `num_movers_msg`"),
 		}
 	}
 	pub fn put_lossy(&mut self, datum: T) {
@@ -722,9 +721,12 @@ impl<T> Putter<T> {
 		self.p.w.lock().enter(&self.p.r, self.id);
 
 		// 3. wait for my value to be consumed
-		let msg = po_pu.dropbox.recv();
-		std::mem::forget(datum);
-		assert!(msg == 0 || msg == 1); // sanity check
+		let num_movers_msg = po_pu.dropbox.recv();
+		match num_movers_msg {
+			0 => drop(datum),
+			1 => std::mem::forget(datum),
+			_ => panic!("putter got a bad `num_movers_msg`"),
+		}
 	}
 }
 
@@ -779,7 +781,7 @@ impl<'a> Firer<'a> {
 	}
 
 	pub fn mem_to_mem_and_ports(&mut self, me_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
-		println!("mem_to_mem_and_ports");
+		// println!("mem_to_mem_and_ports");
 		let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
 		let tid = &memo_space.type_info.type_id;
 		let src = memo_space.get_ptr();
@@ -788,7 +790,7 @@ impl<'a> Firer<'a> {
 		// ASSUMES destinations have dangling pointers TODO checks
 		for g in me_ge.iter().cloned() {
 			let me_ge_space = self.r.get_me_pu(g).expect("gggg");
-			assert_eq!(*tid, me_ge_space.type_info.type_id);
+			debug_assert_eq!(*tid, me_ge_space.type_info.type_id);
 			me_ge_space.set_ptr(src);
 			self.w.ready.set(g); // PUTTER is ready
 		}
@@ -807,19 +809,19 @@ impl<'a> Firer<'a> {
 	}
 
 	pub fn port_to_mem_and_ports(&mut self, po_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
-		println!("port_to_mem_and_ports");
+		// println!("port_to_mem_and_ports");
 
-		assert!(po_pu < FLAG_OTH_EXIST && po_pu < FLAG_YOUR_MOVE);
+		debug_assert!(po_pu < FLAG_OTH_EXIST && po_pu < FLAG_YOUR_MOVE);
 		let po_pu_space = self.r.get_po_pu(po_pu).expect("ECH");
 
 		// 1. port getters have move-priority
 		let port_mover_id = self.find_mover(po_ge);
-		println!("::port_to_mem_and_ports| port_mover_id={:?}", port_mover_id);
+		// println!("::port_to_mem_and_ports| port_mover_id={:?}", port_mover_id);
 
 		// 2. populate memory cells if necessary
 		let mut me_ge_iter = me_ge.iter().cloned();
 		if let Some(first_me_ge) = me_ge_iter.next() {
-			println!("::port_to_mem_and_ports| first_me_ge={:?}", first_me_ge);
+			// println!("::port_to_mem_and_ports| first_me_ge={:?}", first_me_ge);
 			let first_me_ge_space = self.r.get_me_pu(first_me_ge).expect("wfew");
 			self.w.ready.set(first_me_ge); // GETTER is ready
 			let tid = &first_me_ge_space.type_info.type_id;
@@ -833,26 +835,26 @@ impl<'a> Firer<'a> {
 			let dest = first_me_ge_space.get_ptr();
 			if port_mover_id.is_some() {
 				// mem clone!
-				println!("::port_to_mem_and_ports| mem clone");
+				// println!("::port_to_mem_and_ports| mem clone");
 				(info.clone_fn)(src, dest);
 			} else {
 				// mem move!
-				println!("::port_to_mem_and_ports| mem move");
+				// println!("::port_to_mem_and_ports| mem move");
 				unsafe { std::ptr::copy(src, dest, info.bytes) };
 			}
 			// 4. copy pointers to other memory cells (if any)
 			// ASSUMES all destinations have dangling pointers
 			for g in me_ge_iter {
-				println!("::port_to_mem_and_ports| mem_g={:?}", g);
+				// println!("::port_to_mem_and_ports| mem_g={:?}", g);
 				let me_ge_space = self.r.get_me_pu(g).expect("gggg");
-				assert_eq!(*tid, me_ge_space.type_info.type_id);
+				debug_assert_eq!(*tid, me_ge_space.type_info.type_id);
 
 				// 5. dec refs for existing ptr. free if refs are now 0
 				me_ge_space.set_ptr(fresh_ptr);
 				self.w.ready.set(g); // GETTER is ready
 				ptr_refs += 1;
 			}
-			println!("::port_to_mem_and_ports| ptr_refs={}", ptr_refs);
+			// println!("::port_to_mem_and_ports| ptr_refs={}", ptr_refs);
 			self.w.mem_refs.insert(fresh_ptr, ptr_refs);
 		}
 
@@ -861,12 +863,12 @@ impl<'a> Firer<'a> {
 		// tell the putter the number of MOVERS BUT don't wake them up yet!
 		match (port_mover_id, po_ge.len()) {
 			(Some(m), 1) => {
-				println!("::port_to_mem_and_ports| MOV={},L={}", m, 1);
+				// println!("::port_to_mem_and_ports| MOV={},L={}", m, 1);
 				// ONLY mover case. mover will wake putter
 				self.r.send_to_getter(m, po_pu | FLAG_YOUR_MOVE);
 			},
 			(Some(m), l) => {
-				println!("::port_to_mem_and_ports| MOV={},L={}", m, l);
+				// println!("::port_to_mem_and_ports| MOV={},L={}", m, l);
 				// mover AND cloners case. mover will wake putter
 				po_pu_space.cloner_countdown.store(l-1, Ordering::SeqCst);
 				for g in po_ge.iter().cloned() {
@@ -879,11 +881,12 @@ impl<'a> Firer<'a> {
 				}
 			},
 			(None, l) => {
-				println!("::port_to_mem_and_ports| MOV=.,L={}", l);
+				// println!("::port_to_mem_and_ports| MOV=.,L={}", l);
 				// no movers
 				if l == 0 {
 					// no cloners either
-					po_pu_space.dropbox.send(0);
+					let mem_cloners = if me_ge.is_empty() {0} else {1};
+					po_pu_space.dropbox.send(mem_cloners);
 				} else {
 					po_pu_space.cloner_countdown.store(l, Ordering::SeqCst);
 					for g in po_ge.iter().cloned() {
@@ -929,14 +932,14 @@ fn in_rng(x: &Range<usize>, y: usize) -> bool {
 }
 
 
-struct MyProto;
-impl Proto for MyProto {
-	type Interface = (Putter<u32>, Putter<u32>, Getter<u32>);
+struct MyProto<T: PortData>(PhantomData<T>);
+impl<T: 'static +  PortData> Proto for MyProto<T> {
+	type Interface = (Putter<T>, Putter<T>, Getter<T>);
 	fn instantiate() -> Self::Interface {
 		let num_port_putters = 2; // 0..=1
 		let num_port_getters = 1; // 2..=2
 		let mem_infos = vec![ // 3..=3  (3..=4 bits)
-			MemTypeInfo::new::<u32>(),
+			MemTypeInfo::new::<T>(),
 		];
 		let rules = vec![
 			Rule {
@@ -978,6 +981,19 @@ impl Proto for MyProto {
 // 	],
 // ];
 
+#[derive(Debug)]
+struct TestDatum(u32);
+impl Clone for TestDatum {
+	fn clone(&self) -> Self {
+		println!("I AM BEING CLONED :3 (contents={})", self.0);
+		TestDatum(self.0)
+	}
+}
+impl Drop for TestDatum {
+	fn drop(&mut self) {
+		println!("I AM BEING DROPPED :O (contents={})", self.0);
+	}
+}
 
 #[test]
 fn test_my_proto() {
@@ -985,19 +1001,20 @@ fn test_my_proto() {
 	crossbeam::scope(|s| {
 		s.spawn(move |_| {
 			for i in 0..5 {
-				p1.put(i);
+				p1.put(Box::new(TestDatum(i)));
 			}
 		});
 
 		s.spawn(move |_| {
 			for i in 0..5 {
-				p2.put(i + 10);
+				p2.put(Box::new(TestDatum(i + 10)));
 			}
 		});
 
 		s.spawn(move |_| {
 			for _ in 0..5 {
 				println!("GOT {:?} | {:?}", g3.get(), g3.get());
+				// milli_sleep!(2000);
 			}
 		});
 	}).expect("WENT OK");
