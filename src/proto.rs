@@ -2,6 +2,7 @@
 ////////// DEBUG DEBUG
 #![allow(dead_code)]
 
+use std::ptr::NonNull;
 use core::ops::Range;
 use crate::{PortId, RuleId};
 use hashbrown::HashMap;
@@ -19,37 +20,87 @@ use parking_lot::Mutex;
 use crate::bitset::BitSet;
 use std_semaphore::Semaphore;
 
-type DropFnPtr = fn(*mut u8);
-type CloneFnPtr = fn(*mut u8, *mut u8);
-
 const FLAG_YOUR_MOVE: usize = (1 << 63);
 const FLAG_OTH_EXIST: usize = (1 << 62);
 
-// contains all the information a memcell needs such that it can erase the type
+// an untyped CloneFn pointer. Null variant represents an undefined function
+// which will cause explicit panic if execute() is invoked.
+// UNSAFE if the type pointed to does not match the type used to instantiate the ptr.
+#[derive(Debug, Copy, Clone)]
+struct CloneFn(Option<NonNull<fn(*mut u8, *mut u8)>>);
+impl CloneFn {
+	fn new_defined<T: PortData>() -> Self {
+		let clos: fn(*mut u8, *mut u8) = |src, dest| unsafe {
+			let datum = T::clone_fn(transmute(src));
+			let dest: &mut T = transmute(dest);
+			*dest = datum;
+		};
+		let opt_nn = NonNull::new( unsafe { transmute(clos) });
+		debug_assert!(opt_nn.is_some());
+		CloneFn(opt_nn)
+	}
+	fn new_undefined() -> Self {
+		CloneFn(None)
+	}
+	/// safe ONLY IF:
+	///  - src is &T to initialized memory
+	///  - dst is &mut T to uninitialized memory
+	///  - T matches the type provided when creating this CloneFn in `new_defined`
+	#[inline]
+	unsafe fn execute(self, src: *mut u8, dst: *mut u8) {
+		if let Some(x) = self.0 {
+			(*x.as_ptr())(src, dst);
+		} else {
+			panic!("proto attempted to clone an unclonable type!");
+		}
+	}
+}
+
+// an untyped DropFn pointer. Null variant represents a trivial drop Fn (no behavior).
+// new() automatically handles types with trivial drop functions
+// UNSAFE if the type pointed to does not match the type used to instantiate the ptr.
+#[derive(Debug, Copy, Clone)]
+struct DropFn(Option<NonNull<fn(*mut u8)>>);
+impl DropFn {
+	fn new<T>() -> Self {
+		if std::mem::needs_drop::<T>() {
+			let clos: fn(*mut u8) = |ptr| unsafe {
+	            let ptr: &mut ManuallyDrop<T> = transmute(ptr);
+	            ManuallyDrop::drop(ptr);
+	        };
+	        DropFn(NonNull::new( unsafe { transmute(clos) }))
+		} else {
+			DropFn(None)
+		}
+	}
+	/// safe ONLY IF the given pointer is of the type this DropFn was created for.
+	#[inline]
+	unsafe fn execute(self, on: *mut u8) {
+		if let Some(x) = self.0 {
+			(*x.as_ptr())(on);
+		} else {
+			// None variant represents a drop with no effect
+		}
+	}
+}
+
+// facilitates memcell type erasure. this structure contains all the information
+// necessary to specialize CLONE, DROP and MOVE procedures on the type-erased ptrs
 #[derive(Debug, Clone, Copy)]
 struct MemTypeInfo {
 	type_id: TypeId,
-	drop_fn: DropFnPtr,
-	clone_fn: CloneFnPtr,
+	drop_fn: DropFn,
+	clone_fn: CloneFn,
 	bytes: usize,
 	align: usize,
 }
 impl MemTypeInfo {
 	pub fn new<T: 'static + PortData>() -> Self {
-		let drop_fn: DropFnPtr = |ptr| unsafe {
-			let ptr: &mut ManuallyDrop<T> = transmute(ptr);
-			ManuallyDrop::drop(ptr);
-		};
-		let clone_fn: CloneFnPtr = |src, dest| unsafe {
-			let datum = T::clone_fn(transmute(src));
-			let dest: &mut T = transmute(dest);
-			*dest = datum;
-		};
 		Self {
 			bytes: std::mem::size_of::<T>(),
 			type_id: TypeId::of::<T>(),
-			drop_fn,
-			clone_fn,
+			drop_fn: DropFn::new::<T>(),
+			clone_fn: CloneFn::new_defined::<T>(),
 			align: std::mem::align_of::<T>(),
 		}
 	}
@@ -81,7 +132,7 @@ impl MemoSpace {
 			// contents need to be dropped! ptr needs to be made free
 			w.mem_refs.remove(&ptr).expect("hhh");
 			if do_drop {
-				(self.type_info.drop_fn)(ptr);
+				unsafe { self.type_info.drop_fn.execute(ptr) }
 			}
 			w.ready.set(r.mem_getter_id(my_id)); // GETTER ready
 			w.free_mems.get_mut(tid).expect("??").push(ptr);
@@ -566,7 +617,8 @@ impl Drop for PortGroup {
 	}
 }
 
-// [Memo | PoPu | PoGe | MeGe]
+// Ready layout:  [PoPu|PoGe|MePu|MeGe] 
+// Spaces layout: [PoPu|PoGe|Memo]
 struct ProtoAll {
 	r: ProtoR,
 	w: Mutex<ProtoW>,
@@ -574,14 +626,6 @@ struct ProtoAll {
 impl ProtoAll {
 	fn new(mem_infos: Vec<MemTypeInfo>, num_port_putters: usize, num_port_getters: usize, rules: Vec<Rule>) -> Self {
 		let mem_get_id_start = mem_infos.len() + num_port_putters + num_port_getters;
-		// let po_pu_rng = 0..num_port_putters;
-		// let po_ge_rng = num_port_putters..(num_port_putters + num_port_getters);
-		// let end = num_port_putters + num_port_getters + mem_infos.len();
-		// let mem_rng = (num_port_putters + num_port_getters)..end;
-		// let rules = abstract_actions.iter().map(|action_list| {
-		// 	prepare_rule(action_list, po_pu_rng.clone(), po_ge_rng.clone(), mem_rng.clone()).expect("BAD ACTION")
-		// }).collect();
-
 		let (mem_data, me_pu, free_mems, ready) = Self::build_buffer(mem_infos, mem_get_id_start);
 		let po_pu = (0..num_port_putters).map(|_| PoPuSpace::new()).collect();
 		let po_ge = (0..num_port_getters).map(|_| PoGeSpace::new()).collect();
@@ -835,11 +879,9 @@ impl<'a> Firer<'a> {
 			let dest = first_me_ge_space.get_ptr();
 			if port_mover_id.is_some() {
 				// mem clone!
-				// println!("::port_to_mem_and_ports| mem clone");
-				(info.clone_fn)(src, dest);
+				unsafe { info.clone_fn.execute(src, dest) }
 			} else {
 				// mem move!
-				// println!("::port_to_mem_and_ports| mem move");
 				unsafe { std::ptr::copy(src, dest, info.bytes) };
 			}
 			// 4. copy pointers to other memory cells (if any)
@@ -911,12 +953,12 @@ impl Rule {
 }
 
 
-pub trait PortData: Sized {
+pub trait PortData: Sized + 'static {
 	fn clone_fn(_t: &Self) -> Self {
 		panic!("Don't know how to clone this!")
 	}
 }
-impl<T:Clone> PortData for T {
+impl<T: Clone + 'static> PortData for T {
 	fn clone_fn(t: &Self) -> Self {
 		T::clone(t)
 	}
@@ -932,14 +974,14 @@ fn in_rng(x: &Range<usize>, y: usize) -> bool {
 }
 
 
-struct MyProto<T: PortData>(PhantomData<T>);
-impl<T: 'static +  PortData> Proto for MyProto<T> {
-	type Interface = (Putter<T>, Putter<T>, Getter<T>);
+struct MyProto<T0: PortData>(PhantomData<T0>);
+impl<T0: PortData> Proto for MyProto<T0> {
+	type Interface = (Putter<T0>, Putter<T0>, Getter<T0>);
 	fn instantiate() -> Self::Interface {
 		let num_port_putters = 2; // 0..=1
 		let num_port_getters = 1; // 2..=2
 		let mem_infos = vec![ // 3..=3  (3..=4 bits)
-			MemTypeInfo::new::<T>(),
+			MemTypeInfo::new::<T0>(),
 		];
 		let rules = vec![
 			Rule {
@@ -997,6 +1039,7 @@ impl Drop for TestDatum {
 
 #[test]
 fn test_my_proto() {
+	println!("drop is needed? ={:?}", std::mem::needs_drop::<TestDatum>());
 	let (mut p1, mut p2, mut g3) = MyProto::instantiate();
 	crossbeam::scope(|s| {
 		s.spawn(move |_| {

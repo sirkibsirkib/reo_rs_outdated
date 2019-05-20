@@ -46,24 +46,17 @@
 39. define a locking quorum. chosen such that if everyone locks {your_putters} & {quorum}, there is sufficient mutex
 40. is it possible to lock a port NOT in your put set without disaster?
 41. we know that there is NO overlap between ports in different ACTIONS of a RULE
-----------------------------
-WE IGNORE
-1. synchronous region decomposition
-2. opportunities to traverse bitsets in parallel (opt for compact bitsets instead)
-
-
-WE ASSUME
-1. we want to support large data
-2. we don't want to bound the #port IDS
-3. CLONE does not alter the contents of the shallowest bytewise representation
--- does NOT apply to highly experimental PIN types. eg for coroutines
-4. GET and PUT events and the resolution thereof 
-5. the protocol does not have to guarantee progress if nobody is calling get/put
-6. after a group COMMITS to an action, the protocol can halt until the committed action is performed
-
-WE SUPPORT
-1. passing values on the stack
-2. putter->getter stack passing
-3. memory->memory values are passed by reference
-4. reference-counted indirect memory passing
-5. values are allowed to be dropped in the circuit (at THIS level)
+42. movers must happen AFTER cloners. we also want to maximize optimization
+43. single-slot channel for MsgDropbox
+44. type erasure with MemTypeInfo structure
+45. avoiding hashmap lookups with Arc<MemTypeInfo> in memcells
+46. we ISGNORE synch region decomposition
+47. talk about how we can move set_ready() outside of CR but then introduce rule bias (bytesets)
+48. memcell ptr indirection
+49. type erasure requires Arc<MemTypeInfo> to facilitate moving, cloning and dropping
+50. CLONE must does not alter the contents of the shallowest bytewise representation (fair assumption)
+51. protocol state progression is LAZY (stuck until you call get/put)
+52. after a group COMMITS to an action, the protocol can halt until the committed action is performed
+53. Option<NonNull<T>> for cheap and safe drop/clone function pointers
+54. PortDatum trait and specialization in future
+55. procedural macros for tightening the critical region: fire and guard functions can be optimized while still exposing a safe API 
