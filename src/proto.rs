@@ -25,8 +25,37 @@ type CloneFnPtr = fn(*mut u8, *mut u8);
 const FLAG_YOUR_MOVE: usize = (1 << 63);
 const FLAG_OTH_EXIST: usize = (1 << 62);
 
-/// tracks the datum associated with this memory cell (if any).
+#[derive(Debug, Clone, Copy)]
+struct MemTypeInfo {
+	type_id: TypeId,
+	drop_fn: DropFnPtr,
+	clone_fn: CloneFnPtr,
+	bytes: usize,
+	align: usize,
+}
 
+impl MemTypeInfo {
+	pub fn new<T: 'static + PortData>() -> Self {
+		let drop_fn: DropFnPtr = |ptr| unsafe {
+			let ptr: &mut ManuallyDrop<T> = transmute(ptr);
+			ManuallyDrop::drop(ptr);
+		};
+		let clone_fn: CloneFnPtr = |src, dest| unsafe {
+			let datum = T::clone_fn(transmute(src));
+			let dest: &mut T = transmute(dest);
+			*dest = datum;
+		};
+		Self {
+			bytes: std::mem::size_of::<T>(),
+			type_id: TypeId::of::<T>(),
+			drop_fn,
+			clone_fn,
+			align: std::mem::align_of::<T>(),
+		}
+	}
+}
+
+/// tracks the datum associated with this memory cell (if any).
 struct MemoSpace {
 	ptr: AtomicPtr<u8>, // acts as *mut T AND key to mem_slot_meta_map
 	cloner_countdown: AtomicUsize,
@@ -369,12 +398,6 @@ impl ProtoW {
 }
 
 
-struct MemTypeInfo {
-	type_id: TypeId,
-	drop_fn: DropFnPtr,
-	clone_fn: CloneFnPtr,
-	bytes: usize,
-}
 
 struct ProtoR {
 	mem_data: Vec<u8>,
@@ -551,7 +574,7 @@ struct ProtoAll {
 	w: Mutex<ProtoW>,
 }
 impl ProtoAll {
-	fn new(mem_infos: Vec<BuildMemInfo>, num_port_putters: usize, num_port_getters: usize, rules: Vec<Rule>) -> Self {
+	fn new(mem_infos: Vec<MemTypeInfo>, num_port_putters: usize, num_port_getters: usize, rules: Vec<Rule>) -> Self {
 		let mem_get_id_start = mem_infos.len() + num_port_putters + num_port_getters;
 		// let po_pu_rng = 0..num_port_putters;
 		// let po_ge_rng = num_port_putters..(num_port_putters + num_port_getters);
@@ -578,7 +601,7 @@ impl ProtoAll {
 		});
 		ProtoAll {w, r}
 	}
-	fn build_buffer(infos: Vec<BuildMemInfo>, mem_get_id_start: usize) ->
+	fn build_buffer(infos: Vec<MemTypeInfo>, mem_get_id_start: usize) ->
 	(
 		Vec<u8>, // buffer
 		Vec<MemoSpace>,
@@ -598,13 +621,8 @@ impl ProtoAll {
 			}
 			println!("@ {:?} for info {:?}", capacity, &info);
 			offsets_n_typeids.push((capacity, info.type_id));
-			mem_type_info.entry(info.type_id).or_insert_with(|| Arc::new(MemTypeInfo {
-				drop_fn: info.drop_fn,
-				clone_fn: info.clone_fn,
-				bytes: info.size,
-				type_id: info.type_id,
-			}));
-			capacity += info.size.max(1); // make pointers unique even with 0-byte data
+			mem_type_info.entry(info.type_id).or_insert_with(|| Arc::new(info));
+			capacity += info.bytes.max(1); // make pointers unique even with 0-byte data
 		}
 		println!("CAP IS {:?}", capacity);
 
@@ -918,7 +936,7 @@ impl Proto for MyProto {
 		let num_port_putters = 2; // 0..=1
 		let num_port_getters = 1; // 2..=2
 		let mem_infos = vec![ // 3..=3  (3..=4 bits)
-			BuildMemInfo::new::<u32>(),
+			MemTypeInfo::new::<u32>(),
 		];
 		let rules = vec![
 			Rule {
@@ -960,34 +978,6 @@ impl Proto for MyProto {
 // 	],
 // ];
 
-#[derive(Debug)]
-struct BuildMemInfo {
-	size: usize,
-	align: usize,
-	type_id: TypeId,
-	drop_fn: DropFnPtr,
-	clone_fn: CloneFnPtr,
-}
-impl BuildMemInfo {
-	pub fn new<T: 'static + PortData>() -> Self {
-		let drop_fn: DropFnPtr = |ptr| unsafe {
-			let ptr: &mut ManuallyDrop<T> = transmute(ptr);
-			ManuallyDrop::drop(ptr);
-		};
-		let clone_fn: CloneFnPtr = |src, dest| unsafe {
-			let datum = T::clone_fn(transmute(src));
-			let dest: &mut T = transmute(dest);
-			*dest = datum;
-		};
-		Self {
-			size: std::mem::size_of::<T>(),
-			align: std::mem::align_of::<T>(),
-			type_id: TypeId::of::<T>(),
-			drop_fn,
-			clone_fn,
-		}
-	}
-}
 
 #[test]
 fn test_my_proto() {
