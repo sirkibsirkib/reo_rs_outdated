@@ -3,7 +3,8 @@ pub mod helper;
 pub mod bitset;
 pub mod proto;
 
-pub type PortId = usize;
+// generalizes over port and memory cell "name"
+pub type LocId = usize;
 pub type RuleId = usize;
 
 // temporarily omitted

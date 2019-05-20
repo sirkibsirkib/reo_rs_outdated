@@ -4,8 +4,8 @@
 
 use std::ptr::NonNull;
 use core::ops::Range;
-use crate::{PortId, RuleId};
-use hashbrown::HashMap;
+use crate::{LocId, RuleId};
+use hashbrown::{HashMap};
 use std::{
 	any::TypeId,
 	mem::{transmute, ManuallyDrop},
@@ -122,7 +122,7 @@ impl MemoSpace {
 			type_info,
 		}
 	}
-	fn make_empty(&self, my_id: PortId, r: &ProtoR, w: &mut ProtoActive, do_drop: bool) {
+	fn make_empty(&self, my_id: LocId, r: &ProtoR, w: &mut ProtoActive, do_drop: bool) {
 		// println!("::make_empty| id={} do_drop={}", my_id, do_drop);
 		let ptr = self.get_ptr();
 		let src_refs = w.mem_refs.get_mut(&ptr).expect("UNKNWN");
@@ -203,7 +203,7 @@ impl PoGeSpace {
 	fn get_signal(&self, a: &ProtoAll) {
 		// println!("::get_sig| (start)");
 		let msg = self.dropbox.recv();
-		let putter_id: PortId = msg & (!FLAG_YOUR_MOVE) & (!FLAG_OTH_EXIST);
+		let putter_id: LocId = msg & (!FLAG_YOUR_MOVE) & (!FLAG_OTH_EXIST);
 		let i_move = (msg & FLAG_YOUR_MOVE) > 0;
 		let conflict = msg & FLAG_OTH_EXIST > 0;
 
@@ -255,7 +255,7 @@ impl PoGeSpace {
 	fn get<T: PortData>(&self, a: &ProtoAll) -> T {
 		// println!("::get| start");
 		let msg = self.dropbox.recv();
-		let putter_id: PortId = msg & (!FLAG_YOUR_MOVE) & (!FLAG_OTH_EXIST);
+		let putter_id: LocId = msg & (!FLAG_YOUR_MOVE) & (!FLAG_OTH_EXIST);
 		let i_move = (msg & FLAG_YOUR_MOVE) > 0;
 		let conflict = msg & FLAG_OTH_EXIST > 0;
 
@@ -349,7 +349,7 @@ struct Commitment {
 
 struct StateWaiter {
 	state: BitSet,
-	whom: PortId,
+	whom: LocId,
 }
 struct ProtoW {
 	rules: Vec<Rule>,
@@ -365,7 +365,7 @@ impl ProtoW {
 				match r.get_space(awaiting_state.whom) {
 					SpaceRef::PoPu(space) => space.dropbox.send_nothing(),
 					SpaceRef::PoGe(space) => space.dropbox.send_nothing(),
-					_ => panic!("bad state-waiter PortId!"),
+					_ => panic!("bad state-waiter LocId!"),
 				};
 				false
 			} else {
@@ -374,7 +374,7 @@ impl ProtoW {
 			retain
 		})
 	}
-	fn enter(&mut self, r: &ProtoR, my_id: PortId) {
+	fn enter(&mut self, r: &ProtoR, my_id: LocId) {
 		self.active.ready.set(my_id);
 		if self.commitment.is_some() {
 			// some rule is waiting for completion
@@ -431,7 +431,7 @@ impl ProtoW {
 			return
 		}
 	}
-	fn enter_committed(&mut self, r: &ProtoR, tent_it: PortId, expecting_rule: usize) {
+	fn enter_committed(&mut self, r: &ProtoR, tent_it: LocId, expecting_rule: usize) {
 		let comm: &mut Commitment = self.commitment.as_mut().expect("BUT IT MUST BE");
 		debug_assert_eq!(comm.rule_id, expecting_rule);
 		self.ready_tentative.set_to(tent_it, false);
@@ -459,26 +459,26 @@ struct ProtoR {
  	// mem_type_info: HashMap<TypeId, MemTypeInfo>,
 }
 impl ProtoR {
-	fn send_to_getter(&self, id: PortId, msg: usize) {
+	fn send_to_getter(&self, id: LocId, msg: usize) {
 		self.get_po_ge(id).expect("NOPOGE").dropbox.send(msg)
 	}
 	#[inline]
-	fn mem_getter_id(&self, id: PortId) -> PortId {
+	fn mem_getter_id(&self, id: LocId) -> LocId {
 		id + self.me_pu.len()
 	}
-	fn get_po_pu(&self, id: PortId) -> Option<&PoPuSpace> {
+	fn get_po_pu(&self, id: LocId) -> Option<&PoPuSpace> {
 		self.po_pu.get(id)
 	}
-	fn get_po_ge(&self, id: PortId) -> Option<&PoGeSpace> {
+	fn get_po_ge(&self, id: LocId) -> Option<&PoGeSpace> {
 		self.po_ge.get(id - self.po_pu.len())
 	}
-	fn get_me_pu(&self, id: PortId) -> Option<&MemoSpace> {
+	fn get_me_pu(&self, id: LocId) -> Option<&MemoSpace> {
 		self.me_pu.get(id - self.po_pu.len() - self.po_ge.len())
 	}
-	fn id_is_port(&self, id: PortId) -> bool {
+	fn loc_is_port(&self, id: LocId) -> bool {
 		id < (self.po_pu.len() + self.po_ge.len())
 	}
-	fn get_space(&self, id: PortId) -> SpaceRef {
+	fn get_space(&self, id: LocId) -> SpaceRef {
 		use SpaceRef::*;
 		let ppl = self.po_pu.len();
 		let pgl = self.po_ge.len();
@@ -519,19 +519,19 @@ impl MsgDropbox {
 #[derive(Debug, Copy, Clone)]
 pub enum PortGroupError {
 	EmptyGroup,
-	MemId(PortId),
+	MemId(LocId),
 	SynchronousWithRule(RuleId),
 }
 #[derive(Default)]
 pub struct PortGroupBuilder {
-	core: Option<(PortId, Arc<ProtoAll>)>,
+	core: Option<(LocId, Arc<ProtoAll>)>,
 	members: BitSet,
 }
 
 pub struct PortGroup {
 	p: Arc<ProtoAll>,
-	leader: PortId,
-	disambiguation: HashMap<RuleId, PortId>,
+	leader: LocId,
+	disambiguation: HashMap<RuleId, LocId>,
 }
 impl PortGroup {
 
@@ -552,27 +552,27 @@ impl PortGroup {
 		}
 		// I received a notification that the state is ready!
 	}
-	unsafe fn new(p: &Arc<ProtoAll>, port_set: &BitSet) -> Result<PortGroup, PortGroupError> {
+	unsafe fn new(p: &Arc<ProtoAll>, id_set: &BitSet) -> Result<PortGroup, PortGroupError> {
 		use PortGroupError::*;
 		let mut w = p.w.lock();
-		// 1. check that NO rule contains multiple ports in the set
-		for (rule_id, rule) in w.rules.iter().enumerate() {
-			if rule.guard_ready.iter_and(port_set).count() > 1 {
-				return Err(SynchronousWithRule(rule_id))
-			}
-		}
-		// 2. check no group id is associated with memory
-		for id in port_set.iter_sparse() {
-			if !p.r.id_is_port(id) {
+		// 1. check all loc_ids correspond with ports (not memory cells)
+		for id in id_set.iter_sparse() {
+			if !p.r.loc_is_port(id) {
 				return Err(MemId(id))
 			}
 		}
-		match port_set.iter_sparse().next() {
+		// 1. check that NO rule contains multiple ports in the set
+		for (rule_id, rule) in w.rules.iter().enumerate() {
+			if rule.guard_ready.iter_and(id_set).count() > 1 {
+				return Err(SynchronousWithRule(rule_id))
+			}
+		}
+		match id_set.iter_sparse().next() {
 			Some(leader) => {
 				let mut disambiguation = HashMap::new();
 				// 2. change occurrences of any port IDs in the set to leader
 				for (rule_id, rule) in w.rules.iter_mut().enumerate() {
-					if let Some(specific_port) = rule.guard_ready.iter_and(port_set).next() {
+					if let Some(specific_port) = rule.guard_ready.iter_and(id_set).next() {
 						disambiguation.insert(rule_id, specific_port);
 						rule.guard_ready.set_to(specific_port, false);
 						rule.guard_ready.set(leader);
@@ -587,7 +587,7 @@ impl PortGroup {
 			None => Err(EmptyGroup),
 		}
 	}
-	pub fn ready_wait_determine_commit(&self) -> PortId {
+	pub fn ready_wait_determine_commit(&self) -> LocId {
 		let space = self.p.r.get_space(self.leader);
 		{
 			let mut w = self.p.w.lock();
@@ -619,12 +619,43 @@ impl Drop for PortGroup {
 
 // Ready layout:  [PoPu|PoGe|MePu|MeGe] 
 // Spaces layout: [PoPu|PoGe|Memo]
+
+struct LocIdPartition {
+	num_port_putters: usize,
+	num_port_getters: usize,
+	num_mems: usize,
+}
+impl LocIdPartition {
+	fn loc_is_po_pu(&self, id: LocId) -> bool {
+		id < self.num_port_putters
+	}
+	fn loc_can_put(&self, id: LocId) -> bool {
+		self.loc_is_po_pu(id) || self.loc_is_mem(id)
+	}
+	fn loc_can_get(&self, id: LocId) -> bool {
+		self.loc_is_po_ge(id) || self.loc_is_mem(id)
+	}
+	fn loc_is_po_ge(&self, id: LocId) -> bool {
+		let r = self.num_port_putters + self.num_port_getters;
+		self.num_port_putters <= id && id < r
+	}
+	fn loc_is_mem(&self, id: LocId) -> bool {
+		let l = self.num_port_putters + self.num_port_getters;
+		let r = self.num_port_putters + self.num_port_getters + self.num_mems;
+		l <= id && id < r
+	}
+}
 struct ProtoAll {
 	r: ProtoR,
 	w: Mutex<ProtoW>,
 }
 impl ProtoAll {
 	fn new(mem_infos: Vec<MemTypeInfo>, num_port_putters: usize, num_port_getters: usize, rules: Vec<Rule>) -> Self {
+		let _loc_id_partition = LocIdPartition {
+			num_port_putters,
+			num_port_getters,
+			num_mems: mem_infos.len(),
+		};
 		let mem_get_id_start = mem_infos.len() + num_port_putters + num_port_getters;
 		let (mem_data, me_pu, free_mems, ready) = Self::build_buffer(mem_infos, mem_get_id_start);
 		let po_pu = (0..num_port_putters).map(|_| PoPuSpace::new()).collect();
@@ -694,7 +725,7 @@ unsafe impl<T: PortData> Sync for Getter<T> {}
 pub struct Getter<T: PortData> {
 	p: Arc<ProtoAll>,
 	phantom: PhantomData<T>,
-	pub(crate) id: PortId,
+	pub(crate) id: LocId,
 }
 impl<T: PortData> Getter<T> {
 	pub fn get_signal(&mut self) {
@@ -727,7 +758,7 @@ unsafe impl<T> Sync for Putter<T> {}
 pub struct Putter<T> {
 	p: Arc<ProtoAll>,
 	phantom: PhantomData<T>,
-	pub(crate) id: PortId,
+	pub(crate) id: LocId,
 }
 impl<T> Putter<T> {
 	pub fn put(&mut self, datum: T) -> Option<T> {
@@ -780,12 +811,12 @@ pub struct Firer<'a> {
 	w: &'a mut ProtoActive,
 }
 impl<'a> Firer<'a> {
-	pub fn mem_to_nowhere(&mut self, me_pu: PortId) {
+	pub fn mem_to_nowhere(&mut self, me_pu: LocId) {
 		let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
 		memo_space.make_empty(me_pu, self.r, self.w, true);
 	}
 
-	pub fn mem_to_ports(&mut self, me_pu: PortId, po_ge: &[PortId]) {
+	pub fn mem_to_ports(&mut self, me_pu: LocId, po_ge: &[LocId]) {
 		let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
 
 		// 1. port getters have move-priority
@@ -824,7 +855,7 @@ impl<'a> Firer<'a> {
 		}
 	}
 
-	pub fn mem_to_mem_and_ports(&mut self, me_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
+	pub fn mem_to_locs(&mut self, me_pu: LocId, me_ge: &[LocId], po_ge: &[LocId]) {
 		// println!("mem_to_mem_and_ports");
 		let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
 		let tid = &memo_space.type_info.type_id;
@@ -845,14 +876,14 @@ impl<'a> Firer<'a> {
 	}
 
 
-	fn find_mover(&self, getters: &[PortId]) -> Option<PortId> {
+	fn find_mover(&self, getters: &[LocId]) -> Option<LocId> {
 		getters.iter().filter(|id| {
 			let po_ge = self.r.get_po_ge(**id).expect("bad id");
 			po_ge.get_move_intention()
 		}).next().or(getters.get(0)).cloned()
 	}
 
-	pub fn port_to_mem_and_ports(&mut self, po_pu: PortId, me_ge: &[PortId], po_ge: &[PortId]) {
+	pub fn port_to_locs(&mut self, po_pu: LocId, me_ge: &[LocId], po_ge: &[LocId]) {
 		// println!("port_to_mem_and_ports");
 
 		debug_assert!(po_pu < FLAG_OTH_EXIST && po_pu < FLAG_YOUR_MOVE);
@@ -988,8 +1019,8 @@ impl<T0: PortData> Proto for MyProto<T0> {
 				guard_ready: bitset!{0,1,2,4},
 				guard_fn: |_r| true,
 				fire_fn: |mut _f| {
-					_f.port_to_mem_and_ports(0, &[], &[2]);
-					_f.port_to_mem_and_ports(1, &[3], &[]);
+					_f.port_to_locs(0, &[], &[2]);
+					_f.port_to_locs(1, &[3], &[]);
 				},
 			},
 			Rule { // m3 -> g2
@@ -1012,14 +1043,17 @@ impl<T0: PortData> Proto for MyProto<T0> {
 	}
 }
 
-
-// let abstract_rules: &[&[AbstractAction]] = &[
+struct ActionDef {
+	putter: LocId,
+	getters: &'static [LocId],
+}
+// let abstract_rules: &[&[ActionDef]] = &[
 // 	&[ // rule 0: {p0 -> g2, p1 -> m3}
-// 		AbstractAction::new(0, &[2], &[]),
-// 		AbstractAction::new(1, &[3], &[]),
+// 		ActionDef::new(0, &[2]),
+// 		ActionDef::new(1, &[3]),
 // 	],
 // 	&[ // rule 1: {m3 -> g2}
-// 		AbstractAction::new(3, &[], &[2]),
+// 		ActionDef::new(3, &[2]),
 // 	],
 // ];
 

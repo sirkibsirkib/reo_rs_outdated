@@ -12,8 +12,3 @@ derive-new = "0.5.6"
 std-semaphore = "0.1.0"
 smallvec = "0.6.9"
 crossbeam = "0.7.1"
-# crossbeam-channel = "0.3.8"
-
-# anymap = "0.12.1"
-# slab = "0.4.2"
-# rand = "0.6.5"
