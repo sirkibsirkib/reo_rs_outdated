@@ -59,4 +59,6 @@
 52. after a group COMMITS to an action, the protocol can halt until the committed action is performed
 53. Option<NonNull<T>> for cheap and safe drop/clone function pointers
 54. PortDatum trait and specialization in future
-55. procedural macros for tightening the critical region: fire and guard functions can be optimized while still exposing a safe API 
+55. procedural macros for tightening the critical region: fire and guard functions can be optimized while still exposing a safe API
+56. using declarative macros for creating sugar
+57. using procedural macros to exploit complie-time information (future work?) 

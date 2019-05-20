@@ -23,6 +23,8 @@ use std_semaphore::Semaphore;
 const FLAG_YOUR_MOVE: usize = (1 << 63);
 const FLAG_OTH_EXIST: usize = (1 << 62);
 
+type GuardFn = fn(&ProtoR) -> bool;
+
 // an untyped CloneFn pointer. Null variant represents an undefined function
 // which will cause explicit panic if execute() is invoked.
 // UNSAFE if the type pointed to does not match the type used to instantiate the ptr.
@@ -352,7 +354,7 @@ struct StateWaiter {
 	whom: LocId,
 }
 struct ProtoW {
-	rules: Vec<Rule>,
+	rules: Vec<Rule2>,
 	active: ProtoActive,
 	commitment: Option<Commitment>,
 	ready_tentative: BitSet,
@@ -626,6 +628,13 @@ struct LocIdPartition {
 	num_mems: usize,
 }
 impl LocIdPartition {
+	fn mem_getter_id(&self, id: LocId) -> Option<LocId> {
+		if self.loc_is_mem(id) {
+			Some(id + self.num_mems)
+		} else {
+			None
+		}
+	}
 	fn loc_is_po_pu(&self, id: LocId) -> bool {
 		id < self.num_port_putters
 	}
@@ -650,12 +659,13 @@ struct ProtoAll {
 	w: Mutex<ProtoW>,
 }
 impl ProtoAll {
-	fn new(mem_infos: Vec<MemTypeInfo>, num_port_putters: usize, num_port_getters: usize, rules: Vec<Rule>) -> Self {
-		let _loc_id_partition = LocIdPartition {
+	fn new(mem_infos: Vec<MemTypeInfo>, num_port_putters: usize, num_port_getters: usize, rule_defs: &[RuleDef]) -> Self {
+		let loc_id_partition = LocIdPartition {
 			num_port_putters,
 			num_port_getters,
 			num_mems: mem_infos.len(),
 		};
+		let rules = Self::build_rules(loc_id_partition, rule_defs).expect("OH NO");
 		let mem_get_id_start = mem_infos.len() + num_port_putters + num_port_getters;
 		let (mem_data, me_pu, free_mems, ready) = Self::build_buffer(mem_infos, mem_get_id_start);
 		let po_pu = (0..num_port_putters).map(|_| PoPuSpace::new()).collect();
@@ -717,6 +727,91 @@ impl ProtoAll {
 		}).collect();
 		(buf, ptrs, free_mems, ready)
 	}
+	fn build_rules(loc_id_partition: LocIdPartition, rule_defs: &[RuleDef]) -> Result<Vec<Rule2>, BuildRuleError> {
+		use BuildRuleError::*;
+		let mut rules = vec![];
+		for (_rule_id, (guard_fn, action_defs)) in rule_defs.iter().enumerate() {
+			let mut guard_ready = BitSet::default();
+			let mut actions = vec![];
+			// let mut seen = HashSet::<LocId>::default();
+			for action_def in action_defs.iter() {
+				let mut mg = vec![];
+				let mut pg = vec![];
+				let p = action_def.putter;
+				if let Some(g) = loc_id_partition.mem_getter_id(p) {
+					if guard_ready.test(g) {
+						// mem is getter in one action and putter in another
+						return Err(SynchronousFiring {loc_id: p})
+					}
+				}
+				for &g in action_def.getters.iter() {
+					if loc_id_partition.loc_is_po_ge(g) {
+						pg.push(g);
+						if guard_ready.set_to(g, true) {
+							return Err(SynchronousFiring {loc_id: g})
+						}
+					} else if loc_id_partition.loc_is_mem(g) {
+						mg.push(g);
+						if guard_ready.set_to(loc_id_partition.mem_getter_id(g).expect("BAD MEM ID"), true) {
+							return Err(SynchronousFiring {loc_id: g})
+						}
+					} else {
+						return Err(LocCannotGet { loc_id: g })
+					}
+				}
+				if guard_ready.set_to(p, true) {
+					return Err(SynchronousFiring {loc_id: p})
+				}
+				// seen.insert(action_def.putter);
+				if loc_id_partition.loc_is_po_pu(p) {
+					actions.push(Action::PortPut { putter: p, mg, pg});
+				} else if loc_id_partition.loc_is_mem(p) {
+					actions.push(Action::MemPut { putter: p, mg, pg});
+				} else {
+					return Err(LocCannotPut { loc_id: p })
+				}
+			}
+			rules.push(Rule2 {
+				guard_ready,
+				guard_fn: guard_fn.clone(),
+				actions,
+			});
+		}
+		Ok(rules)
+	}
+}
+#[derive(Debug, Copy, Clone)]
+enum BuildRuleError {
+	SynchronousFiring { loc_id: LocId },
+	LocCannotGet { loc_id: LocId },
+	LocCannotPut { loc_id: LocId },
+}
+
+#[derive(derive_new::new)]
+struct ActionDef {
+	pub putter: LocId,
+	pub getters: &'static [LocId],
+}
+
+// more protected
+struct Rule2 {
+	guard_ready: BitSet,
+	guard_fn: Arc<dyn Fn(&ProtoR) -> bool>,
+	actions: Vec<Action>,
+}
+impl Rule2 {
+	fn fire(&self, mut f: Firer) {
+		for a in self.actions.iter() {
+			match a {
+				Action::PortPut { putter, mg, pg } => f.port_to_locs(*putter, mg, pg),
+				Action::MemPut { putter, mg, pg } => f.mem_to_locs(*putter, mg, pg),
+			}
+		}
+	}
+}
+enum Action {
+	PortPut { putter: LocId, mg: Vec<LocId>, pg: Vec<LocId> },
+	MemPut { putter: LocId, mg: Vec<LocId>, pg: Vec<LocId> },
 }
 
 
@@ -774,7 +869,7 @@ impl<T> Putter<T> {
 
 		// 3. wait for my value to be consumed
 		let num_movers_msg = po_pu.dropbox.recv();
-		println!("putter got msg={}", num_movers_msg);
+		// println!("putter got msg={}", num_movers_msg);
 		match num_movers_msg {
 			0 => Some(datum),
 			1 => {
@@ -974,7 +1069,7 @@ impl<'a> Firer<'a> {
 
 struct Rule {
 	guard_ready: BitSet,
-	guard_fn: fn(&ProtoR) -> bool,
+	guard_fn: GuardFn,
 	fire_fn: fn(Firer),
 }
 impl Rule {
@@ -1004,35 +1099,33 @@ fn in_rng(x: &Range<usize>, y: usize) -> bool {
 	x.start <= y && y < x.end
 }
 
+macro_rules! new_rule_def {
+	($guard_clos:expr ;    $( $p:tt => $(  $g:tt ),*   );* ) => {{
+		(
+			Arc::new($guard_clos),
+			&[  $(
+				ActionDef::new($p, &[$($g),*])
+
+			),*  ],
+		)
+	}}
+}
+
 
 struct MyProto<T0: PortData>(PhantomData<T0>);
 impl<T0: PortData> Proto for MyProto<T0> {
 	type Interface = (Putter<T0>, Putter<T0>, Getter<T0>);
 	fn instantiate() -> Self::Interface {
-		let num_port_putters = 2; // 0..=1
-		let num_port_getters = 1; // 2..=2
-		let mem_infos = vec![ // 3..=3  (3..=4 bits)
+		let num_port_putters = 2;	// 0..=1
+		let num_port_getters = 1;	// 2..=2
+		let mem_infos = vec![		// 3..=3  (3..=4 bits)
 			MemTypeInfo::new::<T0>(),
 		];
-		let rules = vec![
-			Rule {
-				guard_ready: bitset!{0,1,2,4},
-				guard_fn: |_r| true,
-				fire_fn: |mut _f| {
-					_f.port_to_locs(0, &[], &[2]);
-					_f.port_to_locs(1, &[3], &[]);
-				},
-			},
-			Rule { // m3 -> g2
-				guard_ready: bitset!{2, 3},
-				guard_fn: |_r| true,
-				fire_fn: |mut _f| {
-					_f.mem_to_ports(3, &[2]);
-				},
-			},
+		let rule_defs: &[RuleDef] = &[
+			new_rule_def![|_r| true; 0=>2; 1=>3],
+			new_rule_def![|_r| true; 3=>2],
 		];
-
-		let p = Arc::new(ProtoAll::new(mem_infos, num_port_putters, num_port_getters, rules));
+		let p = Arc::new(ProtoAll::new(mem_infos, num_port_putters, num_port_getters, rule_defs));
 		(
 			Putter {p: p.clone(), id: 0, phantom: Default::default() },
 			Putter {p: p.clone(), id: 1, phantom: Default::default() },
@@ -1043,18 +1136,29 @@ impl<T0: PortData> Proto for MyProto<T0> {
 	}
 }
 
-struct ActionDef {
-	putter: LocId,
-	getters: &'static [LocId],
-}
-// let abstract_rules: &[&[ActionDef]] = &[
-// 	&[ // rule 0: {p0 -> g2, p1 -> m3}
-// 		ActionDef::new(0, &[2]),
-// 		ActionDef::new(1, &[3]),
-// 	],
-// 	&[ // rule 1: {m3 -> g2}
-// 		ActionDef::new(3, &[2]),
-// 	],
+
+type RuleDef<'a> = (
+	Arc<dyn Fn(&ProtoR)->bool>,
+	&'a [ActionDef],
+);
+
+// These are the UNSAFE representations of these
+// let rules = vec![
+// 	Rule {
+// 		guard_ready: bitset!{0,1,2,4},
+// 		guard_fn: |_r| true,
+// 		fire_fn: |mut _f| {
+// 			_f.port_to_locs(0, &[], &[2]);
+// 			_f.port_to_locs(1, &[3], &[]);
+// 		},
+// 	},
+// 	Rule { // m3 -> g2
+// 		guard_ready: bitset!{2, 3},
+// 		guard_fn: |_r| true,
+// 		fire_fn: |mut _f| {
+// 			_f.mem_to_ports(3, &[2]);
+// 		},
+// 	},
 // ];
 
 #[derive(Debug)]
@@ -1078,19 +1182,19 @@ fn test_my_proto() {
 	crossbeam::scope(|s| {
 		s.spawn(move |_| {
 			for i in 0..5 {
-				p1.put(Box::new(TestDatum(i)));
+				p1.put([i;32]);
 			}
 		});
 
 		s.spawn(move |_| {
 			for i in 0..5 {
-				p2.put(Box::new(TestDatum(i + 10)));
+				p2.put([i;32]);
 			}
 		});
 
 		s.spawn(move |_| {
 			for _ in 0..5 {
-				println!("GOT {:?} | {:?}", g3.get(), g3.get());
+				println!("GOT {:?} | {:?}", g3.get_signal(), g3.get_signal());
 				// milli_sleep!(2000);
 			}
 		});
