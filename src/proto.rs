@@ -730,11 +730,11 @@ impl ProtoAll {
 	fn build_rules(loc_id_partition: LocIdPartition, rule_defs: &[RuleDef]) -> Result<Vec<Rule2>, BuildRuleError> {
 		use BuildRuleError::*;
 		let mut rules = vec![];
-		for (_rule_id, (guard_fn, action_defs)) in rule_defs.iter().enumerate() {
+		for (_rule_id, rule_def) in rule_defs.iter().enumerate() {
 			let mut guard_ready = BitSet::default();
 			let mut actions = vec![];
 			// let mut seen = HashSet::<LocId>::default();
-			for action_def in action_defs.iter() {
+			for action_def in rule_def.actions.iter() {
 				let mut mg = vec![];
 				let mut pg = vec![];
 				let p = action_def.putter;
@@ -773,7 +773,7 @@ impl ProtoAll {
 			}
 			rules.push(Rule2 {
 				guard_ready,
-				guard_fn: guard_fn.clone(),
+				guard_fn: rule_def.guard_fn.clone(),
 				actions,
 			});
 		}
@@ -791,6 +791,11 @@ enum BuildRuleError {
 struct ActionDef {
 	pub putter: LocId,
 	pub getters: &'static [LocId],
+}
+#[derive(derive_new::new)]
+struct RuleDef {
+	pub guard_fn: Arc<dyn Fn(&ProtoR) -> bool>,
+	pub actions: Vec<ActionDef>,
 }
 
 // more protected
@@ -1092,7 +1097,7 @@ impl<T: Clone + 'static> PortData for T {
 
 pub trait Proto: Sized {
 	type Interface: Sized;
-	fn instantiate() -> Self::Interface;	
+	fn instantiate() -> Self::Interface;
 }
 
 fn in_rng(x: &Range<usize>, y: usize) -> bool {
@@ -1101,12 +1106,12 @@ fn in_rng(x: &Range<usize>, y: usize) -> bool {
 
 macro_rules! new_rule_def {
 	($guard_clos:expr ;    $( $p:tt => $(  $g:tt ),*   );* ) => {{
-		(
+		RuleDef::new(
 			Arc::new($guard_clos),
-			&[  $(
+			vec![ $(
 				ActionDef::new($p, &[$($g),*])
 
-			),*  ],
+			),*],
 		)
 	}}
 }
@@ -1121,7 +1126,7 @@ impl<T0: PortData> Proto for MyProto<T0> {
 		let mem_infos = vec![		// 3..=3  (3..=4 bits)
 			MemTypeInfo::new::<T0>(),
 		];
-		let rule_defs: &[RuleDef] = &[
+		let rule_defs= &[
 			new_rule_def![|_r| true; 0=>2; 1=>3],
 			new_rule_def![|_r| true; 3=>2],
 		];
@@ -1135,12 +1140,6 @@ impl<T0: PortData> Proto for MyProto<T0> {
 		)
 	}
 }
-
-
-type RuleDef<'a> = (
-	Arc<dyn Fn(&ProtoR)->bool>,
-	&'a [ActionDef],
-);
 
 // These are the UNSAFE representations of these
 // let rules = vec![
