@@ -136,9 +136,10 @@ impl MemoSpace {
 			if do_drop {
 				unsafe { self.type_info.drop_fn.execute(ptr) }
 			}
-			w.ready.set(r.mem_getter_id(my_id)); // GETTER ready
 			w.free_mems.get_mut(tid).expect("??").push(ptr);
 		}
+		println!("MEMCELL BECAME EMPTY. SET");
+		w.ready.set(r.mem_getter_id(my_id)); // GETTER ready
 	}
 }
 
@@ -205,6 +206,7 @@ impl PoGeSpace {
 	fn get<T>(&self, a: &ProtoAll) -> T {
 		println!("getting ... ");
 		let (case, putter_id) = DataGetCase::parse_msg(self.dropbox.recv()); 
+		println!("... GOT MSG");
 		match a.r.get_space(putter_id) {
 			SpaceRef::Memo(memo_space) => {
 				let ptr: &T = unsafe {
@@ -216,7 +218,9 @@ impl PoGeSpace {
 					// cloner_countdown always initialized to #getters. 
 					let was = memo_space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
 					if was == 1 {
+						println!("WILL TRY LOCK...");
 						let mut w = a.w.lock();
+						println!("GOT LOCK!");
 						// 2. release putter. DO NOT drop
 						memo_space.make_empty(putter_id, &a.r, &mut w.active, false);
 						// 3. notify state waiters
@@ -258,6 +262,7 @@ impl PoGeSpace {
 					let datum = unsafe { std::ptr::read(ptr) };
 					let was = po_pu_space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
 					if was == 1 {
+						println!("... i am last. notifying putter");
 						po_pu_space.dropbox.send(1);
 					}
 					datum
@@ -273,7 +278,7 @@ impl PoGeSpace {
 						let datum = T::maybe_clone(ptr);
 						let was = po_pu_space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
 						// offset by 1 because the mover isnt participating
-						if was == 2 {
+						if was == 2 && case.mover_must_wait() {
 							// I was last! release mover (who MUST exist)
 							po_pu_space.mover_sema.release();
 						}
@@ -334,6 +339,7 @@ impl ProtoW {
 	fn enter(&mut self, r: &ProtoR, my_id: LocId) {
 		println!("ENTER WITH GOAL {}", my_id);
 		self.active.ready.set(my_id);
+		println!("READINESS IS {:?}", &self.active.ready);
 		if self.commitment.is_some() {
 			// some rule is waiting for completion
 			return;
@@ -957,16 +963,11 @@ impl<'a> Firer<'a> {
 			0 => {
 				// cleanup my damn self
 				println!("no movers!");
-
-				let src = memo_space.get_ptr();
-				let src_refs = self.w.mem_refs.get_mut(&src).expect("UNKNWN");
-				*src_refs -= 1;
-				if *src_refs == 0 {
-					memo_space.make_empty(me_pu, self.r, self.w, true);
-				}
+				memo_space.make_empty(me_pu, self.r, self.w, true);
 			},
 			1 => {
 				// solo mover
+				memo_space.cloner_countdown.store(1, Ordering::SeqCst);
 				let mut i = po_ge.iter().filter(|&&g| self.r.get_po_ge(g).unwrap().get_want_data());
 				let mover = *i.next().unwrap();
 				println!("mover is {}", mover);
@@ -1064,11 +1065,12 @@ impl<'a> Firer<'a> {
 			0 => {
 				// cleanup my damn self
 				println!("no movers!");
-				let mem_cloners = if me_ge.is_empty() {0} else {1};
-				po_pu_space.dropbox.send(mem_cloners);
+				let mem_movers = if me_ge.is_empty() {0} else {1};
+				po_pu_space.dropbox.send(mem_movers);
 			},
 			1 => {
 				// solo mover
+				po_pu_space.cloner_countdown.store(1, Ordering::SeqCst);
 				let mut i = po_ge.iter().filter(|&&g| self.r.get_po_ge(g).unwrap().get_want_data());
 				let mover = *i.next().unwrap();
 				println!("mover= {}", mover);
@@ -1242,7 +1244,7 @@ fn test_my_proto() {
 				g3.get();
 				println!("============================");
 				// milli_sleep!(3000);
-				g3.get_signal();
+				g3.get();
 				println!("============================");
 				// milli_sleep!(3000);
 			}
