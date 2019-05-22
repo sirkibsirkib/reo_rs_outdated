@@ -1,4 +1,4 @@
-use crate::proto::{Getter, PortGroup, Proto, Putter, PortData};
+use crate::proto::{Getter, PortGroup, Proto, Putter};
 use crate::rbpa::Var;
 use std::marker::PhantomData;
 use std::mem;
@@ -41,7 +41,7 @@ pub struct Safe<D: Decimal, T> {
     phantom: PhantomData<D>,
 }
 
-impl<D: Decimal, T: PortData> Safe<D, Getter<T>> {
+impl<D: Decimal, T> Safe<D, Getter<T>> {
     pub unsafe fn new(mut inner: Getter<T>, leader: PortId) -> Self {
         let original_id = inner.id;
         inner.id = leader;
@@ -56,7 +56,7 @@ impl<D: Decimal, T: PortData> Safe<D, Getter<T>> {
         (self.inner.get(), unsafe { R::fresh() })
     }
 }
-impl<D: Decimal, T: PortData> Safe<D, Putter<T>> {
+impl<D: Decimal, T> Safe<D, Putter<T>> {
     pub unsafe fn new(mut inner: Putter<T>, leader: PortId) -> Self {
         let original_id = inner.id;
         inner.id = leader;

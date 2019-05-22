@@ -1,3 +1,5 @@
+#![feature(specialization)]
+
 #[macro_use]
 pub mod helper;
 pub mod bitset;
