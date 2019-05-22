@@ -89,7 +89,7 @@ impl DropFn {
 // facilitates memcell type erasure. this structure contains all the information
 // necessary to specialize CLONE, DROP and MOVE procedures on the type-erased ptrs
 #[derive(Debug, Clone, Copy)]
-struct MemTypeInfo {
+pub struct MemTypeInfo {
 	type_id: TypeId,
 	drop_fn: DropFn,
 	clone_fn: CloneFn,
@@ -452,7 +452,7 @@ impl ProtoW {
 
 
 
-struct ProtoR {
+pub struct ProtoR {
 	mem_data: Vec<u8>,
 	po_pu: Vec<PoPuSpace>, // id range 0..#PoPu
  	po_ge: Vec<PoGeSpace>, // id range #PoPu..(#PoPu + #PoGe)
@@ -622,54 +622,16 @@ impl Drop for PortGroup {
 // Ready layout:  [PoPu|PoGe|MePu|MeGe] 
 // Spaces layout: [PoPu|PoGe|Memo]
 
-struct LocIdPartition {
-	num_port_putters: usize,
-	num_port_getters: usize,
-	num_mems: usize,
-}
-impl LocIdPartition {
-	fn mem_getter_id(&self, id: LocId) -> Option<LocId> {
-		if self.loc_is_mem(id) {
-			Some(id + self.num_mems)
-		} else {
-			None
-		}
-	}
-	fn loc_is_po_pu(&self, id: LocId) -> bool {
-		id < self.num_port_putters
-	}
-	fn loc_can_put(&self, id: LocId) -> bool {
-		self.loc_is_po_pu(id) || self.loc_is_mem(id)
-	}
-	fn loc_can_get(&self, id: LocId) -> bool {
-		self.loc_is_po_ge(id) || self.loc_is_mem(id)
-	}
-	fn loc_is_po_ge(&self, id: LocId) -> bool {
-		let r = self.num_port_putters + self.num_port_getters;
-		self.num_port_putters <= id && id < r
-	}
-	fn loc_is_mem(&self, id: LocId) -> bool {
-		let l = self.num_port_putters + self.num_port_getters;
-		let r = self.num_port_putters + self.num_port_getters + self.num_mems;
-		l <= id && id < r
-	}
-}
 struct ProtoAll {
 	r: ProtoR,
 	w: Mutex<ProtoW>,
 }
 impl ProtoAll {
-	fn new(mem_infos: Vec<MemTypeInfo>, num_port_putters: usize, num_port_getters: usize, rule_defs: &[RuleDef]) -> Self {
-		let loc_id_partition = LocIdPartition {
-			num_port_putters,
-			num_port_getters,
-			num_mems: mem_infos.len(),
-		};
-		let rules = Self::build_rules(loc_id_partition, rule_defs).expect("OH NO");
-		let mem_get_id_start = mem_infos.len() + num_port_putters + num_port_getters;
-		let (mem_data, me_pu, free_mems, ready) = Self::build_buffer(mem_infos, mem_get_id_start);
-		let po_pu = (0..num_port_putters).map(|_| PoPuSpace::new()).collect();
-		let po_ge = (0..num_port_getters).map(|_| PoGeSpace::new()).collect();
+	fn new(proto_def: &ProtoDef) -> Self {
+		let rules = Self::build_rules(proto_def).expect("OH NO");
+		let (mem_data, me_pu, free_mems, ready) = Self::build_buffer(proto_def);
+		let po_pu = (0..proto_def.num_port_putters).map(|_| PoPuSpace::new()).collect();
+		let po_ge = (0..proto_def.num_port_getters).map(|_| PoGeSpace::new()).collect();
 		let r = ProtoR { mem_data, me_pu, po_pu, po_ge };
 		let w = Mutex::new(ProtoW {
 			rules,
@@ -684,19 +646,20 @@ impl ProtoAll {
 		});
 		ProtoAll {w, r}
 	}
-	fn build_buffer(infos: Vec<MemTypeInfo>, mem_get_id_start: usize) ->
+	fn build_buffer(proto_def: &ProtoDef) ->
 	(
 		Vec<u8>, // buffer
 		Vec<MemoSpace>,
 		HashMap<TypeId, Vec<*mut u8>>,
 		BitSet,
 	) {
+		let mem_get_id_start = proto_def.mem_infos.len() + proto_def.num_port_putters + proto_def.num_port_getters;
 		let mut capacity = 0;
 		let mut offsets_n_typeids = vec![];
 		let mut mem_type_info: HashMap<TypeId, Arc<MemTypeInfo>> = HashMap::default();
 		let mut ready = BitSet::default();
 		let mut free_mems = HashMap::default();
-		for (mem_id, info) in infos.into_iter().enumerate() {
+		for (mem_id, info) in proto_def.mem_infos.iter().enumerate() {
 			ready.set(mem_id + mem_get_id_start); // set GETTER
 			let rem = capacity % info.align.max(1);
 			if rem > 0 {
@@ -704,7 +667,7 @@ impl ProtoAll {
 			}
 			// println!("@ {:?} for info {:?}", capacity, &info);
 			offsets_n_typeids.push((capacity, info.type_id));
-			mem_type_info.entry(info.type_id).or_insert_with(|| Arc::new(info));
+			mem_type_info.entry(info.type_id).or_insert_with(|| Arc::new(*info));
 			capacity += info.bytes.max(1); // make pointers unique even with 0-byte data
 		}
 		// println!("CAP IS {:?}", capacity);
@@ -727,10 +690,10 @@ impl ProtoAll {
 		}).collect();
 		(buf, ptrs, free_mems, ready)
 	}
-	fn build_rules(loc_id_partition: LocIdPartition, rule_defs: &[RuleDef]) -> Result<Vec<Rule2>, BuildRuleError> {
+	fn build_rules(proto_def: &ProtoDef) -> Result<Vec<Rule2>, BuildRuleError> {
 		use BuildRuleError::*;
 		let mut rules = vec![];
-		for (_rule_id, rule_def) in rule_defs.iter().enumerate() {
+		for (_rule_id, rule_def) in proto_def.rule_defs.iter().enumerate() {
 			let mut guard_ready = BitSet::default();
 			let mut actions = vec![];
 			// let mut seen = HashSet::<LocId>::default();
@@ -738,21 +701,21 @@ impl ProtoAll {
 				let mut mg = vec![];
 				let mut pg = vec![];
 				let p = action_def.putter;
-				if let Some(g) = loc_id_partition.mem_getter_id(p) {
+				if let Some(g) = proto_def.mem_getter_id(p) {
 					if guard_ready.test(g) {
 						// mem is getter in one action and putter in another
 						return Err(SynchronousFiring {loc_id: p})
 					}
 				}
 				for &g in action_def.getters.iter() {
-					if loc_id_partition.loc_is_po_ge(g) {
+					if proto_def.loc_is_po_ge(g) {
 						pg.push(g);
 						if guard_ready.set_to(g, true) {
 							return Err(SynchronousFiring {loc_id: g})
 						}
-					} else if loc_id_partition.loc_is_mem(g) {
+					} else if proto_def.loc_is_mem(g) {
 						mg.push(g);
-						if guard_ready.set_to(loc_id_partition.mem_getter_id(g).expect("BAD MEM ID"), true) {
+						if guard_ready.set_to(proto_def.mem_getter_id(g).expect("BAD MEM ID"), true) {
 							return Err(SynchronousFiring {loc_id: g})
 						}
 					} else {
@@ -763,9 +726,9 @@ impl ProtoAll {
 					return Err(SynchronousFiring {loc_id: p})
 				}
 				// seen.insert(action_def.putter);
-				if loc_id_partition.loc_is_po_pu(p) {
+				if proto_def.loc_is_po_pu(p) {
 					actions.push(Action::PortPut { putter: p, mg, pg});
-				} else if loc_id_partition.loc_is_mem(p) {
+				} else if proto_def.loc_is_mem(p) {
 					actions.push(Action::MemPut { putter: p, mg, pg});
 				} else {
 					return Err(LocCannotPut { loc_id: p })
@@ -788,14 +751,51 @@ enum BuildRuleError {
 }
 
 #[derive(derive_new::new)]
-struct ActionDef {
+pub struct ActionDef {
 	pub putter: LocId,
 	pub getters: &'static [LocId],
 }
 #[derive(derive_new::new)]
-struct RuleDef {
+pub struct RuleDef {
 	pub guard_fn: Arc<dyn Fn(&ProtoR) -> bool>,
 	pub actions: Vec<ActionDef>,
+}
+unsafe impl Send for RuleDef {}
+unsafe impl Sync for RuleDef {}
+
+pub struct ProtoDef {
+	pub mem_infos: Vec<MemTypeInfo>,
+	pub num_port_putters: usize,
+	pub num_port_getters: usize,
+	pub rule_defs: Vec<RuleDef>,
+}
+
+impl ProtoDef {
+	fn mem_getter_id(&self, id: LocId) -> Option<LocId> {
+		if self.loc_is_mem(id) {
+			Some(id + self.mem_infos.len())
+		} else {
+			None
+		}
+	}
+	fn loc_is_po_pu(&self, id: LocId) -> bool {
+		id < self.num_port_putters
+	}
+	fn loc_can_put(&self, id: LocId) -> bool {
+		self.loc_is_po_pu(id) || self.loc_is_mem(id)
+	}
+	fn loc_can_get(&self, id: LocId) -> bool {
+		self.loc_is_po_ge(id) || self.loc_is_mem(id)
+	}
+	fn loc_is_po_ge(&self, id: LocId) -> bool {
+		let r = self.num_port_putters + self.num_port_getters;
+		self.num_port_putters <= id && id < r
+	}
+	fn loc_is_mem(&self, id: LocId) -> bool {
+		let l = self.num_port_putters + self.num_port_getters;
+		let r = self.num_port_putters + self.num_port_getters + self.mem_infos.len();
+		l <= id && id < r
+	}
 }
 
 // more protected
@@ -1072,16 +1072,16 @@ impl<'a> Firer<'a> {
 }
 
 
-struct Rule {
-	guard_ready: BitSet,
-	guard_fn: GuardFn,
-	fire_fn: fn(Firer),
-}
-impl Rule {
-	fn fire(&self, f: Firer) {
-		(self.fire_fn)(f)
-	}
-}
+// struct Rule {
+// 	guard_ready: BitSet,
+// 	guard_fn: GuardFn,
+// 	fire_fn: fn(Firer),
+// }
+// impl Rule {
+// 	fn fire(&self, f: Firer) {
+// 		(self.fire_fn)(f)
+// 	}
+// }
 
 
 pub trait PortData: Sized + 'static {
@@ -1097,6 +1097,7 @@ impl<T: Clone + 'static> PortData for T {
 
 pub trait Proto: Sized {
 	type Interface: Sized;
+	fn proto_def() -> ProtoDef;
 	fn instantiate() -> Self::Interface;
 }
 
@@ -1106,31 +1107,51 @@ fn in_rng(x: &Range<usize>, y: usize) -> bool {
 
 macro_rules! new_rule_def {
 	($guard_clos:expr ;    $( $p:tt => $(  $g:tt ),*   );* ) => {{
-		RuleDef::new(
-			Arc::new($guard_clos),
-			vec![ $(
-				ActionDef::new($p, &[$($g),*])
-
-			),*],
-		)
+		RuleDef {
+			guard_fn: Arc::new($guard_clos),
+			actions: vec![ 
+				$(ActionDef {
+					putter: $p,
+					getters: &[$($g),*],
+				}),*
+			],
+		}
 	}}
 }
 
+// lazy_static::lazy_static! {
+//     static ref MY_PROTO_DEF: ProtoDef = ProtoDef {
+// 		mem_infos: vec![
+// 			MemTypeInfo::new::<T0>(),
+// 		],
+// 		num_port_putters: 2,
+// 		num_port_getters: 1,
+// 		rule_defs: vec![
+// 			new_rule_def![|_r| true; 0=>2; 1=>3],
+// 			new_rule_def![|_r| true; 3=>2],
+// 		],
+// 	};
+// }
 
 struct MyProto<T0: PortData>(PhantomData<T0>);
 impl<T0: PortData> Proto for MyProto<T0> {
+
 	type Interface = (Putter<T0>, Putter<T0>, Getter<T0>);
+	fn proto_def() -> ProtoDef {
+		ProtoDef {
+			mem_infos: vec![
+				MemTypeInfo::new::<T0>(),
+			],
+			num_port_putters: 2,
+			num_port_getters: 1,
+			rule_defs: vec![
+				new_rule_def![|_r| true; 0=>2; 1=>3],
+				new_rule_def![|_r| true; 3=>2],
+			],
+		}
+	}
 	fn instantiate() -> Self::Interface {
-		let num_port_putters = 2;	// 0..=1
-		let num_port_getters = 1;	// 2..=2
-		let mem_infos = vec![		// 3..=3  (3..=4 bits)
-			MemTypeInfo::new::<T0>(),
-		];
-		let rule_defs= &[
-			new_rule_def![|_r| true; 0=>2; 1=>3],
-			new_rule_def![|_r| true; 3=>2],
-		];
-		let p = Arc::new(ProtoAll::new(mem_infos, num_port_putters, num_port_getters, rule_defs));
+		let p = Arc::new(ProtoAll::new(&Self::proto_def()));
 		(
 			Putter {p: p.clone(), id: 0, phantom: Default::default() },
 			Putter {p: p.clone(), id: 1, phantom: Default::default() },
