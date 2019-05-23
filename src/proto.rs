@@ -2,6 +2,7 @@
 ////////// DEBUG DEBUG
 #![allow(dead_code)]
 
+use std::time::Duration;
 use std::ptr::NonNull;
 use core::ops::Range;
 use crate::{LocId, RuleId};
@@ -203,9 +204,9 @@ impl PoGeSpace {
 			*self.want_data.get()
 		}
 	}
-	fn get<T>(&self, a: &ProtoAll) -> T {
-		println!("getting ... ");
-		let (case, putter_id) = DataGetCase::parse_msg(self.dropbox.recv()); 
+	#[inline]
+	fn participate_get<T>(&self, a: &ProtoAll, msg: usize) -> T {
+		let (case, putter_id) = DataGetCase::parse_msg(msg); 
 		println!("... GOT MSG");
 		match a.r.get_space(putter_id) {
 			SpaceRef::Memo(memo_space) => {
@@ -288,6 +289,24 @@ impl PoGeSpace {
 			},
 			_ => panic!("bad putter!"),
 		}
+	}
+	#[inline]
+	fn participate_get_timeout<T>(&self, a: &ProtoAll, timeout: Duration, my_id: LocId) -> Option<T> {
+		println!("getting ... ");
+		let msg = match self.dropbox.recv_timeout(timeout) {
+			Some(msg) => msg,
+			None => {
+				if a.w.lock().active.ready.set_to(my_id, false) {
+					// managed reverse my readiness
+					return None
+				} else {
+					// readiness has already been consumed
+					println!("too late");
+					self.dropbox.recv()
+				}
+			}
+		};
+		Some(self.participate_get(a, msg))
 	}
 }
 
@@ -462,6 +481,11 @@ impl MsgDropbox {
 	fn new() -> Self {
 		let (s, r) = crossbeam::channel::bounded(1);
 		Self { s, r }
+	}
+
+	#[inline]
+	fn recv_timeout(&self, timeout: Duration) -> Option<usize> {
+		self.r.recv_timeout(timeout).ok()
 	}
 	#[inline]
 	fn recv(&self) -> usize {
@@ -808,6 +832,18 @@ impl<T> Getter<T> {
 		po_ge.dropbox.recv_nothing();
 		println!("SIGGY RETURNING");
 	}
+	pub fn get_timeout(&mut self, timeout: Duration) -> Option<T> {
+		println!("dataey... id={}", self.id);
+		// 1. set move intention
+		let po_ge = self.p.r.get_po_ge(self.id).expect("HEYa");
+		po_ge.set_want_data(true);
+
+		// 2. enter, participate in protocol
+		self.p.w.lock().enter(&self.p.r, self.id);
+
+		// 3. participate
+		po_ge.participate_get_timeout(&self.p, timeout, self.id)
+	}
 	pub fn get(&mut self) -> T {
 		println!("dataey... id={}", self.id);
 		// 1. set move intention
@@ -818,9 +854,7 @@ impl<T> Getter<T> {
 		self.p.w.lock().enter(&self.p.r, self.id);
 
 		// 3. participate
-		let datum = po_ge.get(&self.p);
-		println!("GETTER RETURNING");
-		datum
+		po_ge.participate_get(&self.p, po_ge.dropbox.recv())
 	}
 }
 
@@ -833,6 +867,72 @@ pub struct Putter<T> {
 	pub(crate) id: LocId,
 }
 impl<T> Putter<T> {
+	pub fn put_timeout_lossy(&mut self, datum: T, timeout: Duration) {
+		let po_pu = self.p.r.get_po_pu(self.id).expect("HEYa");
+
+		// 1. make ready my datum
+		unsafe {
+			po_pu.set_ptr(transmute(&datum));	
+		}
+
+		// 2. enter, participate in protocol
+		self.p.w.lock().enter(&self.p.r, self.id);
+
+		// 3. wait for my value to be consumed
+		let num_movers_msg = match po_pu.dropbox.recv_timeout(timeout) {
+			Some(msg) => msg,
+			None => {
+				if self.p.w.lock().active.ready.set_to(self.id, false) {
+					// succeeded
+					drop(datum);
+					return;
+				} else {
+					// too late
+					po_pu.dropbox.recv()
+				}
+			}
+		};
+		match num_movers_msg {
+			0 => drop(datum),
+			1 => std::mem::forget(datum),
+			_ => panic!("putter got a bad `num_movers_msg`"),
+		}
+	}
+
+	pub fn put_timeout(&mut self, datum: T, timeout: Duration) -> Option<T> {
+		let po_pu = self.p.r.get_po_pu(self.id).expect("HEYa");
+
+		// 1. make ready my datum
+		unsafe {
+			po_pu.set_ptr(transmute(&datum));	
+		}
+
+		// 2. enter, participate in protocol
+		self.p.w.lock().enter(&self.p.r, self.id);
+
+		// 3. wait for my value to be consumed
+		let num_movers_msg = match po_pu.dropbox.recv_timeout(timeout) {
+			Some(msg) => msg,
+			None => {
+				if self.p.w.lock().active.ready.set_to(self.id, false) {
+					// succeeded
+					return Some(datum)
+				} else {
+					// too late
+					po_pu.dropbox.recv()
+				}
+			}
+		};
+		// println!("putter got msg={}", num_movers_msg);
+		match num_movers_msg {
+			0 => Some(datum),
+			1 => {
+				std::mem::forget(datum);
+				None
+			},
+			_ => panic!("putter got a bad `num_movers_msg`"),
+		}
+	}
 	pub fn put(&mut self, datum: T) -> Option<T> {
 		let po_pu = self.p.r.get_po_pu(self.id).expect("HEYa");
 
@@ -1096,7 +1196,6 @@ impl<'a> Firer<'a> {
 	}
 }
 
-
 // struct Rule {
 // 	guard_ready: BitSet,
 // 	guard_fn: GuardFn,
@@ -1232,20 +1331,21 @@ fn test_my_proto() {
 		});
 
 		s.spawn(move |_| {
-			for i in 0..5 {
-				p2.put([i;32]);
+			for i in 0..7 {
+				let r = p2.put_timeout_lossy([i;32], Duration::from_millis(1900));
+				println!("r={:?}", r);
 			}
 		});
 
 		s.spawn(move |_| {
-			for _ in 0..5 {
+			for _ in 0..6 {
 				// g3.get_signal(); g3.get_signal();
 
-				g3.get();
-				println!("============================");
+				let got = g3.get_timeout(Duration::from_millis(2000));
+				println!("============================. GOT:{:?}", got);
 				// milli_sleep!(3000);
-				g3.get();
-				println!("============================");
+				let got = g3.get_timeout(Duration::from_millis(2000));
+				println!("============================. GOT:{:?}", got);
 				// milli_sleep!(3000);
 			}
 		});
