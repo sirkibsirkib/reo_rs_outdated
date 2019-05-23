@@ -432,6 +432,10 @@ pub struct ProtoR {
                            // mem_type_info: HashMap<TypeId, TypeInfo>,
 }
 impl ProtoR {
+	fn equal_put_data(&self, a: LocId, b: LocId) -> bool {
+		// TODO
+		true
+	}
     fn send_to_getter(&self, id: LocId, msg: usize) {
         self.get_po_ge(id).expect("NOPOGE").dropbox.send(msg)
     }
@@ -1461,3 +1465,32 @@ impl<T: Copy> MaybeCopy for T {
 pub struct ProtoState {
     data: BitSet,
 }
+
+
+pub enum GuardPred {
+	True,
+	None(Vec<GuardPred>),
+	And(Vec<GuardPred>),
+	Or(Vec<GuardPred>),
+	Eq(LocId, LocId),
+}
+impl GuardPred {
+	fn eval(&self, r: &ProtoR) -> bool {
+		use GuardPred::*;
+		let clos = |x| Self::eval(x, r);
+		match self {
+			True => true,
+			None(x) => !x.iter().any(clos),
+			And(x) => !x.iter().all(clos),
+			Or(x) => x.iter().any(clos),
+			Eq(a, b) => r.equal_put_data(*a, *b),
+		}
+	}
+}
+
+/*
+Todo:
+1. make a new Repo with Rbpa and depend on reo
+2. make a new Repo for testing a protocol
+3. finish changing guard to Cmd thingy
+*/
