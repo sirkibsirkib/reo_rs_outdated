@@ -166,6 +166,33 @@ impl HasRacePtr for MemoSpace {
 	}
 }
 
+
+trait SpaceWithDropbox {
+	fn get_dropbox(&self) -> &MsgDropbox;
+	fn await_msg_timeout(&self, a: &ProtoAll, timeout: Duration, my_id: LocId) -> Option<usize> {
+		println!("getting ... ");
+		Some(match self.get_dropbox().recv_timeout(timeout) {
+			Some(msg) => msg,
+			None => {
+				if a.w.lock().active.ready.set_to(my_id, false) {
+					// managed reverse my readiness
+					return None
+				} else {
+					// readiness has already been consumed
+					println!("too late");
+					self.get_dropbox().recv()
+				}
+			}
+		})
+	}
+}
+impl SpaceWithDropbox for PoPuSpace {
+	fn get_dropbox(&self) -> &MsgDropbox { &self.dropbox }
+}
+impl SpaceWithDropbox for PoGeSpace {
+	fn get_dropbox(&self) -> &MsgDropbox { &self.dropbox }
+}
+
 struct PoPuSpace {
 	ptr: AtomicPtr<u8>,
 	cloner_countdown: AtomicUsize,
@@ -204,8 +231,7 @@ impl PoGeSpace {
 			*self.want_data.get()
 		}
 	}
-	#[inline]
-	fn participate_get<T>(&self, a: &ProtoAll, msg: usize) -> T {
+	fn participate_with_msg<T>(&self, a: &ProtoAll, msg: usize) -> T {
 		let (case, putter_id) = DataGetCase::parse_msg(msg); 
 		println!("... GOT MSG");
 		match a.r.get_space(putter_id) {
@@ -289,24 +315,6 @@ impl PoGeSpace {
 			},
 			_ => panic!("bad putter!"),
 		}
-	}
-	#[inline]
-	fn participate_get_timeout<T>(&self, a: &ProtoAll, timeout: Duration, my_id: LocId) -> Option<T> {
-		println!("getting ... ");
-		let msg = match self.dropbox.recv_timeout(timeout) {
-			Some(msg) => msg,
-			None => {
-				if a.w.lock().active.ready.set_to(my_id, false) {
-					// managed reverse my readiness
-					return None
-				} else {
-					// readiness has already been consumed
-					println!("too late");
-					self.dropbox.recv()
-				}
-			}
-		};
-		Some(self.participate_get(a, msg))
 	}
 }
 
@@ -819,8 +827,7 @@ pub struct Getter<T> {
 	pub(crate) id: LocId,
 }
 impl<T> Getter<T> {
-	pub fn get_signal(&mut self) {
-		println!("siggy... id={}", self.id);
+	pub fn get_signal_timeout(&mut self, timeout: Duration) -> bool {
 		// 1. set move intention
 		let po_ge = self.p.r.get_po_ge(self.id).expect("HEYa");
 		po_ge.set_want_data(false);
@@ -829,11 +836,20 @@ impl<T> Getter<T> {
 		self.p.w.lock().enter(&self.p.r, self.id);
 
 		// 3. participate
-		po_ge.dropbox.recv_nothing();
-		println!("SIGGY RETURNING");
+		po_ge.await_msg_timeout(&self.p, timeout, self.id).is_some()
+	}
+	pub fn get_signal(&mut self) {
+		// 1. set move intention
+		let po_ge = self.p.r.get_po_ge(self.id).expect("HEYa");
+		po_ge.set_want_data(false);
+
+		// 2. enter, participate in protocol
+		self.p.w.lock().enter(&self.p.r, self.id);
+
+		// 3. participate
+		po_ge.dropbox.recv_nothing()
 	}
 	pub fn get_timeout(&mut self, timeout: Duration) -> Option<T> {
-		println!("dataey... id={}", self.id);
 		// 1. set move intention
 		let po_ge = self.p.r.get_po_ge(self.id).expect("HEYa");
 		po_ge.set_want_data(true);
@@ -842,10 +858,11 @@ impl<T> Getter<T> {
 		self.p.w.lock().enter(&self.p.r, self.id);
 
 		// 3. participate
-		po_ge.participate_get_timeout(&self.p, timeout, self.id)
+		po_ge.await_msg_timeout(&self.p, timeout, self.id)
+		.map(|msg| po_ge.participate_with_msg(&self.p, msg))
+		
 	}
 	pub fn get(&mut self) -> T {
-		println!("dataey... id={}", self.id);
 		// 1. set move intention
 		let po_ge = self.p.r.get_po_ge(self.id).expect("HEYa");
 		po_ge.set_want_data(true);
@@ -854,7 +871,7 @@ impl<T> Getter<T> {
 		self.p.w.lock().enter(&self.p.r, self.id);
 
 		// 3. participate
-		po_ge.participate_get(&self.p, po_ge.dropbox.recv())
+		po_ge.participate_with_msg(&self.p, po_ge.dropbox.recv())
 	}
 }
 
@@ -867,7 +884,9 @@ pub struct Putter<T> {
 	pub(crate) id: LocId,
 }
 impl<T> Putter<T> {
-	pub fn put_timeout_lossy(&mut self, datum: T, timeout: Duration) {
+	const BAD_MSG: &'static str = "putter got a bad `num_movers_msg`";
+
+	pub fn put_timeout_lossy(&mut self, datum: T, timeout: Duration) -> bool {
 		let po_pu = self.p.r.get_po_pu(self.id).expect("HEYa");
 
 		// 1. make ready my datum
@@ -879,24 +898,19 @@ impl<T> Putter<T> {
 		self.p.w.lock().enter(&self.p.r, self.id);
 
 		// 3. wait for my value to be consumed
-		let num_movers_msg = match po_pu.dropbox.recv_timeout(timeout) {
+		let num_movers_msg = match po_pu.await_msg_timeout(&self.p, timeout, self.id) {
 			Some(msg) => msg,
 			None => {
-				if self.p.w.lock().active.ready.set_to(self.id, false) {
-					// succeeded
-					drop(datum);
-					return;
-				} else {
-					// too late
-					po_pu.dropbox.recv()
-				}
+				drop(datum);
+				return false;
 			}
 		};
 		match num_movers_msg {
 			0 => drop(datum),
 			1 => std::mem::forget(datum),
-			_ => panic!("putter got a bad `num_movers_msg`"),
-		}
+			_ => panic!(Self::BAD_MSG),
+		};
+		true
 	}
 
 	pub fn put_timeout(&mut self, datum: T, timeout: Duration) -> Option<T> {
@@ -923,14 +937,13 @@ impl<T> Putter<T> {
 				}
 			}
 		};
-		// println!("putter got msg={}", num_movers_msg);
 		match num_movers_msg {
 			0 => Some(datum),
 			1 => {
 				std::mem::forget(datum);
 				None
 			},
-			_ => panic!("putter got a bad `num_movers_msg`"),
+			_ => panic!(Self::BAD_MSG),
 		}
 	}
 	pub fn put(&mut self, datum: T) -> Option<T> {
@@ -946,14 +959,13 @@ impl<T> Putter<T> {
 
 		// 3. wait for my value to be consumed
 		let num_movers_msg = po_pu.dropbox.recv();
-		// println!("putter got msg={}", num_movers_msg);
 		match num_movers_msg {
 			0 => Some(datum),
 			1 => {
 				std::mem::forget(datum);
 				None
 			},
-			_ => panic!("putter got a bad `num_movers_msg`"),
+			_ => panic!(Self::BAD_MSG),
 		}
 	}
 	pub fn put_lossy(&mut self, datum: T) {
@@ -972,8 +984,11 @@ impl<T> Putter<T> {
 		match num_movers_msg {
 			0 => drop(datum),
 			1 => std::mem::forget(datum),
-			_ => panic!("putter got a bad `num_movers_msg`"),
+			_ => panic!(Self::BAD_MSG),
 		}
+	}
+	fn put_finish_lossy(&self) {
+
 	}
 }
 
