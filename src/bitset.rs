@@ -44,7 +44,9 @@ pub struct AndIter<'a, 'b> {
 }
 impl<'a, 'b> AndIter<'a, 'b> {
     fn fetch_chunk(a: &BitSet, b: &BitSet, chunk_idx: usize) -> Option<usize> {
-        a.data.get(chunk_idx).and_then(|x| b.data.get(0).map(|y| x & y))
+        a.data
+            .get(chunk_idx)
+            .and_then(|x| b.data.get(0).map(|y| x & y))
     }
 }
 impl<'a, 'b> Iterator for AndIter<'a, 'b> {

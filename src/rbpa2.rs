@@ -12,23 +12,21 @@ purpose of this module:
 */
 
 pub struct Rbpa {
-	proto_ports: usize,
-	rbpa_rules: Vec<RbpaRule>,
+    proto_ports: usize,
+    rbpa_rules: Vec<RbpaRule>,
 }
 
 #[derive(Debug)]
-enum RbpaError {
-
-}
+enum RbpaError {}
 impl Rbpa {
-	fn new_projected(proto_def: ProtoDef, local_set: HashSet<LocId>) -> Result<Self, RbpaError> {
-		unimplemented!()
-	}
+    fn new_projected(proto_def: ProtoDef, local_set: HashSet<LocId>) -> Result<Self, RbpaError> {
+        unimplemented!()
+    }
 }
 
 struct RbpaRule {
-	// 00 means X
-	// 10 means T
-	// 01 means F
-	guard: BitSet,
+    // 00 means X
+    // 10 means T
+    // 01 means F
+    guard: BitSet,
 }
