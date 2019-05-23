@@ -2,14 +2,14 @@
 ////////// DEBUG DEBUG
 #![allow(dead_code)]
 
-use std::time::Duration;
-use std::ptr::NonNull;
-use core::ops::Range;
 use crate::{LocId, RuleId};
 use hashbrown::{HashMap};
 use std::{
+	ptr::NonNull,
+	ops::Range,
 	any::TypeId,
-	mem::{transmute, ManuallyDrop},
+	time::Duration,
+	mem::{transmute, ManuallyDrop, MaybeUninit},
 	cell::UnsafeCell,
 	sync::{
 		Arc,
@@ -84,10 +84,10 @@ impl DropFn {
 	}
 }
 
-// facilitates memcell type erasure. this structure contains all the information
-// necessary to specialize CLONE, DROP and MOVE procedures on the type-erased ptrs
+/// A structure used for type erasure. Describes the type in as much detail
+/// that a memory cell needs to handle all the operations on it 
 #[derive(Debug, Clone, Copy)]
-pub struct MemTypeInfo {
+pub struct TypeInfo {
 	type_id: TypeId,
 	drop_fn: DropFn,
 	clone_fn: CloneFn,
@@ -95,9 +95,10 @@ pub struct MemTypeInfo {
 	bytes: usize,
 	align: usize,
 }
-impl MemTypeInfo {
+impl TypeInfo {
 	pub fn new<T: 'static>() -> Self {
 		// always true: clone_fn.is_none() || !is_copy
+		// holds because Copy trait is mutually exclusive with Drop trait.
 		Self {
 			bytes: std::mem::size_of::<T>(),
 			type_id: TypeId::of::<T>(),
@@ -109,15 +110,22 @@ impl MemTypeInfo {
 	}
 }
 
-/// tracks the datum associated with this memory cell (if any).
+/// Represents a coordination location for memorycells
+/// ptr (as *mut u8) acts as a key to partial map `mem_refs`. if present
+/// with value N, this memorycell is sharing a pointer to (N-1) other memcells
+/// if not mapped, this AtomicPtr is dangling, and is not responsible
+/// for any data.
+/// type_info shares read-only ownership with TypeInfo, which is used
+/// for runtime type-reflection when copying, moving, cloning or dropping 
+/// a memory value.  
 struct MemoSpace {
 	ptr: AtomicPtr<u8>, // acts as *mut T AND key to mem_slot_meta_map
 	cloner_countdown: AtomicUsize,
 	mover_sema: Semaphore,
-	type_info: Arc<MemTypeInfo>,
+	type_info: Arc<TypeInfo>,
 }
 impl MemoSpace {
-	fn new(ptr: *mut u8, type_info: Arc<MemTypeInfo>) -> Self {
+	fn new(ptr: *mut u8, type_info: Arc<TypeInfo>) -> Self {
 		Self {
 			ptr: ptr.into(),
 			cloner_countdown: 0.into(),
@@ -125,49 +133,147 @@ impl MemoSpace {
 			type_info,
 		}
 	}
+	/// make this pointer dangle. corresponds with logically dropping the stored
+	/// value. NOTE that since this pointer may be shared with N other memory cells
+	/// N is decremented, and then the value itself is dropped only if N==0.
+	// fn drop_value(&self, my_id: LocId, r: &ProtoR, w: &mut ProtoActive) {
+	// 	let ptr = self.get_ptr();
+	// 	let src_refs = w.mem_refs.get_mut(&ptr).expect("WAS DANGLING");
+	// 	let tid = &self.type_info.type_id;
+	// 	*src_refs -= 1;
+	// 	if *src_refs == 0 {
+	// 		// this memcell held the last reference to this stored memory
+	// 		w.mem_refs.remove(&ptr).expect("hhh");
+	// 		unsafe { self.type_info.drop_fn.execute(ptr) }
+	// 		w.free_mems.get_mut(tid).expect("??").push(ptr);
+	// 	}
+	// 	println!("MEMCELL BECAME EMPTY. SET");
+	// 	w.ready.set(r.mem_getter_id(my_id)); // GETTER ready
+	// }
 	fn make_empty(&self, my_id: LocId, r: &ProtoR, w: &mut ProtoActive, do_drop: bool) {
-		// println!("::make_empty| id={} do_drop={}", my_id, do_drop);
 		let ptr = self.get_ptr();
-		let src_refs = w.mem_refs.get_mut(&ptr).expect("UNKNWN");
+		let src_refs = w.mem_refs.get_mut(&ptr).expect("WAS DANGLING");
 		let tid = &self.type_info.type_id;
 		*src_refs -= 1;
 		if *src_refs == 0 {
-			// contents need to be dropped! ptr needs to be made free
+			// this memcell held the last reference to this stored memory
 			w.mem_refs.remove(&ptr).expect("hhh");
 			if do_drop {
+				// the value is being dropped
 				unsafe { self.type_info.drop_fn.execute(ptr) }
+			} else {
+				// the value has been moved out by the caller
 			}
 			w.free_mems.get_mut(tid).expect("??").push(ptr);
 		}
 		println!("MEMCELL BECAME EMPTY. SET");
 		w.ready.set(r.mem_getter_id(my_id)); // GETTER ready
 	}
+	// fn take_value(&self, my_id: LocId, r: &ProtoR, w: &mut ProtoActive, out_ptr: *mut u8) {
+	// 	let ptr = self.get_ptr();
+	// 	let src_refs = w.mem_refs.get_mut(&ptr).expect("WAS DANGLING");
+	// 	let tid = &self.type_info.type_id;
+	// 	*src_refs -= 1;
+	//  	unsafe {
+	//  		if *src_refs == 0 {
+	// 			// this memcell held the last reference to this stored memory
+	// 			w.mem_refs.remove(&ptr).expect("hhh");
+	// 			w.free_mems.get_mut(tid).expect("??").push(ptr);
+	// 			ptr.copy_to(out_ptr, self.type_info.bytes);
+	// 		} else {
+	// 			if self.type_info.is_copy {
+	// 				ptr.copy_to(out_ptr, self.type_info.bytes);
+	// 			} else {
+	// 				self.type_info.clone_fn.execute(ptr, out_ptr);
+	// 			}
+	// 		}
+	// 	}
+	// 	w.ready.set(r.mem_getter_id(my_id)); // GETTER ready
+	// }
 }
 
 // trait to cut down boilerplate in the rest of the lib
-trait HasRacePtr {
+trait PutterSpace {
 	fn set_ptr(&self, ptr: *mut u8);
 	fn get_ptr(&self) -> *mut u8;
+	fn get_type_info(&self) -> &TypeInfo;
+	fn get_mover_sema(&self) -> &Semaphore;
+	fn get_cloner_countdown(&self) -> &AtomicUsize;
+	unsafe fn get_datum_from<D>(
+		&self,
+		case: DataGetCase,
+		out_ptr: *mut u8,
+		finish_fn: D,
+	) where D: Fn(bool) {
+		let src = self.get_ptr();
+		let type_info = self.get_type_info();
+
+		if type_info.is_copy {
+			// MOVE HAPPENS HERE
+			src.copy_to(out_ptr, type_info.bytes);
+			let was = self.get_cloner_countdown().fetch_sub(1, Ordering::SeqCst);
+			if was == case.last_countdown() {
+				finish_fn(false);
+			}
+		} else {
+			if case.i_move() {
+				if case.mover_must_wait() {
+					self.get_mover_sema().acquire();
+				}
+				// MOVE HAPPENS HERE
+				src.copy_to(out_ptr, type_info.bytes);
+				finish_fn(false);
+			} else {
+				// CLONE HAPPENS HERE
+				type_info.clone_fn.execute(src, out_ptr);
+				let was = self.get_cloner_countdown().fetch_sub(1, Ordering::SeqCst);
+				if was == case.last_countdown() {
+					if case.someone_moves() {
+						self.get_mover_sema().release();
+					} else {
+						finish_fn(true);
+					}					
+				}
+			}
+		}
+	}
 }
-impl HasRacePtr for PoPuSpace {
+impl PutterSpace for PoPuSpace {
 	fn set_ptr(&self, ptr: *mut u8) {
 		self.ptr.store(ptr, Ordering::SeqCst);
+	}
+	fn get_cloner_countdown(&self) -> &AtomicUsize {
+		&self.cloner_countdown
 	}
 	fn get_ptr(&self) -> *mut u8 {
 		self.ptr.load(Ordering::SeqCst)
 	}
+	fn get_type_info(&self) -> &TypeInfo {
+		&self.type_info
+	}
+	fn get_mover_sema(&self) -> &Semaphore {
+		&self.mover_sema
+	}
 }
-impl HasRacePtr for MemoSpace {
+impl PutterSpace for MemoSpace {
 	fn set_ptr(&self, ptr: *mut u8) {
 		self.ptr.store(ptr, Ordering::SeqCst);
+	}
+	fn get_cloner_countdown(&self) -> &AtomicUsize {
+		&self.cloner_countdown
 	}
 	fn get_ptr(&self) -> *mut u8 {
 		self.ptr.load(Ordering::SeqCst)
 	}
+	fn get_type_info(&self) -> &TypeInfo {
+		&self.type_info
+	}
+	fn get_mover_sema(&self) -> &Semaphore {
+		&self.mover_sema
+	}
 }
 
-
-trait SpaceWithDropbox {
+trait HasMsgDropBox {
 	fn get_dropbox(&self) -> &MsgDropbox;
 	fn await_msg_timeout(&self, a: &ProtoAll, timeout: Duration, my_id: LocId) -> Option<usize> {
 		println!("getting ... ");
@@ -186,10 +292,10 @@ trait SpaceWithDropbox {
 		})
 	}
 }
-impl SpaceWithDropbox for PoPuSpace {
+impl HasMsgDropBox for PoPuSpace {
 	fn get_dropbox(&self) -> &MsgDropbox { &self.dropbox }
 }
-impl SpaceWithDropbox for PoGeSpace {
+impl HasMsgDropBox for PoGeSpace {
 	fn get_dropbox(&self) -> &MsgDropbox { &self.dropbox }
 }
 
@@ -198,14 +304,16 @@ struct PoPuSpace {
 	cloner_countdown: AtomicUsize,
 	mover_sema: Semaphore,
 	dropbox: MsgDropbox,
+	type_info: Arc<TypeInfo>,
 }
 impl PoPuSpace {
-	fn new() -> Self {
+	fn new(type_info: Arc<TypeInfo>) -> Self {
 		Self {
 			ptr: AtomicPtr::new(std::ptr::null_mut()),
 			cloner_countdown: 0.into(),
 			mover_sema: Semaphore::new(0),
 			dropbox: MsgDropbox::new(),
+			type_info: type_info,
 		}
 	}
 }
@@ -231,89 +339,25 @@ impl PoGeSpace {
 			*self.want_data.get()
 		}
 	}
-	fn participate_with_msg<T>(&self, a: &ProtoAll, msg: usize) -> T {
-		let (case, putter_id) = DataGetCase::parse_msg(msg); 
-		println!("... GOT MSG");
+	unsafe fn participate_with_msg(&self, a: &ProtoAll, msg: usize, out_ptr: *mut u8) {
+		let (case, putter_id) = DataGetCase::parse_msg(msg);
 		match a.r.get_space(putter_id) {
-			SpaceRef::Memo(memo_space) => {
-				let ptr: &T = unsafe {
-					transmute(memo_space.get_ptr())
+			SpaceRef::Memo(space) => {
+				let finish_fn = |do_drop| {
+					let mut w = a.w.lock();
+					space.make_empty(putter_id, &a.r, &mut w.active, do_drop);
+					let ProtoW { ref active, ref mut awaiting_states, .. } = &mut w as &mut ProtoW;
+					ProtoW::notify_state_waiters(&active.ready, awaiting_states, &a.r);
 				};
-				if T::IS_COPY {
-					// everyone acts as the mover
-					let datum = unsafe { std::ptr::read(ptr) };
-					// cloner_countdown always initialized to #getters. 
-					let was = memo_space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
-					if was == 1 {
-						println!("WILL TRY LOCK...");
-						let mut w = a.w.lock();
-						println!("GOT LOCK!");
-						// 2. release putter. DO NOT drop
-						memo_space.make_empty(putter_id, &a.r, &mut w.active, false);
-						// 3. notify state waiters
-						let ProtoW { ref active, ref mut awaiting_states, .. } = &mut w as &mut ProtoW;
-						ProtoW::notify_state_waiters(&active.ready, awaiting_states, &a.r);
-					}
-					datum
-				} else {
-					// n-1 cloners. last one releases the mover. `case` tells us if that's us.
-					if case.i_move() {
-						if case.mover_must_wait() {
-							memo_space.mover_sema.acquire();
-						}
-						let datum = unsafe { std::ptr::read(ptr) };
-						let mut w = a.w.lock();
-						// 2. release putter. DO NOT drop
-						memo_space.make_empty(putter_id, &a.r, &mut w.active, false);
-						// 3. notify state waiters
-						let ProtoW { ref active, ref mut awaiting_states, .. } = &mut w as &mut ProtoW;
-						ProtoW::notify_state_waiters(&active.ready, awaiting_states, &a.r);
-						datum
-					} else {
-						let datum = T::maybe_clone(ptr);
-						let was = memo_space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
-						// cloner_countdown always initialized to #getters. mover isnt participating here
-						if was == 2 {
-							// I was last! release mover (who MUST exist)
-							memo_space.mover_sema.release();
-						}
-						datum
-					}
-				}
+				space.get_datum_from(case, out_ptr, finish_fn);
 			},
-			SpaceRef::PoPu(po_pu_space) => {
-				let ptr: &T = unsafe {
-					transmute(po_pu_space.get_ptr())
+			SpaceRef::PoPu(space) => {
+				let finish_fn = |do_drop| {
+					space.dropbox.send(if do_drop {0} else {1});
 				};
-				if T::IS_COPY {
-					let datum = unsafe { std::ptr::read(ptr) };
-					let was = po_pu_space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
-					if was == 1 {
-						println!("... i am last. notifying putter");
-						po_pu_space.dropbox.send(1);
-					}
-					datum
-				} else {
-					if case.i_move() {
-						if case.mover_must_wait() {
-							po_pu_space.mover_sema.acquire();
-						}
-						let datum = unsafe { std::ptr::read(ptr) };
-						po_pu_space.dropbox.send(1);
-						datum
-					} else {
-						let datum = T::maybe_clone(ptr);
-						let was = po_pu_space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
-						// offset by 1 because the mover isnt participating
-						if was == 2 && case.mover_must_wait() {
-							// I was last! release mover (who MUST exist)
-							po_pu_space.mover_sema.release();
-						}
-						datum
-					}
-				}
+				space.get_datum_from(case, out_ptr, finish_fn);
 			},
-			_ => panic!("bad putter!"),
+			_ => panic!("Bad putter ID!!"),
 		}
 	}
 }
@@ -448,7 +492,7 @@ pub struct ProtoR {
  	po_ge: Vec<PoGeSpace>, // id range #PoPu..(#PoPu + #PoGe)
 	me_pu: Vec<MemoSpace>, // id range (#PoPu + #PoGe)..(#PoPu + #PoGe + #Memo)
  	// me_ge doesn't need a space
- 	// mem_type_info: HashMap<TypeId, MemTypeInfo>,
+ 	// mem_type_info: HashMap<TypeId, TypeInfo>,
 }
 impl ProtoR {
 	fn send_to_getter(&self, id: LocId, msg: usize) {
@@ -628,8 +672,7 @@ struct ProtoAll {
 impl ProtoAll {
 	fn new(proto_def: &ProtoDef) -> Self {
 		let rules = Self::build_rules(proto_def).expect("OH NO");
-		let (mem_data, me_pu, free_mems, ready) = Self::build_buffer(proto_def);
-		let po_pu = (0..proto_def.num_port_putters).map(|_| PoPuSpace::new()).collect();
+		let (mem_data, me_pu, po_pu, free_mems, ready) = Self::build_buffer(proto_def);
 		let po_ge = (0..proto_def.num_port_getters).map(|_| PoGeSpace::new()).collect();
 		let r = ProtoR { mem_data, me_pu, po_pu, po_ge };
 		let w = Mutex::new(ProtoW {
@@ -649,13 +692,15 @@ impl ProtoAll {
 	(
 		Vec<u8>, // buffer
 		Vec<MemoSpace>,
+		Vec<PoPuSpace>,
 		HashMap<TypeId, Vec<*mut u8>>,
 		BitSet,
 	) {
-		let mem_get_id_start = proto_def.mem_infos.len() + proto_def.num_port_putters + proto_def.num_port_getters;
+		let mem_get_id_start = proto_def.mem_infos.len() + proto_def.po_pu_infos.len() + proto_def.num_port_getters;
 		let mut capacity = 0;
 		let mut offsets_n_typeids = vec![];
-		let mut mem_type_info: HashMap<TypeId, Arc<MemTypeInfo>> = HashMap::default();
+		let mut mem_type_info: HashMap<TypeId, Arc<TypeInfo>> = proto_def.po_pu_infos
+		.iter().map(|&info| (info.type_id, Arc::new(info))).collect();
 		let mut ready = BitSet::default();
 		let mut free_mems = HashMap::default();
 		for (mem_id, info) in proto_def.mem_infos.iter().enumerate() {
@@ -681,13 +726,17 @@ impl ProtoAll {
 		unsafe {
 			buf.set_len(capacity);
 		}
-		let ptrs = offsets_n_typeids.into_iter().map(|(offset, type_id)| unsafe {
+		let memo_spaces = offsets_n_typeids.into_iter().map(|(offset, type_id)| unsafe {
 			let ptr: *mut u8 = buf.as_mut_ptr().offset(offset as isize + meta_offset);
 			free_mems.entry(type_id).or_insert(vec![]).push(ptr);
 			let type_info = mem_type_info.get(&type_id).expect("Missed a type").clone();
 			MemoSpace::new(ptr, type_info)
 		}).collect();
-		(buf, ptrs, free_mems, ready)
+		let po_pu_spaces = proto_def.po_pu_infos.iter().map(|info| {
+			let info = mem_type_info.get(&info.type_id).expect("Missed a type").clone();
+			PoPuSpace::new(info)
+		}).collect();
+		(buf, memo_spaces, po_pu_spaces, free_mems, ready)
 	}
 	fn build_rules(proto_def: &ProtoDef) -> Result<Vec<Rule2>, BuildRuleError> {
 		use BuildRuleError::*;
@@ -763,9 +812,9 @@ unsafe impl Send for RuleDef {}
 unsafe impl Sync for RuleDef {}
 
 pub struct ProtoDef {
-	pub mem_infos: Vec<MemTypeInfo>,
-	pub num_port_putters: usize,
+	pub po_pu_infos: Vec<TypeInfo>,
 	pub num_port_getters: usize,
+	pub mem_infos: Vec<TypeInfo>,
 	pub rule_defs: Vec<RuleDef>,
 }
 
@@ -778,7 +827,7 @@ impl ProtoDef {
 		}
 	}
 	fn loc_is_po_pu(&self, id: LocId) -> bool {
-		id < self.num_port_putters
+		id < self.po_pu_infos.len()
 	}
 	fn loc_can_put(&self, id: LocId) -> bool {
 		self.loc_is_po_pu(id) || self.loc_is_mem(id)
@@ -787,12 +836,12 @@ impl ProtoDef {
 		self.loc_is_po_ge(id) || self.loc_is_mem(id)
 	}
 	fn loc_is_po_ge(&self, id: LocId) -> bool {
-		let r = self.num_port_putters + self.num_port_getters;
-		self.num_port_putters <= id && id < r
+		let r = self.po_pu_infos.len() + self.num_port_getters;
+		self.po_pu_infos.len() <= id && id < r
 	}
 	fn loc_is_mem(&self, id: LocId) -> bool {
-		let l = self.num_port_putters + self.num_port_getters;
-		let r = self.num_port_putters + self.num_port_getters + self.mem_infos.len();
+		let l = self.po_pu_infos.len() + self.num_port_getters;
+		let r = self.po_pu_infos.len() + self.num_port_getters + self.mem_infos.len();
 		l <= id && id < r
 	}
 }
@@ -849,19 +898,18 @@ impl<T> Getter<T> {
 		// 3. participate
 		po_ge.dropbox.recv_nothing()
 	}
-	pub fn get_timeout(&mut self, timeout: Duration) -> Option<T> {
-		// 1. set move intention
-		let po_ge = self.p.r.get_po_ge(self.id).expect("HEYa");
-		po_ge.set_want_data(true);
+	// pub fn get_timeout(&mut self, timeout: Duration) -> Option<T> {
+	// 	// 1. set move intention
+	// 	let po_ge = self.p.r.get_po_ge(self.id).expect("HEYa");
+	// 	po_ge.set_want_data(true);
 
-		// 2. enter, participate in protocol
-		self.p.w.lock().enter(&self.p.r, self.id);
+	// 	// 2. enter, participate in protocol
+	// 	self.p.w.lock().enter(&self.p.r, self.id);
 
-		// 3. participate
-		po_ge.await_msg_timeout(&self.p, timeout, self.id)
-		.map(|msg| po_ge.participate_with_msg(&self.p, msg))
-		
-	}
+	// 	// 3. participate
+	// 	po_ge.await_msg_timeout(&self.p, timeout, self.id)
+	// 	.map(|msg| po_ge.participate_with_msg(&self.p, msg))
+	// }
 	pub fn get(&mut self) -> T {
 		// 1. set move intention
 		let po_ge = self.p.r.get_po_ge(self.id).expect("HEYa");
@@ -871,7 +919,12 @@ impl<T> Getter<T> {
 		self.p.w.lock().enter(&self.p.r, self.id);
 
 		// 3. participate
-		po_ge.participate_with_msg(&self.p, po_ge.dropbox.recv())
+		let mut datum: MaybeUninit<T> = MaybeUninit::uninit();
+		let out_ptr = unsafe { transmute(datum.as_mut_ptr()) }; 
+		unsafe {
+			po_ge.participate_with_msg(&self.p, po_ge.dropbox.recv(), out_ptr);
+			datum.assume_init()
+		}
 	}
 }
 
@@ -994,47 +1047,62 @@ impl<T> Putter<T> {
 
 #[derive(Debug, Copy, Clone)]
 enum DataGetCase {
-	CloneSignalMover,
-	AwaitThenMove,
-	MoveImmediately,
+	BothYouClone,
+	BothYouMove,
+	OnlyCloners,
+	OnlyMovers,
 }
 impl DataGetCase {
 	fn i_move(self) -> bool {
 		use DataGetCase::*;
 		match self {
-			CloneSignalMover => false,
-			AwaitThenMove |
-			MoveImmediately => true,
+			BothYouClone | OnlyCloners => false,
+			BothYouMove | OnlyMovers => true,
+		}
+	}
+	fn last_countdown(self) -> usize {
+		use DataGetCase::*;
+		match self {
+			OnlyCloners | OnlyMovers => 1,
+			BothYouClone | BothYouMove => 2,
+		}
+	}
+	fn someone_moves(self) -> bool {
+		use DataGetCase::*;
+		match self {
+			OnlyCloners => false,
+			BothYouClone | OnlyMovers | BothYouMove => true,
 		}
 	}
 	fn mover_must_wait(self) -> bool {
 		use DataGetCase::*;
 		match self {
-			CloneSignalMover |
-			AwaitThenMove => true,
-			MoveImmediately => false,
+			OnlyMovers => false,
+			 // OnlyCloners undefined anyway
+			BothYouClone | BothYouMove | OnlyCloners => true,
 		}
 	}
 	fn parse_msg(msg: usize) -> (Self, LocId) {
-		println!("... GOT {:b}", msg);
+		// println!("... GOT {:b}", msg);
 		use DataGetCase::*;
 		let mask = 0b11 << 62;
 		let case = match (msg & mask) >> 62 {
-			0b00 => CloneSignalMover,
-			0b01 => AwaitThenMove,
-			0b10 => MoveImmediately,
-			0b11 => panic!("undefined case"),
+			0b00 => BothYouClone,
+			0b01 => BothYouMove,
+			0b10 => OnlyCloners,
+			0b11 => OnlyMovers,
 			_ => unreachable!(),
 		};
 		(case, msg & !mask)
 	}
 	fn include_in_msg(self, msg: usize) -> usize {
 		use DataGetCase::*;
-		assert_eq!(msg & (0b11 << 62), 0);
+		// assert_eq!(msg & (0b11 << 62), 0);
 		let x = match self {
-			CloneSignalMover => 0b00,
-			AwaitThenMove => 0b01,
-			MoveImmediately => 0b10,
+			BothYouClone => 0b00,
+			BothYouMove => 0b01,
+			OnlyCloners => 0b10,
+			OnlyMovers => 0b11,
 		};
 		msg | (x << 62)
 	}
@@ -1045,10 +1113,6 @@ pub struct Firer<'a> {
 	w: &'a mut ProtoActive,
 }
 impl<'a> Firer<'a> {
-	pub fn mem_to_nowhere(&mut self, me_pu: LocId) {
-		let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
-		memo_space.make_empty(me_pu, self.r, self.w, true);
-	}
 
 	// release signal-getters and count getters
 	fn release_sig_getters_count_getters(&self, getters: &[LocId]) -> usize {
@@ -1064,6 +1128,12 @@ impl<'a> Firer<'a> {
 			}
 		}
 		count
+	}
+
+	/// A fire action that 
+	pub fn mem_to_nowhere(&mut self, me_pu: LocId) {
+		let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
+		memo_space.make_empty(me_pu, self.r, self.w, true);
 	}
 
 	pub fn mem_to_ports(&mut self, me_pu: LocId, po_ge: &[LocId]) {
@@ -1087,7 +1157,7 @@ impl<'a> Firer<'a> {
 				let mover = *i.next().unwrap();
 				println!("mover is {}", mover);
 				assert_eq!(None, i.next());
-				let msg = DataGetCase::MoveImmediately.include_in_msg(me_pu);
+				let msg = DataGetCase::OnlyMovers.include_in_msg(me_pu);
 				self.r.send_to_getter(mover, msg);
 			},
 			n => {
@@ -1097,9 +1167,9 @@ impl<'a> Firer<'a> {
 				for (i, &g) in po_ge.iter().filter(|&&g| self.r.get_po_ge(g).unwrap().get_want_data()).enumerate() {
 					let msg = if i == 0 {
 						// I choose you to be the mover!
-						DataGetCase::AwaitThenMove
+						DataGetCase::BothYouMove
 					} else {
-						DataGetCase::CloneSignalMover
+						DataGetCase::BothYouClone
 					}.include_in_msg(me_pu);
 					self.r.send_to_getter(g, msg);
 				} 
@@ -1190,7 +1260,7 @@ impl<'a> Firer<'a> {
 				let mover = *i.next().unwrap();
 				println!("mover= {}", mover);
 				assert_eq!(None, i.next());
-				let msg = DataGetCase::MoveImmediately.include_in_msg(po_pu);
+				let msg = DataGetCase::OnlyMovers.include_in_msg(po_pu);
 				self.r.send_to_getter(mover, msg);
 			},
 			n => {
@@ -1200,9 +1270,9 @@ impl<'a> Firer<'a> {
 				for (i, &g) in po_ge.iter().filter(|&&g| self.r.get_po_ge(g).unwrap().get_want_data()).enumerate() {
 					let msg = if i == 0 {
 						// I choose you to be the mover!
-						DataGetCase::AwaitThenMove
+						DataGetCase::BothYouMove
 					} else {
-						DataGetCase::CloneSignalMover
+						DataGetCase::BothYouClone
 					}.include_in_msg(po_pu);
 					self.r.send_to_getter(g, msg);
 				} 
@@ -1261,7 +1331,7 @@ macro_rules! new_rule_def {
 // lazy_static::lazy_static! {
 //     static ref MY_PROTO_DEF: ProtoDef = ProtoDef {
 // 		mem_infos: vec![
-// 			MemTypeInfo::new::<T0>(),
+// 			TypeInfo::new::<T0>(),
 // 		],
 // 		num_port_putters: 2,
 // 		num_port_getters: 1,
@@ -1278,11 +1348,14 @@ impl<T0: 'static> Proto for MyProto<T0> {
 	type Interface = (Putter<T0>, Putter<T0>, Getter<T0>);
 	fn proto_def() -> ProtoDef {
 		ProtoDef {
-			mem_infos: vec![
-				MemTypeInfo::new::<T0>(),
+			po_pu_infos: vec![
+				TypeInfo::new::<T0>(),
+				TypeInfo::new::<T0>(),
 			],
-			num_port_putters: 2,
 			num_port_getters: 1,
+			mem_infos: vec![
+				TypeInfo::new::<T0>(),
+			],
 			rule_defs: vec![
 				new_rule_def![|_r| true; 0=>2; 1=>3],
 				new_rule_def![|_r| true; 3=>2],
@@ -1346,20 +1419,20 @@ fn test_my_proto() {
 		});
 
 		s.spawn(move |_| {
-			for i in 0..7 {
+			for i in 0..5 {
 				let r = p2.put_timeout_lossy([i;32], Duration::from_millis(1900));
 				println!("r={:?}", r);
 			}
 		});
 
 		s.spawn(move |_| {
-			for _ in 0..6 {
+			for _ in 0..5 {
 				// g3.get_signal(); g3.get_signal();
 
-				let got = g3.get_timeout(Duration::from_millis(2000));
+				let got = g3.get();
 				println!("============================. GOT:{:?}", got);
 				// milli_sleep!(3000);
-				let got = g3.get_timeout(Duration::from_millis(2000));
+				let got = g3.get();
 				println!("============================. GOT:{:?}", got);
 				// milli_sleep!(3000);
 			}
@@ -1368,11 +1441,7 @@ fn test_my_proto() {
 }
 
 
-// assume for now that the bitset has the right shape.
-pub struct ProtoState {
-	data: BitSet,
-}
-
+//////////////// INTERNAL SPECIALIZATION TRAITS for port-data ////////////
 trait MaybeClone {
 	fn maybe_clone(&self) -> Self; 
 }
@@ -1388,7 +1457,6 @@ impl<T: Clone> MaybeClone for T {
 	}
 }
 
-
 trait MaybeCopy {
 	const IS_COPY: bool; 
 }
@@ -1398,4 +1466,10 @@ impl<T> MaybeCopy for T {
 
 impl<T: Copy> MaybeCopy for T {
 	const IS_COPY: bool = true;
+}
+
+
+// assume for now that the bitset has the right shape.
+pub struct ProtoState {
+	data: BitSet,
 }
