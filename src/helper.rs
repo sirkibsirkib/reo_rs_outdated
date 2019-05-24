@@ -5,29 +5,30 @@ macro_rules! id_iter {
     };
 }
 
+
 #[macro_export]
-macro_rules! finalize_ports {
-    ($ids:expr, $commons:expr, $($struct:tt),*) => {{
-        let mut _ids = $ids;
-        let mut _commons = $commons;
-        (
-            $(
-                unsafe { $struct ::new(_commons.remove(_ids.next().unwrap()).unwrap()) },
-            )*
-        )
+macro_rules! new_rule_def {
+    ($guard_pred:expr ;    $( $p:tt => $(  $g:tt ),*   );* ) => {{
+        RuleDef {
+            guard_pred: $guard_pred,
+            actions: vec![
+                $(ActionDef {
+                    putter: $p,
+                    getters: &[$($g),*],
+                }),*
+            ],
+        }
     }}
 }
 
 #[macro_export]
-macro_rules! data_move_action {
-    ($putter_id:expr => $($getter_id:expr),*) => {{
-        |cr, r| {
-            let ptr = *cr.generic.put.get(&$putter_id).expect("PTR MISSING");
-            let getter_id_iter = [
-                $($getter_id),*
-            ].iter().cloned();
-            unsafe { r.distribute_ptr(ptr, $putter_id, getter_id_iter) };
-        }
+macro_rules! putters_getters {
+    ($__arc_p:expr => $($id:tt),* ) => {{
+        (
+            $(
+                $__arc_p.claim($id).try_into().expect("BAD CLAIM")
+            ),*
+        )
     }}
 }
 

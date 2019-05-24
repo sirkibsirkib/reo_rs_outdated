@@ -1,16 +1,16 @@
 ////////// DEBUG DEBUG
 #![allow(dead_code)]
 
+use std::convert::TryInto;
 use crate::bitset::BitSet;
 use crate::{LocId, RuleId};
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
 use std::{
-    any::TypeId,
+    any::{Any, TypeId},
     cell::UnsafeCell,
     marker::PhantomData,
     mem::{transmute, ManuallyDrop, MaybeUninit},
-    ops::Range,
     ptr::NonNull,
     sync::{
         atomic::{AtomicPtr, AtomicUsize, Ordering},
@@ -28,7 +28,7 @@ type GuardFn = fn(&ProtoR) -> bool;
 #[derive(Debug, Copy, Clone)]
 struct CloneFn(Option<NonNull<fn(*mut u8, *mut u8)>>);
 impl CloneFn {
-    fn new_defined<T>() -> Self {
+    fn new<T>() -> Self {
         let clos: fn(*mut u8, *mut u8) = |src, dest| unsafe {
             let datum = T::maybe_clone(transmute(src));
             let dest: &mut T = transmute(dest);
@@ -37,9 +37,6 @@ impl CloneFn {
         let opt_nn = NonNull::new(unsafe { transmute(clos) });
         debug_assert!(opt_nn.is_some());
         CloneFn(opt_nn)
-    }
-    fn new_undefined() -> Self {
-        CloneFn(None)
     }
     /// safe ONLY IF:
     ///  - src is &T to initialized memory
@@ -51,6 +48,28 @@ impl CloneFn {
             (*x.as_ptr())(src, dst);
         } else {
             panic!("proto attempted to clone an unclonable type!");
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+struct PartialEqFn(Option<NonNull<fn(*mut u8, *mut u8) -> bool>>);
+impl PartialEqFn {
+    fn new<T>() -> Self {
+    	let clos: fn(*mut u8, *mut u8) -> bool = |a, b| unsafe {
+    		let a: &T = transmute(a);
+            a.maybe_partial_eq(transmute(b))
+        };
+        let opt_nn = NonNull::new(unsafe { transmute(clos) });
+        debug_assert!(opt_nn.is_some());
+        PartialEqFn(opt_nn)
+    }
+    #[inline]
+    unsafe fn execute(self, a: *mut u8, b: *mut u8) -> bool {
+        if let Some(x) = self.0 {
+            (*x.as_ptr())(a, b)
+        } else {
+            panic!("proto attempted to partial_eq a type for which its not defined!");
         }
     }
 }
@@ -90,11 +109,15 @@ pub struct TypeInfo {
     type_id: TypeId,
     drop_fn: DropFn,
     clone_fn: CloneFn,
+    partial_eq_fn: PartialEqFn,
     is_copy: bool,
     bytes: usize,
     align: usize,
 }
 impl TypeInfo {
+	fn get_tid(&self) -> TypeId {
+		self.type_id
+	}
     pub fn new<T: 'static>() -> Self {
         // always true: clone_fn.is_none() || !is_copy
         // holds because Copy trait is mutually exclusive with Drop trait.
@@ -102,7 +125,8 @@ impl TypeInfo {
             bytes: std::mem::size_of::<T>(),
             type_id: TypeId::of::<T>(),
             drop_fn: DropFn::new::<T>(),
-            clone_fn: CloneFn::new_defined::<T>(),
+            clone_fn: CloneFn::new::<T>(),
+            partial_eq_fn: PartialEqFn::new::<T>(),
             align: std::mem::align_of::<T>(),
             is_copy: <T as MaybeCopy>::IS_COPY,
         }
@@ -329,6 +353,7 @@ struct ProtoW {
     commitment: Option<Commitment>,
     ready_tentative: BitSet,
     awaiting_states: Vec<StateWaiter>,
+    unclaimed_ports: HashMap<LocId, UnclaimedPortInfo>,
 }
 impl ProtoW {
     fn notify_state_waiters(ready: &BitSet, awaiting_states: &mut Vec<StateWaiter>, r: &ProtoR) {
@@ -358,7 +383,7 @@ impl ProtoW {
         // println!("enter with id={:?}. bitset now {:?}", my_id, &self.active.ready);
         'outer: loop {
             'inner: for (rule_id, rule) in self.rules.iter().enumerate() {
-                if self.active.ready.is_superset(&rule.guard_ready) && (rule.guard_fn)(r) {
+                if self.active.ready.is_superset(&rule.guard_ready) && rule.guard_pred.eval(r) {
                     // committing to this rule!
                     println!("FIRING {}", rule_id);
 
@@ -433,8 +458,16 @@ pub struct ProtoR {
 }
 impl ProtoR {
 	fn equal_put_data(&self, a: LocId, b: LocId) -> bool {
+		let clos = |id| match self.get_space(id) {
+			SpaceRef::Memo(space) => (&space.type_info, space.get_ptr()),
+			SpaceRef::PoPu(space) => (&space.type_info, space.get_ptr()),
+			_ => panic!("NO SPACE PTR"),
+    	};
 		// TODO
-		true
+		let (i1, p1) = clos(a);
+		let (i2, p2) = clos(b);
+		assert_eq!(i1.type_id, i2.type_id);
+		unsafe { i1.partial_eq_fn.execute(p1, p2) }
 	}
     fn send_to_getter(&self, id: LocId, msg: usize) {
         self.get_po_ge(id).expect("NOPOGE").dropbox.send(msg)
@@ -602,18 +635,84 @@ impl Drop for PortGroup {
     }
 }
 
+struct UnclaimedPortInfo {
+	putter: bool,
+	type_id: TypeId,
+}
+
 // Ready layout:  [PoPu|PoGe|MePu|MeGe]
 // Spaces layout: [PoPu|PoGe|Memo]
 
-struct ProtoAll {
+pub struct ProtoAll {
     r: ProtoR,
     w: Mutex<ProtoW>,
 }
+pub enum ClaimResult<T: 'static> {
+	GotGetter(Getter<T>),
+	GotPutter(Putter<T>),
+	NotUnclaimed,
+	TypeMismatch,
+}
+impl<T: 'static> TryInto<Putter<T>> for ClaimResult<T> {
+	type Error = bool;
+	fn try_into(self) -> Result<Putter<T>, Self::Error> {
+		use ClaimResult::*;
+		match self {
+			GotPutter(p) => Ok(p),
+			GotGetter(_) => Err(true),
+			NotUnclaimed | TypeMismatch => Err(true),
+		}
+	}
+}
+impl<T: 'static> TryInto<Getter<T>> for ClaimResult<T> {
+	type Error = bool;
+	fn try_into(self) -> Result<Getter<T>, Self::Error> {
+		use ClaimResult::*;
+		match self {
+			GotPutter(_) => Err(true),
+			GotGetter(g) => Ok(g),
+			NotUnclaimed | TypeMismatch => Err(true),
+		}
+	}
+}
+
+trait HasUnclaimedPorts {
+	fn claim<T: 'static>(&self, id: LocId) -> ClaimResult<T>;
+}
+impl HasUnclaimedPorts for Arc<ProtoAll> {
+	fn claim<T: 'static>(&self, id: LocId) -> ClaimResult<T> {
+		use ClaimResult::*;
+		let mut w = self.w.lock();
+		if let Some(x) = w.unclaimed_ports.get(&id) {
+			if x.type_id == TypeId::of::<T>() {
+				let putter = x.putter;
+				let _ = w.unclaimed_ports.remove(&id);
+				if putter {
+					GotPutter(Putter {
+						p: self.clone(),
+						id,
+						phantom: PhantomData::default(),
+					})
+				} else {
+					GotGetter(Getter {
+						p: self.clone(),
+						id,
+						phantom: PhantomData::default(),
+					})
+				}
+			} else {
+				TypeMismatch
+			}
+		} else {
+			NotUnclaimed
+		}
+	}
+}
 impl ProtoAll {
-    fn new(proto_def: &ProtoDef) -> Self {
+    pub fn new(proto_def: &ProtoDef) -> Self {
         let rules = Self::build_rules(proto_def).expect("OH NO");
-        let (mem_data, me_pu, po_pu, free_mems, ready) = Self::build_buffer(proto_def);
-        let po_ge = (0..proto_def.num_port_getters)
+        let (mem_data, me_pu, po_pu, free_mems, ready) = Self::build_core(proto_def);
+        let po_ge = (0..proto_def.po_ge_infos.len())
             .map(|_| PoGeSpace::new())
             .collect();
         let r = ProtoR {
@@ -622,6 +721,14 @@ impl ProtoAll {
             po_pu,
             po_ge,
         };
+        let unclaimed_ports = proto_def.po_pu_infos.iter().enumerate().map(|(i, type_info)| {
+        	let id = i;
+        	let type_id = type_info.type_id;
+        	(id, UnclaimedPortInfo { putter: true, type_id })
+        }).chain(proto_def.po_ge_infos.iter().enumerate().map(|(i, &type_id)| {
+        	let id = proto_def.po_pu_infos.len() + i;
+        	(id, UnclaimedPortInfo { putter: false, type_id })
+        })).collect();
         let w = Mutex::new(ProtoW {
             rules,
             active: ProtoActive {
@@ -632,10 +739,11 @@ impl ProtoAll {
             commitment: None,
             ready_tentative: BitSet::default(),
             awaiting_states: vec![],
+            unclaimed_ports,
         });
         ProtoAll { w, r }
     }
-    fn build_buffer(
+    fn build_core(
         proto_def: &ProtoDef,
     ) -> (
         Vec<u8>, // buffer
@@ -645,7 +753,7 @@ impl ProtoAll {
         BitSet,
     ) {
         let mem_get_id_start =
-            proto_def.mem_infos.len() + proto_def.po_pu_infos.len() + proto_def.num_port_getters;
+            proto_def.mem_infos.len() + proto_def.po_pu_infos.len() + proto_def.po_ge_infos.len();
         let mut capacity = 0;
         let mut offsets_n_typeids = vec![];
         let mut mem_type_info: HashMap<TypeId, Arc<TypeInfo>> = proto_def
@@ -749,7 +857,7 @@ impl ProtoAll {
             }
             rules.push(Rule2 {
                 guard_ready,
-                guard_fn: rule_def.guard_fn.clone(),
+                guard_pred: rule_def.guard_pred.clone(),
                 actions,
             });
         }
@@ -770,7 +878,7 @@ pub struct ActionDef {
 }
 #[derive(derive_new::new)]
 pub struct RuleDef {
-    pub guard_fn: Arc<dyn Fn(&ProtoR) -> bool>,
+    pub guard_pred: GuardPred,
     pub actions: Vec<ActionDef>,
 }
 unsafe impl Send for RuleDef {}
@@ -778,7 +886,7 @@ unsafe impl Sync for RuleDef {}
 
 pub struct ProtoDef {
     pub po_pu_infos: Vec<TypeInfo>,
-    pub num_port_getters: usize,
+    pub po_ge_infos: Vec<TypeId>,
     pub mem_infos: Vec<TypeInfo>,
     pub rule_defs: Vec<RuleDef>,
 }
@@ -801,20 +909,84 @@ impl ProtoDef {
         self.loc_is_po_ge(id) || self.loc_is_mem(id)
     }
     fn loc_is_po_ge(&self, id: LocId) -> bool {
-        let r = self.po_pu_infos.len() + self.num_port_getters;
+        let r = self.po_pu_infos.len() + self.po_ge_infos.len();
         self.po_pu_infos.len() <= id && id < r
     }
     fn loc_is_mem(&self, id: LocId) -> bool {
-        let l = self.po_pu_infos.len() + self.num_port_getters;
-        let r = self.po_pu_infos.len() + self.num_port_getters + self.mem_infos.len();
+        let l = self.po_pu_infos.len() + self.po_ge_infos.len();
+        let r = self.po_pu_infos.len() + self.po_ge_infos.len() + self.mem_infos.len();
         l <= id && id < r
     }
+    fn validate(&self) -> ProtoDefValidationResult {
+    	self.check_data_types_match()?;
+    	self.check_rule_guards()
+    }
+    fn check_data_types_match(&self) -> ProtoDefValidationResult {
+    	use ProtoDefValidationError::*;
+    	for rule_def in self.rule_defs.iter() {
+    		for action in rule_def.actions.iter() {
+    			let putter_tid = self.type_for(action.putter);
+    			for &g in action.getters.iter() {
+    				if putter_tid != self.type_for(g) {
+    					return Err(ActionTypeMismatch)
+    				}
+    			}
+    		}
+		}
+		Ok(())
+    }
+    fn type_for(&self, id: LocId) -> Option<TypeId> {
+    	let l1 = self.po_pu_infos.len();
+    	let l2 = self.po_ge_infos.len();
+    	self.po_pu_infos.get(id).map(TypeInfo::get_tid)
+    	.or(self.po_ge_infos.get(id - l1).copied())
+    	.or(self.mem_infos.get(id - l1 - l2).map(TypeInfo::get_tid))
+    }
+
+    fn check_rule_guards(&self) -> ProtoDefValidationResult {
+    	let mut putters = HashSet::<LocId>::default();
+    	for rule_def in self.rule_defs.iter() {
+    		putters.extend(rule_def.actions.iter().map(|a| a.putter));
+    		self.check_guard_pred(&rule_def.guard_pred, &putters)?;
+    		putters.clear();
+    	}
+    	Ok(())
+    }
+    fn check_guard_pred(&self, pred: &GuardPred, putters: &HashSet<LocId>) -> ProtoDefValidationResult {
+    	use GuardPred::*;
+    	use ProtoDefValidationError::*;
+    	match pred {
+			True => (),
+			None(x) | And(x) | Or(x) => for a in x.iter() {
+				self.check_guard_pred(a, putters)?;
+			},
+			Eq(a, b) => {
+				if !putters.contains(a) || !putters.contains(b) {
+					return Err(GuardReasonsOverAbsentData)
+				}
+				if self.type_for(*a) != self.type_for(*b) {
+					return Err(GuardEqTypeMismatch)
+				}
+			},
+    	};
+    	Ok(())
+    }
+}
+
+type ProtoDefValidationResult = Result<(), ProtoDefValidationError>;
+
+#[derive(Debug, Copy, Clone)]
+enum ProtoDefValidationError {
+	GuardReasonsOverAbsentData,
+	ActionOnNonexistantId,
+	GuardEqTypeMismatch,
+	ActionTypeMismatch,
 }
 
 // more protected
 struct Rule2 {
     guard_ready: BitSet,
-    guard_fn: Arc<dyn Fn(&ProtoR) -> bool>,
+    guard_pred: GuardPred,
     actions: Vec<Action>,
 }
 impl Rule2 {
@@ -840,14 +1012,14 @@ enum Action {
     },
 }
 
-unsafe impl<T> Send for Getter<T> {}
-unsafe impl<T> Sync for Getter<T> {}
-pub struct Getter<T> {
+unsafe impl<T: 'static> Send for Getter<T> {}
+unsafe impl<T: 'static> Sync for Getter<T> {}
+pub struct Getter<T: 'static> {
     p: Arc<ProtoAll>,
     phantom: PhantomData<T>,
     pub(crate) id: LocId,
 }
-impl<T> Getter<T> {
+impl<T: 'static> Getter<T> {
     pub fn get_signal_timeout(&mut self, timeout: Duration) -> bool {
         // 1. set move intention
         let po_ge = self.p.r.get_po_ge(self.id).expect("HEYa");
@@ -900,14 +1072,23 @@ impl<T> Getter<T> {
     }
 }
 
-unsafe impl<T> Send for Putter<T> {}
-unsafe impl<T> Sync for Putter<T> {}
-pub struct Putter<T> {
+impl<T: 'static> Drop for Getter<T> {
+	fn drop(&mut self) {
+		self.p.w.lock().unclaimed_ports.insert(self.id, UnclaimedPortInfo {
+			type_id: TypeId::of::<T>(),
+			putter: false,
+		});
+	}
+}
+
+unsafe impl<T: 'static> Send for Putter<T> {}
+unsafe impl<T: 'static> Sync for Putter<T> {}
+pub struct Putter<T: 'static> {
     p: Arc<ProtoAll>,
     phantom: PhantomData<T>,
     pub(crate) id: LocId,
 }
-impl<T> Putter<T> {
+impl<T: 'static> Putter<T> {
     const BAD_MSG: &'static str = "putter got a bad `num_movers_msg`";
 
     pub fn put_timeout_lossy(&mut self, datum: T, timeout: Duration) -> bool {
@@ -1012,6 +1193,14 @@ impl<T> Putter<T> {
         }
     }
     fn put_finish_lossy(&self) {}
+}
+impl<T: 'static> Drop for Putter<T> {
+	fn drop(&mut self) {
+		self.p.w.lock().unclaimed_ports.insert(self.id, UnclaimedPortInfo {
+			type_id: TypeId::of::<T>(),
+			putter: true,
+		});
+	}
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -1294,26 +1483,10 @@ impl<'a> Firer<'a> {
 pub trait Proto: Sized {
     type Interface: Sized;
     fn proto_def() -> ProtoDef;
-    fn instantiate() -> Self::Interface;
+    fn instantiate() -> ProtoAll;
+    fn instantiate_and_claim() -> Self::Interface;
 }
 
-fn in_rng(x: &Range<usize>, y: usize) -> bool {
-    x.start <= y && y < x.end
-}
-
-macro_rules! new_rule_def {
-	($guard_clos:expr ;    $( $p:tt => $(  $g:tt ),*   );* ) => {{
-		RuleDef {
-			guard_fn: Arc::new($guard_clos),
-			actions: vec![
-				$(ActionDef {
-					putter: $p,
-					getters: &[$($g),*],
-				}),*
-			],
-		}
-	}}
-}
 
 // lazy_static::lazy_static! {
 //     static ref MY_PROTO_DEF: ProtoDef = ProtoDef {
@@ -1329,41 +1502,30 @@ macro_rules! new_rule_def {
 // 	};
 // }
 
+
 struct MyProto<T0>(PhantomData<T0>);
 impl<T0: 'static> Proto for MyProto<T0> {
     type Interface = (Putter<T0>, Putter<T0>, Getter<T0>);
     fn proto_def() -> ProtoDef {
+    	use GuardPred::*;
         ProtoDef {
             po_pu_infos: vec![TypeInfo::new::<T0>(), TypeInfo::new::<T0>()],
-            num_port_getters: 1,
+            po_ge_infos: vec![
+            	TypeId::of::<T0>(),
+            ],
             mem_infos: vec![TypeInfo::new::<T0>()],
             rule_defs: vec![
-                new_rule_def![|_r| true; 0=>2; 1=>3],
-                new_rule_def![|_r| true; 3=>2],
+                new_rule_def![True; 0=>2; 1=>3],
+                new_rule_def![True; 3=>2],
             ],
         }
     }
-    fn instantiate() -> Self::Interface {
-        let p = Arc::new(ProtoAll::new(&Self::proto_def()));
-        (
-            Putter {
-                p: p.clone(),
-                id: 0,
-                phantom: Default::default(),
-            },
-            Putter {
-                p: p.clone(),
-                id: 1,
-                phantom: Default::default(),
-            },
-            Getter {
-                p: p.clone(),
-                id: 2,
-                phantom: Default::default(),
-            },
-            // 3 => m1 // putter
-            // 4 => m1^ // getter
-        )
+    fn instantiate() -> ProtoAll {
+    	ProtoAll::new(&Self::proto_def())
+    }
+    fn instantiate_and_claim() -> Self::Interface {
+        let p = Arc::new(Self::instantiate());
+        putters_getters![p => 0, 1, 2]
     }
 }
 
@@ -1403,7 +1565,7 @@ impl Drop for TestDatum {
 #[test]
 fn test_my_proto() {
     println!("drop is needed? ={:?}", std::mem::needs_drop::<TestDatum>());
-    let (mut p1, mut p2, mut g3) = MyProto::instantiate();
+    let (mut p1, mut p2, mut g3) = MyProto::instantiate_and_claim();
     crossbeam::scope(|s| {
         s.spawn(move |_| {
             for i in 0..5 {
@@ -1460,6 +1622,19 @@ impl<T> MaybeCopy for T {
 impl<T: Copy> MaybeCopy for T {
     const IS_COPY: bool = true;
 }
+trait MaybePartialEq {
+	fn maybe_partial_eq(&self, other: &Self) -> bool;
+}
+impl<T> MaybePartialEq for T {
+	default fn maybe_partial_eq(&self, _other: &Self) -> bool {
+		panic!("type isn't partial eq!")
+	}
+}
+impl<T: PartialEq> MaybePartialEq for T {
+	fn maybe_partial_eq(&self, other: &Self) -> bool {
+		self.eq(other)
+	} 
+}
 
 // assume for now that the bitset has the right shape.
 pub struct ProtoState {
@@ -1467,6 +1642,7 @@ pub struct ProtoState {
 }
 
 
+#[derive(Debug, Clone)]
 pub enum GuardPred {
 	True,
 	None(Vec<GuardPred>),
@@ -1494,3 +1670,15 @@ Todo:
 2. make a new Repo for testing a protocol
 3. finish changing guard to Cmd thingy
 */
+
+
+
+trait MaybeDatum {
+	fn take_from(&mut self, other: *mut u8);
+}
+impl MaybeDatum for u32 {
+	fn take_from(&mut self, other: *mut u8) {
+		let other: &mut Self = unsafe {std::mem::transmute(other)};
+		*self = *other
+	}
+}
