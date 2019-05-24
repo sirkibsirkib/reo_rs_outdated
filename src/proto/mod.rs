@@ -5,16 +5,17 @@ pub mod reflection;
 use reflection::TypeInfo;
 
 pub mod traits;
-use traits::{HasMsgDropBox, PutterSpace, MaybeClone, MaybePartialEq, MaybeCopy, HasUnclaimedPorts};
+use traits::{
+    HasMsgDropBox, HasUnclaimedPorts, MaybeClone, MaybeCopy, MaybePartialEq, PutterSpace,
+};
 
 pub mod definition;
-pub use definition::{ProtoDef, ActionDef, RuleDef};
+pub use definition::{ActionDef, ProtoDef, RuleDef};
 
 pub mod groups;
 
-
 use crate::bitset::BitSet;
-use crate::{RuleId, LocId};
+use crate::{LocId, RuleId};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
 use std::convert::TryInto;
@@ -194,16 +195,11 @@ impl ProtoW {
             return;
         }
         let mut num_tenatives = 0;
-        // println!("enter with id={:?}. bitset now {:?}", my_id, &self.active.ready);
         'outer: loop {
             'inner: for (rule_id, rule) in self.rules.iter().enumerate() {
                 if self.active.ready.is_superset(&rule.guard_ready) && rule.guard_pred.eval(r) {
-                    // committing to this rule!
                     println!("FIRING {}", rule_id);
-
-                    // make all the guarded bits UNready at once.
                     self.active.ready.difference_with(&rule.guard_ready);
-                    // TODO tentatives
 
                     for id in self.active.ready.iter_and(&self.ready_tentative) {
                         num_tenatives += 1;
@@ -223,15 +219,11 @@ impl ProtoW {
                         break 'inner;
                     }
                     // no tenatives! proceed
-
-                    // println!("... firing {:?}. READY: {:?} GUARD {:?}", rule_id, &self.active.ready, &rule.guard_ready);
-
                     rule.fire(Firer {
                         r,
                         w: &mut self.active,
                     });
                     Self::notify_state_waiters(&self.active.ready, &mut self.awaiting_states, r);
-                    // println!("... FIRE COMPLETE {:?}. READY: {:?} GUARD {:?}", rule_id, &self.active.ready, &rule.guard_ready);
                     if !rule.guard_ready.test(my_id) {
                         // job done!
                         break 'inner;
@@ -240,8 +232,6 @@ impl ProtoW {
                     }
                 }
             }
-            // none matched
-            // println!("... exiting");
             return;
         }
     }
@@ -275,7 +265,6 @@ impl ProtoR {
             SpaceRef::PoPu(space) => (&space.type_info, space.get_ptr()),
             _ => panic!("NO SPACE PTR"),
         };
-        // TODO
         let (i1, p1) = clos(a);
         let (i2, p2) = clos(b);
         assert_eq!(i1.type_id, i2.type_id);
@@ -354,7 +343,6 @@ struct UnclaimedPortInfo {
 
 // Ready layout:  [PoPu|PoGe|MePu|MeGe]
 // Spaces layout: [PoPu|PoGe|Memo]
-
 pub struct ProtoAll {
     r: ProtoR,
     w: Mutex<ProtoW>,
@@ -387,7 +375,6 @@ impl<T: 'static> TryInto<Getter<T>> for ClaimResult<T> {
         }
     }
 }
-
 
 // more protected
 struct Rule2 {
@@ -426,49 +413,36 @@ pub struct Getter<T: 'static> {
     pub(crate) id: LocId,
 }
 impl<T: 'static> Getter<T> {
+    const BAD_ID: &'static str = "My ID isn't associated with a valid getter!";
+
     pub fn get_signal_timeout(&mut self, timeout: Duration) -> bool {
-        // 1. set move intention
-        let po_ge = self.p.r.get_po_ge(self.id).expect("HEYa");
+        let po_ge = self.p.r.get_po_ge(self.id).expect(Self::BAD_ID);
         po_ge.set_want_data(false);
-
-        // 2. enter, participate in protocol
         self.p.w.lock().enter(&self.p.r, self.id);
-
-        // 3. participate
         po_ge.await_msg_timeout(&self.p, timeout, self.id).is_some()
     }
     pub fn get_signal(&mut self) {
-        // 1. set move intention
-        let po_ge = self.p.r.get_po_ge(self.id).expect("HEYa");
+        let po_ge = self.p.r.get_po_ge(self.id).expect(Self::BAD_ID);
         po_ge.set_want_data(false);
-
-        // 2. enter, participate in protocol
         self.p.w.lock().enter(&self.p.r, self.id);
-
-        // 3. participate
         po_ge.dropbox.recv_nothing()
     }
-    // pub fn get_timeout(&mut self, timeout: Duration) -> Option<T> {
-    // 	// 1. set move intention
-    // 	let po_ge = self.p.r.get_po_ge(self.id).expect("HEYa");
-    // 	po_ge.set_want_data(true);
-
-    // 	// 2. enter, participate in protocol
-    // 	self.p.w.lock().enter(&self.p.r, self.id);
-
-    // 	// 3. participate
-    // 	po_ge.await_msg_timeout(&self.p, timeout, self.id)
-    // 	.map(|msg| po_ge.participate_with_msg(&self.p, msg))
-    // }
-    pub fn get(&mut self) -> T {
-        // 1. set move intention
-        let po_ge = self.p.r.get_po_ge(self.id).expect("HEYa");
+    pub fn get_timeout(&mut self, timeout: Duration) -> Option<T> {
+        let po_ge = self.p.r.get_po_ge(self.id).expect(Self::BAD_ID);
         po_ge.set_want_data(true);
-
-        // 2. enter, participate in protocol
         self.p.w.lock().enter(&self.p.r, self.id);
-
-        // 3. participate
+        let mut datum: MaybeUninit<T> = MaybeUninit::uninit();
+        let out_ptr = unsafe { transmute(datum.as_mut_ptr()) };
+        unsafe {
+            let msg = po_ge.await_msg_timeout(&self.p, timeout, self.id)?;
+            po_ge.participate_with_msg(&self.p, msg, out_ptr);
+            Some(datum.assume_init())
+        }
+    }
+    pub fn get(&mut self) -> T {
+        let po_ge = self.p.r.get_po_ge(self.id).expect(Self::BAD_ID);
+        po_ge.set_want_data(true);
+        self.p.w.lock().enter(&self.p.r, self.id);
         let mut datum: MaybeUninit<T> = MaybeUninit::uninit();
         let out_ptr = unsafe { transmute(datum.as_mut_ptr()) };
         unsafe {
@@ -502,16 +476,8 @@ impl<T: 'static> Putter<T> {
 
     pub fn put_timeout_lossy(&mut self, datum: T, timeout: Duration) -> bool {
         let po_pu = self.p.r.get_po_pu(self.id).expect("HEYa");
-
-        // 1. make ready my datum
-        unsafe {
-            po_pu.set_ptr(transmute(&datum));
-        }
-
-        // 2. enter, participate in protocol
+        unsafe { po_pu.set_ptr(transmute(&datum)) };
         self.p.w.lock().enter(&self.p.r, self.id);
-
-        // 3. wait for my value to be consumed
         let num_movers_msg = match po_pu.await_msg_timeout(&self.p, timeout, self.id) {
             Some(msg) => msg,
             None => {
@@ -529,24 +495,14 @@ impl<T: 'static> Putter<T> {
 
     pub fn put_timeout(&mut self, datum: T, timeout: Duration) -> Option<T> {
         let po_pu = self.p.r.get_po_pu(self.id).expect("HEYa");
-
-        // 1. make ready my datum
-        unsafe {
-            po_pu.set_ptr(transmute(&datum));
-        }
-
-        // 2. enter, participate in protocol
+        unsafe { po_pu.set_ptr(transmute(&datum)) };
         self.p.w.lock().enter(&self.p.r, self.id);
-
-        // 3. wait for my value to be consumed
         let num_movers_msg = match po_pu.dropbox.recv_timeout(timeout) {
             Some(msg) => msg,
             None => {
                 if self.p.w.lock().active.ready.set_to(self.id, false) {
-                    // succeeded
                     return Some(datum);
                 } else {
-                    // too late
                     po_pu.dropbox.recv()
                 }
             }
@@ -562,16 +518,8 @@ impl<T: 'static> Putter<T> {
     }
     pub fn put(&mut self, datum: T) -> Option<T> {
         let po_pu = self.p.r.get_po_pu(self.id).expect("HEYa");
-
-        // 1. make ready my datum
-        unsafe {
-            po_pu.set_ptr(transmute(&datum));
-        }
-
-        // 2. enter, participate in protocol
+        unsafe { po_pu.set_ptr(transmute(&datum)) };
         self.p.w.lock().enter(&self.p.r, self.id);
-
-        // 3. wait for my value to be consumed
         let num_movers_msg = po_pu.dropbox.recv();
         match num_movers_msg {
             0 => Some(datum),
@@ -584,16 +532,8 @@ impl<T: 'static> Putter<T> {
     }
     pub fn put_lossy(&mut self, datum: T) {
         let po_pu = self.p.r.get_po_pu(self.id).expect("HEYa");
-
-        // 1. make ready my datum & set owned to true
-        unsafe {
-            po_pu.set_ptr(transmute(&datum));
-        }
-
-        // 2. enter, participate in protocol
+        unsafe { po_pu.set_ptr(transmute(&datum)) };
         self.p.w.lock().enter(&self.p.r, self.id);
-
-        // 3. wait for my value to be consumed
         let num_movers_msg = po_pu.dropbox.recv();
         match num_movers_msg {
             0 => drop(datum),
@@ -601,7 +541,6 @@ impl<T: 'static> Putter<T> {
             _ => panic!(Self::BAD_MSG),
         }
     }
-    fn put_finish_lossy(&self) {}
 }
 impl<T: 'static> Drop for Putter<T> {
     fn drop(&mut self) {
@@ -614,7 +553,6 @@ impl<T: 'static> Drop for Putter<T> {
         );
     }
 }
-
 
 pub struct Firer<'a> {
     r: &'a ProtoR,
@@ -819,37 +757,12 @@ impl<'a> Firer<'a> {
 // 	}
 // }
 
-// pub trait PortData: Sized + 'static {
-// 	fn clone_fn(_t: &Self) -> Self {
-// 		panic!("Don't know how to clone this!")
-// 	}
-// }
-// impl<T: Clone + 'static> PortData for T {
-// 	fn clone_fn(t: &Self) -> Self {
-// 		T::clone(t)
-// 	}
-// }
-
 pub trait Proto: Sized {
     type Interface: Sized;
     fn proto_def() -> ProtoDef;
     fn instantiate() -> ProtoAll;
     fn instantiate_and_claim() -> Self::Interface;
 }
-
-// lazy_static::lazy_static! {
-//     static ref MY_PROTO_DEF: ProtoDef = ProtoDef {
-// 		mem_infos: vec![
-// 			TypeInfo::new::<T0>(),
-// 		],
-// 		num_port_putters: 2,
-// 		num_port_getters: 1,
-// 		rule_defs: vec![
-// 			new_rule_def![|_r| true; 0=>2; 1=>3],
-// 			new_rule_def![|_r| true; 3=>2],
-// 		],
-// 	};
-// }
 
 struct MyProto<T0>(PhantomData<T0>);
 impl<T0: 'static> Proto for MyProto<T0> {
@@ -870,79 +783,6 @@ impl<T0: 'static> Proto for MyProto<T0> {
         let p = Arc::new(Self::instantiate());
         putters_getters![p => 0, 1, 2]
     }
-}
-
-// These are the UNSAFE representations of these
-// let rules = vec![
-// 	Rule {
-// 		guard_ready: bitset!{0,1,2,4},
-// 		guard_fn: |_r| true,
-// 		fire_fn: |mut _f| {
-// 			_f.port_to_locs(0, &[], &[2]);
-// 			_f.port_to_locs(1, &[3], &[]);
-// 		},
-// 	},
-// 	Rule { // m3 -> g2
-// 		guard_ready: bitset!{2, 3},
-// 		guard_fn: |_r| true,
-// 		fire_fn: |mut _f| {
-// 			_f.mem_to_ports(3, &[2]);
-// 		},
-// 	},
-// ];
-
-#[derive(Debug)]
-struct TestDatum(u32);
-impl Clone for TestDatum {
-    fn clone(&self) -> Self {
-        println!("I AM BEING CLONED :3 (contents={})", self.0);
-        TestDatum(self.0)
-    }
-}
-impl Drop for TestDatum {
-    fn drop(&mut self) {
-        println!("I AM BEING DROPPED :O (contents={})", self.0);
-    }
-}
-
-#[test]
-fn test_my_proto() {
-    println!("drop is needed? ={:?}", std::mem::needs_drop::<TestDatum>());
-    let (mut p1, mut p2, mut g3) = MyProto::instantiate_and_claim();
-    crossbeam::scope(|s| {
-        s.spawn(move |_| {
-            for i in 0..5 {
-                p1.put([i; 32]);
-            }
-        });
-
-        s.spawn(move |_| {
-            for i in 0..5 {
-                let r = p2.put_timeout_lossy([i; 32], Duration::from_millis(1900));
-                println!("r={:?}", r);
-            }
-        });
-
-        s.spawn(move |_| {
-            for _ in 0..5 {
-                // g3.get_signal(); g3.get_signal();
-
-                let got = g3.get();
-                println!("============================. GOT:{:?}", got);
-                // milli_sleep!(3000);
-                let got = g3.get();
-                println!("============================. GOT:{:?}", got);
-                // milli_sleep!(3000);
-            }
-        });
-    })
-    .expect("WENT OK");
-}
-
-
-// assume for now that the bitset has the right shape.
-pub struct ProtoState {
-    data: BitSet,
 }
 
 #[derive(Debug, Clone)]
@@ -1027,5 +867,50 @@ impl DataGetCase {
             OnlyMovers => 0b11,
         };
         msg | (x << 62)
+    }
+}
+
+/////////////////// TESTS ////////////////////////
+
+mod tests {
+    use super::*;
+    #[test]
+    fn test_my_proto() {
+        let (mut p1, mut p2, mut g3) = MyProto::instantiate_and_claim();
+        crossbeam::scope(|s| {
+            s.spawn(move |_| {
+                for i in 0..5 {
+                    p1.put(i);
+                }
+            });
+
+            s.spawn(move |_| {
+                for i in 0..1000 {
+                    let r = p2.put_timeout(i, Duration::from_millis(1900));
+                    println!("r={:?}", r);
+                }
+            });
+
+            s.spawn(move |_| {
+                for _ in 0..5 {
+                    // g3.get_signal(); g3.get_signal();
+
+                    let got = g3.get_signal();
+                    println!("============================. GOT:{:?}", got);
+                    // milli_sleep!(3000);
+                    let got = g3.get();
+                    println!("============================. GOT:{:?}", got);
+                    // milli_sleep!(3000);
+                }
+            });
+        })
+        .expect("WENT OK");
+    }
+    #[derive(Debug)]
+    struct Testypoo;
+    impl Drop for Testypoo {
+        fn drop(&mut self) {
+            println!("I GOT MY ASS DROPPED");
+        }
     }
 }

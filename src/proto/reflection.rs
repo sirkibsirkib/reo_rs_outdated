@@ -1,6 +1,5 @@
 use super::*;
 
-
 // an untyped CloneFn pointer. Null variant represents an undefined function
 // which will cause explicit panic if execute() is invoked.
 // UNSAFE if the type pointed to does not match the type used to instantiate the ptr.

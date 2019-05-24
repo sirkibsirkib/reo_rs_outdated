@@ -29,7 +29,6 @@ impl HasMsgDropBox for PoGeSpace {
     }
 }
 
-
 // trait to cut down boilerplate in the rest of the lib
 pub(crate) trait PutterSpace {
     fn set_ptr(&self, ptr: *mut u8);
@@ -109,7 +108,6 @@ impl PutterSpace for MemoSpace {
     }
 }
 
-
 //////////////// INTERNAL SPECIALIZATION TRAITS for port-data ////////////
 pub(crate) trait MaybeClone {
     fn maybe_clone(&self) -> Self;
@@ -149,7 +147,6 @@ impl<T: PartialEq> MaybePartialEq for T {
         self.eq(other)
     }
 }
-
 
 pub trait HasUnclaimedPorts {
     fn claim<T: 'static>(&self, id: LocId) -> ClaimResult<T>;

@@ -46,30 +46,20 @@ impl ProtoDef {
             .map(|(i, type_info)| {
                 let id = i;
                 let type_id = type_info.type_id;
-                (
-                    id,
-                    UnclaimedPortInfo {
-                        putter: true,
-                        type_id,
-                    },
-                )
+                let upi = UnclaimedPortInfo {
+                    putter: true,
+                    type_id,
+                };
+                (id, upi)
             })
-            .chain(
-                self
-                    .po_ge_infos
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &type_id)| {
-                        let id = self.po_pu_infos.len() + i;
-                        (
-                            id,
-                            UnclaimedPortInfo {
-                                putter: false,
-                                type_id,
-                            },
-                        )
-                    }),
-            )
+            .chain(self.po_ge_infos.iter().enumerate().map(|(i, &type_id)| {
+                let id = self.po_pu_infos.len() + i;
+                let upi = UnclaimedPortInfo {
+                    putter: false,
+                    type_id,
+                };
+                (id, upi)
+            }))
             .collect();
         let w = Mutex::new(ProtoW {
             rules,
@@ -85,7 +75,9 @@ impl ProtoDef {
         });
         Ok(ProtoAll { w, r })
     }
-    fn build_core(&self) -> (
+    fn build_core(
+        &self,
+    ) -> (
         Vec<u8>, // buffer
         Vec<MemoSpace>,
         Vec<PoPuSpace>,
@@ -109,7 +101,6 @@ impl ProtoDef {
             if rem > 0 {
                 capacity += info.align - rem;
             }
-            // println!("@ {:?} for info {:?}", capacity, &info);
             offsets_n_typeids.push((capacity, info.type_id));
             mem_type_info
                 .entry(info.type_id)
@@ -175,8 +166,7 @@ impl ProtoDef {
                         }
                     } else if self.loc_is_mem(g) {
                         mg.push(g);
-                        if guard_ready.set_to(self.mem_getter_id(g).expect("BAD MEM ID"), true)
-                        {
+                        if guard_ready.set_to(self.mem_getter_id(g).expect("BAD MEM ID"), true) {
                             return Err(SynchronousFiring { loc_id: g });
                         }
                     } else {
