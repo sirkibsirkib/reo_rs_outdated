@@ -1,13 +1,25 @@
 ////////// DEBUG DEBUG
 #![allow(dead_code)]
 
-use std::convert::TryInto;
+pub mod reflection;
+use reflection::TypeInfo;
+
+pub mod traits;
+use traits::{HasMsgDropBox, PutterSpace, MaybeClone, MaybePartialEq, MaybeCopy, HasUnclaimedPorts};
+
+pub mod definition;
+pub use definition::{ProtoDef, ActionDef, RuleDef};
+
+pub mod groups;
+
+
 use crate::bitset::BitSet;
-use crate::{LocId, RuleId};
+use crate::{RuleId, LocId};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
+use std::convert::TryInto;
 use std::{
-    any::{Any, TypeId},
+    any::TypeId,
     cell::UnsafeCell,
     marker::PhantomData,
     mem::{transmute, ManuallyDrop, MaybeUninit},
@@ -19,119 +31,6 @@ use std::{
     time::Duration,
 };
 use std_semaphore::Semaphore;
-
-type GuardFn = fn(&ProtoR) -> bool;
-
-// an untyped CloneFn pointer. Null variant represents an undefined function
-// which will cause explicit panic if execute() is invoked.
-// UNSAFE if the type pointed to does not match the type used to instantiate the ptr.
-#[derive(Debug, Copy, Clone)]
-struct CloneFn(Option<NonNull<fn(*mut u8, *mut u8)>>);
-impl CloneFn {
-    fn new<T>() -> Self {
-        let clos: fn(*mut u8, *mut u8) = |src, dest| unsafe {
-            let datum = T::maybe_clone(transmute(src));
-            let dest: &mut T = transmute(dest);
-            *dest = datum;
-        };
-        let opt_nn = NonNull::new(unsafe { transmute(clos) });
-        debug_assert!(opt_nn.is_some());
-        CloneFn(opt_nn)
-    }
-    /// safe ONLY IF:
-    ///  - src is &T to initialized memory
-    ///  - dst is &mut T to uninitialized memory
-    ///  - T matches the type provided when creating this CloneFn in `new_defined`
-    #[inline]
-    unsafe fn execute(self, src: *mut u8, dst: *mut u8) {
-        if let Some(x) = self.0 {
-            (*x.as_ptr())(src, dst);
-        } else {
-            panic!("proto attempted to clone an unclonable type!");
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-struct PartialEqFn(Option<NonNull<fn(*mut u8, *mut u8) -> bool>>);
-impl PartialEqFn {
-    fn new<T>() -> Self {
-    	let clos: fn(*mut u8, *mut u8) -> bool = |a, b| unsafe {
-    		let a: &T = transmute(a);
-            a.maybe_partial_eq(transmute(b))
-        };
-        let opt_nn = NonNull::new(unsafe { transmute(clos) });
-        debug_assert!(opt_nn.is_some());
-        PartialEqFn(opt_nn)
-    }
-    #[inline]
-    unsafe fn execute(self, a: *mut u8, b: *mut u8) -> bool {
-        if let Some(x) = self.0 {
-            (*x.as_ptr())(a, b)
-        } else {
-            panic!("proto attempted to partial_eq a type for which its not defined!");
-        }
-    }
-}
-
-// an untyped DropFn pointer. Null variant represents a trivial drop Fn (no behavior).
-// new() automatically handles types with trivial drop functions
-// UNSAFE if the type pointed to does not match the type used to instantiate the ptr.
-#[derive(Debug, Copy, Clone)]
-struct DropFn(Option<NonNull<fn(*mut u8)>>);
-impl DropFn {
-    fn new<T>() -> Self {
-        if std::mem::needs_drop::<T>() {
-            let clos: fn(*mut u8) = |ptr| unsafe {
-                let ptr: &mut ManuallyDrop<T> = transmute(ptr);
-                ManuallyDrop::drop(ptr);
-            };
-            DropFn(NonNull::new(unsafe { transmute(clos) }))
-        } else {
-            DropFn(None)
-        }
-    }
-    /// safe ONLY IF the given pointer is of the type this DropFn was created for.
-    #[inline]
-    unsafe fn execute(self, on: *mut u8) {
-        if let Some(x) = self.0 {
-            (*x.as_ptr())(on);
-        } else {
-            // None variant represents a drop with no effect
-        }
-    }
-}
-
-/// A structure used for type erasure. Describes the type in as much detail
-/// that a memory cell needs to handle all the operations on it
-#[derive(Debug, Clone, Copy)]
-pub struct TypeInfo {
-    type_id: TypeId,
-    drop_fn: DropFn,
-    clone_fn: CloneFn,
-    partial_eq_fn: PartialEqFn,
-    is_copy: bool,
-    bytes: usize,
-    align: usize,
-}
-impl TypeInfo {
-	fn get_tid(&self) -> TypeId {
-		self.type_id
-	}
-    pub fn new<T: 'static>() -> Self {
-        // always true: clone_fn.is_none() || !is_copy
-        // holds because Copy trait is mutually exclusive with Drop trait.
-        Self {
-            bytes: std::mem::size_of::<T>(),
-            type_id: TypeId::of::<T>(),
-            drop_fn: DropFn::new::<T>(),
-            clone_fn: CloneFn::new::<T>(),
-            partial_eq_fn: PartialEqFn::new::<T>(),
-            align: std::mem::align_of::<T>(),
-            is_copy: <T as MaybeCopy>::IS_COPY,
-        }
-    }
-}
 
 /// Represents a coordination location for memorycells
 /// ptr (as *mut u8) acts as a key to partial map `mem_refs`. if present
@@ -159,7 +58,7 @@ impl MemoSpace {
     fn make_empty(&self, my_id: LocId, r: &ProtoR, w: &mut ProtoActive, do_drop: bool) {
         let ptr = self.get_ptr();
         let src_refs = w.mem_refs.get_mut(&ptr).expect("WAS DANGLING");
-        let tid = &self.type_info.type_id;
+        let tid = &self.type_info.get_tid();
         *src_refs -= 1;
         if *src_refs == 0 {
             // this memcell held the last reference to this stored memory
@@ -175,91 +74,6 @@ impl MemoSpace {
         println!("MEMCELL BECAME EMPTY. SET");
         w.ready.set(r.mem_getter_id(my_id)); // GETTER ready
     }
-}
-
-// trait to cut down boilerplate in the rest of the lib
-trait PutterSpace {
-    fn set_ptr(&self, ptr: *mut u8);
-    fn get_ptr(&self) -> *mut u8;
-    fn get_type_info(&self) -> &TypeInfo;
-    fn get_mover_sema(&self) -> &Semaphore;
-    fn get_cloner_countdown(&self) -> &AtomicUsize;
-    unsafe fn get_datum_from<D>(&self, case: DataGetCase, out_ptr: *mut u8, finish_fn: D)
-    where
-        D: Fn(bool),
-    {
-        let src = self.get_ptr();
-        let type_info = self.get_type_info();
-
-        if type_info.is_copy {
-            // MOVE HAPPENS HERE
-            src.copy_to(out_ptr, type_info.bytes);
-            let was = self.get_cloner_countdown().fetch_sub(1, Ordering::SeqCst);
-            if was == case.last_countdown() {
-                finish_fn(false);
-            }
-        } else {
-            if case.i_move() {
-                if case.mover_must_wait() {
-                    self.get_mover_sema().acquire();
-                }
-                // MOVE HAPPENS HERE
-                src.copy_to(out_ptr, type_info.bytes);
-                finish_fn(false);
-            } else {
-                // CLONE HAPPENS HERE
-                type_info.clone_fn.execute(src, out_ptr);
-                let was = self.get_cloner_countdown().fetch_sub(1, Ordering::SeqCst);
-                if was == case.last_countdown() {
-                    if case.someone_moves() {
-                        self.get_mover_sema().release();
-                    } else {
-                        finish_fn(true);
-                    }
-                }
-            }
-        }
-    }
-}
-impl PutterSpace for PoPuSpace {
-    fn set_ptr(&self, ptr: *mut u8) { self.ptr.store(ptr, Ordering::SeqCst); }
-    fn get_ptr(&self) -> *mut u8 { self.ptr.load(Ordering::SeqCst) }
-    fn get_cloner_countdown(&self) -> &AtomicUsize { &self.cloner_countdown }
-    fn get_type_info(&self) -> &TypeInfo { &self.type_info }
-    fn get_mover_sema(&self) -> &Semaphore { &self.mover_sema }
-}
-impl PutterSpace for MemoSpace {
-    fn set_ptr(&self, ptr: *mut u8) { self.ptr.store(ptr, Ordering::SeqCst); }
-    fn get_ptr(&self) -> *mut u8 { self.ptr.load(Ordering::SeqCst) }
-    fn get_cloner_countdown(&self) -> &AtomicUsize { &self.cloner_countdown }
-    fn get_type_info(&self) -> &TypeInfo { &self.type_info }
-    fn get_mover_sema(&self) -> &Semaphore { &self.mover_sema }
-}
-
-trait HasMsgDropBox {
-    fn get_dropbox(&self) -> &MsgDropbox;
-    fn await_msg_timeout(&self, a: &ProtoAll, timeout: Duration, my_id: LocId) -> Option<usize> {
-        println!("getting ... ");
-        Some(match self.get_dropbox().recv_timeout(timeout) {
-            Some(msg) => msg,
-            None => {
-                if a.w.lock().active.ready.set_to(my_id, false) {
-                    // managed reverse my readiness
-                    return None;
-                } else {
-                    // readiness has already been consumed
-                    println!("too late");
-                    self.get_dropbox().recv()
-                }
-            }
-        })
-    }
-}
-impl HasMsgDropBox for PoPuSpace {
-    fn get_dropbox(&self) -> &MsgDropbox { &self.dropbox }
-}
-impl HasMsgDropBox for PoGeSpace {
-    fn get_dropbox(&self) -> &MsgDropbox { &self.dropbox }
 }
 
 struct PoPuSpace {
@@ -453,22 +267,20 @@ pub struct ProtoR {
     po_pu: Vec<PoPuSpace>, // id range 0..#PoPu
     po_ge: Vec<PoGeSpace>, // id range #PoPu..(#PoPu + #PoGe)
     me_pu: Vec<MemoSpace>, // id range (#PoPu + #PoGe)..(#PoPu + #PoGe + #Memo)
-                           // me_ge doesn't need a space
-                           // mem_type_info: HashMap<TypeId, TypeInfo>,
 }
 impl ProtoR {
-	fn equal_put_data(&self, a: LocId, b: LocId) -> bool {
-		let clos = |id| match self.get_space(id) {
-			SpaceRef::Memo(space) => (&space.type_info, space.get_ptr()),
-			SpaceRef::PoPu(space) => (&space.type_info, space.get_ptr()),
-			_ => panic!("NO SPACE PTR"),
-    	};
-		// TODO
-		let (i1, p1) = clos(a);
-		let (i2, p2) = clos(b);
-		assert_eq!(i1.type_id, i2.type_id);
-		unsafe { i1.partial_eq_fn.execute(p1, p2) }
-	}
+    fn equal_put_data(&self, a: LocId, b: LocId) -> bool {
+        let clos = |id| match self.get_space(id) {
+            SpaceRef::Memo(space) => (&space.type_info, space.get_ptr()),
+            SpaceRef::PoPu(space) => (&space.type_info, space.get_ptr()),
+            _ => panic!("NO SPACE PTR"),
+        };
+        // TODO
+        let (i1, p1) = clos(a);
+        let (i2, p2) = clos(b);
+        assert_eq!(i1.type_id, i2.type_id);
+        unsafe { i1.partial_eq_fn.execute(p1, p2) }
+    }
     fn send_to_getter(&self, id: LocId, msg: usize) {
         self.get_po_ge(id).expect("NOPOGE").dropbox.send(msg)
     }
@@ -501,7 +313,7 @@ impl ProtoR {
     }
 }
 
-struct MsgDropbox {
+pub(crate) struct MsgDropbox {
     s: crossbeam::Sender<usize>,
     r: crossbeam::Receiver<usize>,
 }
@@ -535,109 +347,9 @@ impl MsgDropbox {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub enum PortGroupError {
-    EmptyGroup,
-    MemId(LocId),
-    SynchronousWithRule(RuleId),
-}
-#[derive(Default)]
-pub struct PortGroupBuilder {
-    core: Option<(LocId, Arc<ProtoAll>)>,
-    members: BitSet,
-}
-
-pub struct PortGroup {
-    p: Arc<ProtoAll>,
-    leader: LocId,
-    disambiguation: HashMap<RuleId, LocId>,
-}
-impl PortGroup {
-    /// block until the protocol is in this state
-    unsafe fn await_state(&self, state_pred: BitSet) {
-        // TODO check the given state pred is OK? maybe unnecessary since function is internal
-        {
-            let w = self.p.w.lock();
-            if w.active.ready.is_superset(&state_pred) {
-                return; // already in the desired state
-            }
-        } // release lock
-        let space = self.p.r.get_space(self.leader);
-        match space {
-            SpaceRef::PoPu(po_pu_space) => po_pu_space.dropbox.recv_nothing(),
-            SpaceRef::PoGe(po_ge_space) => po_ge_space.dropbox.recv_nothing(),
-            _ => panic!("BAD ID"),
-        }
-        // I received a notification that the state is ready!
-    }
-    unsafe fn new(p: &Arc<ProtoAll>, id_set: &BitSet) -> Result<PortGroup, PortGroupError> {
-        use PortGroupError::*;
-        let mut w = p.w.lock();
-        // 1. check all loc_ids correspond with ports (not memory cells)
-        for id in id_set.iter_sparse() {
-            if !p.r.loc_is_port(id) {
-                return Err(MemId(id));
-            }
-        }
-        // 1. check that NO rule contains multiple ports in the set
-        for (rule_id, rule) in w.rules.iter().enumerate() {
-            if rule.guard_ready.iter_and(id_set).count() > 1 {
-                return Err(SynchronousWithRule(rule_id));
-            }
-        }
-        match id_set.iter_sparse().next() {
-            Some(leader) => {
-                let mut disambiguation = HashMap::new();
-                // 2. change occurrences of any port IDs in the set to leader
-                for (rule_id, rule) in w.rules.iter_mut().enumerate() {
-                    if let Some(specific_port) = rule.guard_ready.iter_and(id_set).next() {
-                        disambiguation.insert(rule_id, specific_port);
-                        rule.guard_ready.set_to(specific_port, false);
-                        rule.guard_ready.set(leader);
-                    }
-                }
-                Ok(PortGroup {
-                    p: p.clone(),
-                    leader,
-                    disambiguation,
-                })
-            }
-            None => Err(EmptyGroup),
-        }
-    }
-    pub fn ready_wait_determine_commit(&self) -> LocId {
-        let space = self.p.r.get_space(self.leader);
-        {
-            let mut w = self.p.w.lock();
-            w.ready_tentative.set(self.leader);
-            w.active.ready.set(self.leader);
-        }
-        let rule_id = match space {
-            SpaceRef::PoPu(po_pu_space) => po_pu_space.dropbox.recv(),
-            SpaceRef::PoGe(po_ge_space) => po_ge_space.dropbox.recv(),
-            _ => panic!("BAD ID"),
-        };
-        *self.disambiguation.get(&rule_id).expect("SHOULD BE OK")
-    }
-}
-impl Drop for PortGroup {
-    // TODO ensure you can't change leaders or something whacky
-    fn drop(&mut self) {
-        let mut w = self.p.w.lock();
-        for (rule_id, rule) in w.rules.iter_mut().enumerate() {
-            if let Some(&specific_port) = self.disambiguation.get(&rule_id) {
-                if self.leader != specific_port {
-                    rule.guard_ready.set_to(self.leader, false);
-                    rule.guard_ready.set(specific_port);
-                }
-            }
-        }
-    }
-}
-
 struct UnclaimedPortInfo {
-	putter: bool,
-	type_id: TypeId,
+    putter: bool,
+    type_id: TypeId,
 }
 
 // Ready layout:  [PoPu|PoGe|MePu|MeGe]
@@ -648,340 +360,34 @@ pub struct ProtoAll {
     w: Mutex<ProtoW>,
 }
 pub enum ClaimResult<T: 'static> {
-	GotGetter(Getter<T>),
-	GotPutter(Putter<T>),
-	NotUnclaimed,
-	TypeMismatch,
+    GotGetter(Getter<T>),
+    GotPutter(Putter<T>),
+    NotUnclaimed,
+    TypeMismatch,
 }
 impl<T: 'static> TryInto<Putter<T>> for ClaimResult<T> {
-	type Error = bool;
-	fn try_into(self) -> Result<Putter<T>, Self::Error> {
-		use ClaimResult::*;
-		match self {
-			GotPutter(p) => Ok(p),
-			GotGetter(_) => Err(true),
-			NotUnclaimed | TypeMismatch => Err(true),
-		}
-	}
+    type Error = bool;
+    fn try_into(self) -> Result<Putter<T>, Self::Error> {
+        use ClaimResult::*;
+        match self {
+            GotPutter(p) => Ok(p),
+            GotGetter(_) => Err(true),
+            NotUnclaimed | TypeMismatch => Err(true),
+        }
+    }
 }
 impl<T: 'static> TryInto<Getter<T>> for ClaimResult<T> {
-	type Error = bool;
-	fn try_into(self) -> Result<Getter<T>, Self::Error> {
-		use ClaimResult::*;
-		match self {
-			GotPutter(_) => Err(true),
-			GotGetter(g) => Ok(g),
-			NotUnclaimed | TypeMismatch => Err(true),
-		}
-	}
-}
-
-trait HasUnclaimedPorts {
-	fn claim<T: 'static>(&self, id: LocId) -> ClaimResult<T>;
-}
-impl HasUnclaimedPorts for Arc<ProtoAll> {
-	fn claim<T: 'static>(&self, id: LocId) -> ClaimResult<T> {
-		use ClaimResult::*;
-		let mut w = self.w.lock();
-		if let Some(x) = w.unclaimed_ports.get(&id) {
-			if x.type_id == TypeId::of::<T>() {
-				let putter = x.putter;
-				let _ = w.unclaimed_ports.remove(&id);
-				if putter {
-					GotPutter(Putter {
-						p: self.clone(),
-						id,
-						phantom: PhantomData::default(),
-					})
-				} else {
-					GotGetter(Getter {
-						p: self.clone(),
-						id,
-						phantom: PhantomData::default(),
-					})
-				}
-			} else {
-				TypeMismatch
-			}
-		} else {
-			NotUnclaimed
-		}
-	}
-}
-impl ProtoAll {
-    pub fn new(proto_def: &ProtoDef) -> Self {
-        let rules = Self::build_rules(proto_def).expect("OH NO");
-        let (mem_data, me_pu, po_pu, free_mems, ready) = Self::build_core(proto_def);
-        let po_ge = (0..proto_def.po_ge_infos.len())
-            .map(|_| PoGeSpace::new())
-            .collect();
-        let r = ProtoR {
-            mem_data,
-            me_pu,
-            po_pu,
-            po_ge,
-        };
-        let unclaimed_ports = proto_def.po_pu_infos.iter().enumerate().map(|(i, type_info)| {
-        	let id = i;
-        	let type_id = type_info.type_id;
-        	(id, UnclaimedPortInfo { putter: true, type_id })
-        }).chain(proto_def.po_ge_infos.iter().enumerate().map(|(i, &type_id)| {
-        	let id = proto_def.po_pu_infos.len() + i;
-        	(id, UnclaimedPortInfo { putter: false, type_id })
-        })).collect();
-        let w = Mutex::new(ProtoW {
-            rules,
-            active: ProtoActive {
-                ready,
-                free_mems,
-                mem_refs: HashMap::default(),
-            },
-            commitment: None,
-            ready_tentative: BitSet::default(),
-            awaiting_states: vec![],
-            unclaimed_ports,
-        });
-        ProtoAll { w, r }
-    }
-    fn build_core(
-        proto_def: &ProtoDef,
-    ) -> (
-        Vec<u8>, // buffer
-        Vec<MemoSpace>,
-        Vec<PoPuSpace>,
-        HashMap<TypeId, Vec<*mut u8>>,
-        BitSet,
-    ) {
-        let mem_get_id_start =
-            proto_def.mem_infos.len() + proto_def.po_pu_infos.len() + proto_def.po_ge_infos.len();
-        let mut capacity = 0;
-        let mut offsets_n_typeids = vec![];
-        let mut mem_type_info: HashMap<TypeId, Arc<TypeInfo>> = proto_def
-            .po_pu_infos
-            .iter()
-            .map(|&info| (info.type_id, Arc::new(info)))
-            .collect();
-        let mut ready = BitSet::default();
-        let mut free_mems = HashMap::default();
-        for (mem_id, info) in proto_def.mem_infos.iter().enumerate() {
-            ready.set(mem_id + mem_get_id_start); // set GETTER
-            let rem = capacity % info.align.max(1);
-            if rem > 0 {
-                capacity += info.align - rem;
-            }
-            // println!("@ {:?} for info {:?}", capacity, &info);
-            offsets_n_typeids.push((capacity, info.type_id));
-            mem_type_info
-                .entry(info.type_id)
-                .or_insert_with(|| Arc::new(*info));
-            capacity += info.bytes.max(1); // make pointers unique even with 0-byte data
-        }
-        // println!("CAP IS {:?}", capacity);
-
-        // meta-offset used to ensure the start of the vec alsigns to 64-bits (covers all cases)
-        // almost always unnecessary
-        let mut buf: Vec<u8> = Vec::with_capacity(capacity + 8);
-        let mut meta_offset: isize = 0;
-        while (unsafe { buf.as_ptr().offset(meta_offset) }) as usize % 8 != 0 {
-            meta_offset += 1;
-        }
-        unsafe {
-            buf.set_len(capacity);
-        }
-        let memo_spaces = offsets_n_typeids
-            .into_iter()
-            .map(|(offset, type_id)| unsafe {
-                let ptr: *mut u8 = buf.as_mut_ptr().offset(offset as isize + meta_offset);
-                free_mems.entry(type_id).or_insert(vec![]).push(ptr);
-                let type_info = mem_type_info.get(&type_id).expect("Missed a type").clone();
-                MemoSpace::new(ptr, type_info)
-            })
-            .collect();
-        let po_pu_spaces = proto_def
-            .po_pu_infos
-            .iter()
-            .map(|info| {
-                let info = mem_type_info
-                    .get(&info.type_id)
-                    .expect("Missed a type")
-                    .clone();
-                PoPuSpace::new(info)
-            })
-            .collect();
-        (buf, memo_spaces, po_pu_spaces, free_mems, ready)
-    }
-    fn build_rules(proto_def: &ProtoDef) -> Result<Vec<Rule2>, BuildRuleError> {
-        use BuildRuleError::*;
-        let mut rules = vec![];
-        for (_rule_id, rule_def) in proto_def.rule_defs.iter().enumerate() {
-            let mut guard_ready = BitSet::default();
-            let mut actions = vec![];
-            // let mut seen = HashSet::<LocId>::default();
-            for action_def in rule_def.actions.iter() {
-                let mut mg = vec![];
-                let mut pg = vec![];
-                let p = action_def.putter;
-                if let Some(g) = proto_def.mem_getter_id(p) {
-                    if guard_ready.test(g) {
-                        // mem is getter in one action and putter in another
-                        return Err(SynchronousFiring { loc_id: p });
-                    }
-                }
-                for &g in action_def.getters.iter() {
-                    if proto_def.loc_is_po_ge(g) {
-                        pg.push(g);
-                        if guard_ready.set_to(g, true) {
-                            return Err(SynchronousFiring { loc_id: g });
-                        }
-                    } else if proto_def.loc_is_mem(g) {
-                        mg.push(g);
-                        if guard_ready.set_to(proto_def.mem_getter_id(g).expect("BAD MEM ID"), true)
-                        {
-                            return Err(SynchronousFiring { loc_id: g });
-                        }
-                    } else {
-                        return Err(LocCannotGet { loc_id: g });
-                    }
-                }
-                if guard_ready.set_to(p, true) {
-                    return Err(SynchronousFiring { loc_id: p });
-                }
-                // seen.insert(action_def.putter);
-                if proto_def.loc_is_po_pu(p) {
-                    actions.push(Action::PortPut { putter: p, mg, pg });
-                } else if proto_def.loc_is_mem(p) {
-                    actions.push(Action::MemPut { putter: p, mg, pg });
-                } else {
-                    return Err(LocCannotPut { loc_id: p });
-                }
-            }
-            rules.push(Rule2 {
-                guard_ready,
-                guard_pred: rule_def.guard_pred.clone(),
-                actions,
-            });
-        }
-        Ok(rules)
-    }
-}
-#[derive(Debug, Copy, Clone)]
-enum BuildRuleError {
-    SynchronousFiring { loc_id: LocId },
-    LocCannotGet { loc_id: LocId },
-    LocCannotPut { loc_id: LocId },
-}
-
-#[derive(derive_new::new)]
-pub struct ActionDef {
-    pub putter: LocId,
-    pub getters: &'static [LocId],
-}
-#[derive(derive_new::new)]
-pub struct RuleDef {
-    pub guard_pred: GuardPred,
-    pub actions: Vec<ActionDef>,
-}
-unsafe impl Send for RuleDef {}
-unsafe impl Sync for RuleDef {}
-
-pub struct ProtoDef {
-    pub po_pu_infos: Vec<TypeInfo>,
-    pub po_ge_infos: Vec<TypeId>,
-    pub mem_infos: Vec<TypeInfo>,
-    pub rule_defs: Vec<RuleDef>,
-}
-
-impl ProtoDef {
-    fn mem_getter_id(&self, id: LocId) -> Option<LocId> {
-        if self.loc_is_mem(id) {
-            Some(id + self.mem_infos.len())
-        } else {
-            None
+    type Error = bool;
+    fn try_into(self) -> Result<Getter<T>, Self::Error> {
+        use ClaimResult::*;
+        match self {
+            GotPutter(_) => Err(true),
+            GotGetter(g) => Ok(g),
+            NotUnclaimed | TypeMismatch => Err(true),
         }
     }
-    fn loc_is_po_pu(&self, id: LocId) -> bool {
-        id < self.po_pu_infos.len()
-    }
-    fn loc_can_put(&self, id: LocId) -> bool {
-        self.loc_is_po_pu(id) || self.loc_is_mem(id)
-    }
-    fn loc_can_get(&self, id: LocId) -> bool {
-        self.loc_is_po_ge(id) || self.loc_is_mem(id)
-    }
-    fn loc_is_po_ge(&self, id: LocId) -> bool {
-        let r = self.po_pu_infos.len() + self.po_ge_infos.len();
-        self.po_pu_infos.len() <= id && id < r
-    }
-    fn loc_is_mem(&self, id: LocId) -> bool {
-        let l = self.po_pu_infos.len() + self.po_ge_infos.len();
-        let r = self.po_pu_infos.len() + self.po_ge_infos.len() + self.mem_infos.len();
-        l <= id && id < r
-    }
-    fn validate(&self) -> ProtoDefValidationResult {
-    	self.check_data_types_match()?;
-    	self.check_rule_guards()
-    }
-    fn check_data_types_match(&self) -> ProtoDefValidationResult {
-    	use ProtoDefValidationError::*;
-    	for rule_def in self.rule_defs.iter() {
-    		for action in rule_def.actions.iter() {
-    			let putter_tid = self.type_for(action.putter);
-    			for &g in action.getters.iter() {
-    				if putter_tid != self.type_for(g) {
-    					return Err(ActionTypeMismatch)
-    				}
-    			}
-    		}
-		}
-		Ok(())
-    }
-    fn type_for(&self, id: LocId) -> Option<TypeId> {
-    	let l1 = self.po_pu_infos.len();
-    	let l2 = self.po_ge_infos.len();
-    	self.po_pu_infos.get(id).map(TypeInfo::get_tid)
-    	.or(self.po_ge_infos.get(id - l1).copied())
-    	.or(self.mem_infos.get(id - l1 - l2).map(TypeInfo::get_tid))
-    }
-
-    fn check_rule_guards(&self) -> ProtoDefValidationResult {
-    	let mut putters = HashSet::<LocId>::default();
-    	for rule_def in self.rule_defs.iter() {
-    		putters.extend(rule_def.actions.iter().map(|a| a.putter));
-    		self.check_guard_pred(&rule_def.guard_pred, &putters)?;
-    		putters.clear();
-    	}
-    	Ok(())
-    }
-    fn check_guard_pred(&self, pred: &GuardPred, putters: &HashSet<LocId>) -> ProtoDefValidationResult {
-    	use GuardPred::*;
-    	use ProtoDefValidationError::*;
-    	match pred {
-			True => (),
-			None(x) | And(x) | Or(x) => for a in x.iter() {
-				self.check_guard_pred(a, putters)?;
-			},
-			Eq(a, b) => {
-				if !putters.contains(a) || !putters.contains(b) {
-					return Err(GuardReasonsOverAbsentData)
-				}
-				if self.type_for(*a) != self.type_for(*b) {
-					return Err(GuardEqTypeMismatch)
-				}
-			},
-    	};
-    	Ok(())
-    }
 }
 
-type ProtoDefValidationResult = Result<(), ProtoDefValidationError>;
-
-#[derive(Debug, Copy, Clone)]
-enum ProtoDefValidationError {
-	GuardReasonsOverAbsentData,
-	ActionOnNonexistantId,
-	GuardEqTypeMismatch,
-	ActionTypeMismatch,
-}
 
 // more protected
 struct Rule2 {
@@ -1073,12 +479,15 @@ impl<T: 'static> Getter<T> {
 }
 
 impl<T: 'static> Drop for Getter<T> {
-	fn drop(&mut self) {
-		self.p.w.lock().unclaimed_ports.insert(self.id, UnclaimedPortInfo {
-			type_id: TypeId::of::<T>(),
-			putter: false,
-		});
-	}
+    fn drop(&mut self) {
+        self.p.w.lock().unclaimed_ports.insert(
+            self.id,
+            UnclaimedPortInfo {
+                type_id: TypeId::of::<T>(),
+                putter: false,
+            },
+        );
+    }
 }
 
 unsafe impl<T: 'static> Send for Putter<T> {}
@@ -1195,76 +604,17 @@ impl<T: 'static> Putter<T> {
     fn put_finish_lossy(&self) {}
 }
 impl<T: 'static> Drop for Putter<T> {
-	fn drop(&mut self) {
-		self.p.w.lock().unclaimed_ports.insert(self.id, UnclaimedPortInfo {
-			type_id: TypeId::of::<T>(),
-			putter: true,
-		});
-	}
+    fn drop(&mut self) {
+        self.p.w.lock().unclaimed_ports.insert(
+            self.id,
+            UnclaimedPortInfo {
+                type_id: TypeId::of::<T>(),
+                putter: true,
+            },
+        );
+    }
 }
 
-#[derive(Debug, Copy, Clone)]
-enum DataGetCase {
-    BothYouClone,
-    BothYouMove,
-    OnlyCloners,
-    OnlyMovers,
-}
-impl DataGetCase {
-    fn i_move(self) -> bool {
-        use DataGetCase::*;
-        match self {
-            BothYouClone | OnlyCloners => false,
-            BothYouMove | OnlyMovers => true,
-        }
-    }
-    fn last_countdown(self) -> usize {
-        use DataGetCase::*;
-        match self {
-            OnlyCloners | OnlyMovers => 1,
-            BothYouClone | BothYouMove => 2,
-        }
-    }
-    fn someone_moves(self) -> bool {
-        use DataGetCase::*;
-        match self {
-            OnlyCloners => false,
-            BothYouClone | OnlyMovers | BothYouMove => true,
-        }
-    }
-    fn mover_must_wait(self) -> bool {
-        use DataGetCase::*;
-        match self {
-            OnlyMovers => false,
-            // OnlyCloners undefined anyway
-            BothYouClone | BothYouMove | OnlyCloners => true,
-        }
-    }
-    fn parse_msg(msg: usize) -> (Self, LocId) {
-        // println!("... GOT {:b}", msg);
-        use DataGetCase::*;
-        let mask = 0b11 << 62;
-        let case = match (msg & mask) >> 62 {
-            0b00 => BothYouClone,
-            0b01 => BothYouMove,
-            0b10 => OnlyCloners,
-            0b11 => OnlyMovers,
-            _ => unreachable!(),
-        };
-        (case, msg & !mask)
-    }
-    fn include_in_msg(self, msg: usize) -> usize {
-        use DataGetCase::*;
-        // assert_eq!(msg & (0b11 << 62), 0);
-        let x = match self {
-            BothYouClone => 0b00,
-            BothYouMove => 0b01,
-            OnlyCloners => 0b10,
-            OnlyMovers => 0b11,
-        };
-        msg | (x << 62)
-    }
-}
 
 pub struct Firer<'a> {
     r: &'a ProtoR,
@@ -1487,7 +837,6 @@ pub trait Proto: Sized {
     fn instantiate_and_claim() -> Self::Interface;
 }
 
-
 // lazy_static::lazy_static! {
 //     static ref MY_PROTO_DEF: ProtoDef = ProtoDef {
 // 		mem_infos: vec![
@@ -1502,26 +851,20 @@ pub trait Proto: Sized {
 // 	};
 // }
 
-
 struct MyProto<T0>(PhantomData<T0>);
 impl<T0: 'static> Proto for MyProto<T0> {
     type Interface = (Putter<T0>, Putter<T0>, Getter<T0>);
     fn proto_def() -> ProtoDef {
-    	use GuardPred::*;
+        use GuardPred::*;
         ProtoDef {
             po_pu_infos: vec![TypeInfo::new::<T0>(), TypeInfo::new::<T0>()],
-            po_ge_infos: vec![
-            	TypeId::of::<T0>(),
-            ],
+            po_ge_infos: vec![TypeId::of::<T0>()],
             mem_infos: vec![TypeInfo::new::<T0>()],
-            rule_defs: vec![
-                new_rule_def![True; 0=>2; 1=>3],
-                new_rule_def![True; 3=>2],
-            ],
+            rule_defs: vec![new_rule_def![True; 0=>2; 1=>3], new_rule_def![True; 3=>2]],
         }
     }
     fn instantiate() -> ProtoAll {
-    	ProtoAll::new(&Self::proto_def())
+        Self::proto_def().build().expect("I goofd!")
     }
     fn instantiate_and_claim() -> Self::Interface {
         let p = Arc::new(Self::instantiate());
@@ -1596,89 +939,93 @@ fn test_my_proto() {
     .expect("WENT OK");
 }
 
-//////////////// INTERNAL SPECIALIZATION TRAITS for port-data ////////////
-trait MaybeClone {
-    fn maybe_clone(&self) -> Self;
-}
-impl<T> MaybeClone for T {
-    default fn maybe_clone(&self) -> Self {
-        panic!("type isn't clonable!")
-    }
-}
-
-impl<T: Clone> MaybeClone for T {
-    fn maybe_clone(&self) -> Self {
-        self.clone()
-    }
-}
-
-trait MaybeCopy {
-    const IS_COPY: bool;
-}
-impl<T> MaybeCopy for T {
-    default const IS_COPY: bool = false;
-}
-
-impl<T: Copy> MaybeCopy for T {
-    const IS_COPY: bool = true;
-}
-trait MaybePartialEq {
-	fn maybe_partial_eq(&self, other: &Self) -> bool;
-}
-impl<T> MaybePartialEq for T {
-	default fn maybe_partial_eq(&self, _other: &Self) -> bool {
-		panic!("type isn't partial eq!")
-	}
-}
-impl<T: PartialEq> MaybePartialEq for T {
-	fn maybe_partial_eq(&self, other: &Self) -> bool {
-		self.eq(other)
-	} 
-}
 
 // assume for now that the bitset has the right shape.
 pub struct ProtoState {
     data: BitSet,
 }
 
-
 #[derive(Debug, Clone)]
 pub enum GuardPred {
-	True,
-	None(Vec<GuardPred>),
-	And(Vec<GuardPred>),
-	Or(Vec<GuardPred>),
-	Eq(LocId, LocId),
+    True,
+    None(Vec<GuardPred>),
+    And(Vec<GuardPred>),
+    Or(Vec<GuardPred>),
+    Eq(LocId, LocId),
 }
 impl GuardPred {
-	fn eval(&self, r: &ProtoR) -> bool {
-		use GuardPred::*;
-		let clos = |x| Self::eval(x, r);
-		match self {
-			True => true,
-			None(x) => !x.iter().any(clos),
-			And(x) => !x.iter().all(clos),
-			Or(x) => x.iter().any(clos),
-			Eq(a, b) => r.equal_put_data(*a, *b),
-		}
-	}
+    fn eval(&self, r: &ProtoR) -> bool {
+        use GuardPred::*;
+        let clos = |x| Self::eval(x, r);
+        match self {
+            True => true,
+            None(x) => !x.iter().any(clos),
+            And(x) => !x.iter().all(clos),
+            Or(x) => x.iter().any(clos),
+            Eq(a, b) => r.equal_put_data(*a, *b),
+        }
+    }
 }
 
-/*
-Todo:
-1. make a new Repo with Rbpa and depend on reo
-2. make a new Repo for testing a protocol
-3. finish changing guard to Cmd thingy
-*/
-
-
-
-trait MaybeDatum {
-	fn take_from(&mut self, other: *mut u8);
+#[derive(Debug, Copy, Clone)]
+pub(crate) enum DataGetCase {
+    BothYouClone,
+    BothYouMove,
+    OnlyCloners,
+    OnlyMovers,
 }
-impl MaybeDatum for u32 {
-	fn take_from(&mut self, other: *mut u8) {
-		let other: &mut Self = unsafe {std::mem::transmute(other)};
-		*self = *other
-	}
+impl DataGetCase {
+    fn i_move(self) -> bool {
+        use DataGetCase::*;
+        match self {
+            BothYouClone | OnlyCloners => false,
+            BothYouMove | OnlyMovers => true,
+        }
+    }
+    fn last_countdown(self) -> usize {
+        use DataGetCase::*;
+        match self {
+            OnlyCloners | OnlyMovers => 1,
+            BothYouClone | BothYouMove => 2,
+        }
+    }
+    fn someone_moves(self) -> bool {
+        use DataGetCase::*;
+        match self {
+            OnlyCloners => false,
+            BothYouClone | OnlyMovers | BothYouMove => true,
+        }
+    }
+    fn mover_must_wait(self) -> bool {
+        use DataGetCase::*;
+        match self {
+            OnlyMovers => false,
+            // OnlyCloners undefined anyway
+            BothYouClone | BothYouMove | OnlyCloners => true,
+        }
+    }
+    fn parse_msg(msg: usize) -> (Self, LocId) {
+        // println!("... GOT {:b}", msg);
+        use DataGetCase::*;
+        let mask = 0b11 << 62;
+        let case = match (msg & mask) >> 62 {
+            0b00 => BothYouClone,
+            0b01 => BothYouMove,
+            0b10 => OnlyCloners,
+            0b11 => OnlyMovers,
+            _ => unreachable!(),
+        };
+        (case, msg & !mask)
+    }
+    fn include_in_msg(self, msg: usize) -> usize {
+        use DataGetCase::*;
+        // assert_eq!(msg & (0b11 << 62), 0);
+        let x = match self {
+            BothYouClone => 0b00,
+            BothYouMove => 0b01,
+            OnlyCloners => 0b10,
+            OnlyMovers => 0b11,
+        };
+        msg | (x << 62)
+    }
 }

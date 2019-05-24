@@ -5,7 +5,6 @@ macro_rules! id_iter {
     };
 }
 
-
 #[macro_export]
 macro_rules! new_rule_def {
     ($guard_pred:expr ;    $( $p:tt => $(  $g:tt ),*   );* ) => {{
