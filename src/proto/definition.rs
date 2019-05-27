@@ -32,13 +32,25 @@ impl Rbpa {
         let mut buf = vec![];
         while let Some((i, _)) = self.rules.iter().enumerate().filter(|r| r.1.port.is_none()).next() {
             let r1 = self.rules.remove(i);
-            for r2 in self.rules.iter() {
+            for rid2 in 0..self.rules.len() {
+                let r2 = &self.rules[rid2];
                 if let Some(c) = r1.compose(r2) {
-                    println!("... ({:?} + {:?}) = ({:?}). NOW AM: {:#?}", r1, r2, &c, &self);
-                    buf.push(c);
+                    println!("... ({:?} + {:?}) = ({:?})", r1, r2, &c);
+                    let mut did_fuse = false;
+                    for r2 in self.rules.iter_mut() {
+                        if let Some(fused) = r2.fuse(&c) {
+                            println!("... ({:?} | {:?}) = ({:?})", &c, r2, &fused);
+                            did_fuse = true;
+                            *r2 = fused;
+                        }
+                    }
+                    if !did_fuse {
+                        buf.push(c);   
+                    }
                 }
             }
             self.rules.append(&mut buf);
+            println!("now am: {:#?}", &self);
         }
     }
 }
@@ -51,7 +63,57 @@ pub struct RbpaRule {
     assign: HashMap<LocId, bool>,
 }
 impl RbpaRule {
-    fn compose(&self, other: &RbpaRule) -> Option<RbpaRule> {
+    fn normalize(&mut self) {
+        let RbpaRule {guard, assign, ..} = self;
+        assign.retain(|k, v| guard.get(k) != Some(v));
+    }
+    fn fuse(&self, other: &Self) -> Option<Self> {
+
+
+        if self.port != other.port {
+            return None;
+        }
+
+        let mut compatible_so_far = true;
+        let mut guard = self.guard.clone();
+        for (id, v1) in self.guard.iter() {
+            if let Some(v2) = other.guard.get(id) {
+                if v1 != v2 {
+                    if compatible_so_far {
+                        compatible_so_far = false;
+                    } else {
+                        // 2+ disagreements
+                        return None;    
+                    }
+                }
+            } else {
+                // make generic
+                guard.remove(id);
+            }
+        }
+
+
+        let mut assign = self.assign.clone();
+        for (id, v1) in self.assign.iter() {
+            if let Some(v2) = other.assign.get(id) {
+                if v1 != v2 {
+                    return None; 
+                }
+            } else {
+                // make generic
+                assign.remove(id);
+            }
+        }
+        let mut rule = RbpaRule {
+            port: self.port,
+            guard,
+            assign,
+        };
+        rule.normalize();
+        // Some(rule)
+        panic!("NOT FUSING CORRECTLY YET. ASSIGNMENT IS TOO GENEROUS");
+    }
+    fn compose(&self, other: &Self) -> Option<Self> {
         // can compose if:
         // 1. 
 
@@ -84,15 +146,16 @@ impl RbpaRule {
                 },
             }
         }
-
-        Some(RbpaRule {
+        let mut rule = RbpaRule {
             port, guard, assign
-        })
+        };
+        rule.normalize();
+        Some(rule)
     }
 }
 impl fmt::Debug for RbpaRule {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut buf = vec![];
+        let mut buf = vec!['X'; 5];
         for (&k, &v) in self.guard.iter() {
             if buf.len() <= k {
                 buf.resize_with(k+1, || 'X');
@@ -102,6 +165,7 @@ impl fmt::Debug for RbpaRule {
         for b in buf.drain(..) {
             write!(f, "{}", b)?;
         }
+        buf.extend(&['X'; 5]);
         match self.port {
             Some(x) => write!(f, " ={}=> ", x),
             None => write!(f, " =.=> "),
@@ -173,11 +237,13 @@ impl ProtoDef {
                     }
                 }
             }
-            rules.push(RbpaRule {
+            let mut rule = RbpaRule {
                 port,
                 guard,
                 assign,
-            });
+            };
+            rule.normalize();
+            rules.push(rule);
         }
         Ok(Rbpa { rules })
     }
