@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// User-facing protocol trait. Reo will generate structures that implement this.
 ///
 /// Contains two important things:

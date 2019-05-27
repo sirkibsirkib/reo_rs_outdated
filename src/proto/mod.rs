@@ -5,24 +5,19 @@ pub mod reflection;
 use reflection::TypeInfo;
 
 pub mod traits;
-use traits::{
-    HasMsgDropBox, HasUnclaimedPorts, MaybeClone, MaybeCopy, MaybePartialEq, Proto
-};
+use traits::{HasMsgDropBox, HasUnclaimedPorts, MaybeClone, MaybeCopy, MaybePartialEq, Proto};
 
 pub mod definition;
 pub use definition::{ActionDef, ProtoDef, RuleDef};
 
 pub mod groups;
 
-use crate::{
-    LocId, RuleId,
-    bitset::BitSet,
-    helper::WithFirst,
-};
+use crate::{bitset::BitSet, helper::WithFirst, LocId, RuleId};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
 use std::convert::TryInto;
 use std::{
+    fmt,
     any::TypeId,
     cell::UnsafeCell,
     marker::PhantomData,
@@ -37,7 +32,7 @@ use std::{
 use std_semaphore::Semaphore;
 
 /// A coordination point that getters interact with to acquire a datum.
-/// Common to memory and port putters. 
+/// Common to memory and port putters.
 struct PutterSpace {
     ptr: AtomicPtr<u8>,
     cloner_countdown: AtomicUsize,
@@ -102,7 +97,9 @@ struct MemoSpace {
 }
 impl MemoSpace {
     fn new(ptr: *mut u8, type_info: Arc<TypeInfo>) -> Self {
-        Self { p: PutterSpace::new(ptr, type_info)}
+        Self {
+            p: PutterSpace::new(ptr, type_info),
+        }
     }
     fn make_empty(&self, my_id: LocId, r: &ProtoR, w: &mut ProtoActive, do_drop: bool) {
         let ptr = self.p.get_ptr();
@@ -250,12 +247,14 @@ impl ProtoW {
         Firer {
             r,
             w: &mut self.active,
-        }.debug_print_readiness();
+        }
+        .debug_print_readiness();
         self.active.ready.set(my_id);
         Firer {
             r,
             w: &mut self.active,
-        }.debug_print_readiness();
+        }
+        .debug_print_readiness();
         if self.commitment.is_some() {
             // some rule is waiting for completion
             return;
@@ -292,7 +291,8 @@ impl ProtoW {
                     Firer {
                         r,
                         w: &mut self.active,
-                    }.debug_print_readiness();
+                    }
+                    .debug_print_readiness();
                     Self::notify_state_waiters(&self.active.ready, &mut self.awaiting_states, r);
                     continue 'outer;
                 }
@@ -324,7 +324,7 @@ impl ProtoW {
 pub struct ProtoR {
     /// This buffer stores the ACTUAL memory data. The contents are never accessed
     /// here, it's just stored inside ProtoR to ensure it's freed at the right time.
-    mem_data: Vec<u8>, 
+    mem_data: Vec<u8>,
 
     // Ready layout:  [PoPu|PoGe|MePu|MeGe]
     // Spaces layout: [PoPu|PoGe|Memo]
@@ -383,9 +383,8 @@ pub(crate) struct MsgDropbox {
     r: crossbeam::Receiver<usize>,
 }
 impl MsgDropbox {
-
     // Value chosen only for visibility during debug
-    const NOTHING_MSG: usize = !0;// 0xffff...
+    const NOTHING_MSG: usize = !0; // 0xffff...
 
     fn new() -> Self {
         let (s, r) = crossbeam::channel::bounded(1);
@@ -416,13 +415,11 @@ impl MsgDropbox {
     }
 }
 
-
 /// The entire state of a single protocol instance. Usually only accessed via Arc.
 pub struct ProtoAll {
     r: ProtoR,
     w: Mutex<ProtoW>,
 }
-
 
 /// Part of protocol Meta-state. Remembers that a Putter / Getter with this
 /// ID has not yet been constructed for this proto.
@@ -596,8 +593,14 @@ impl<T: 'static> Putter<T> {
             }
         };
         match num_movers_msg {
-            0 => { drop(datum); Observed(()) } ,
-            1 => { std::mem::forget(datum); Moved },
+            0 => {
+                drop(datum);
+                Observed(())
+            }
+            1 => {
+                std::mem::forget(datum);
+                Moved
+            }
             _ => panic!(Self::BAD_MSG),
         }
     }
@@ -648,15 +651,21 @@ impl<T: 'static> Putter<T> {
         }
     }
     /// This function mirrors the API of that of `put`, returning `Some` if the
-    /// value was not consumed, but instead drops the datum in place. 
+    /// value was not consumed, but instead drops the datum in place.
     pub fn put_lossy(&mut self, datum: T) -> Option<()> {
         let po_pu = self.p.r.get_po_pu(self.id).expect(Self::BAD_ID);
         unsafe { po_pu.p.set_ptr(transmute(&datum)) };
         self.p.w.lock().enter(&self.p.r, self.id);
         let num_movers_msg = po_pu.dropbox.recv();
         match num_movers_msg {
-            0 => { drop(datum); Some(()) },
-            1 => { std::mem::forget(datum); None },
+            0 => {
+                drop(datum);
+                Some(())
+            }
+            1 => {
+                std::mem::forget(datum);
+                None
+            }
             _ => panic!(Self::BAD_MSG),
         }
     }
@@ -672,7 +681,6 @@ impl<T: 'static> Drop for Putter<T> {
         );
     }
 }
-
 
 /// Convenience structure. Contains behavior for actually executing a data-movement action.
 pub struct Firer<'a> {
@@ -698,7 +706,10 @@ impl<'a> Firer<'a> {
         }
         print!("|");
         for i in (0..self.r.me_pu.len()).map(|x| x + self.r.po_pu.len() + self.r.po_ge.len()) {
-            let c = match [self.w.ready.test(i), self.w.ready.test(self.r.mem_getter_id(i))] {
+            let c = match [
+                self.w.ready.test(i),
+                self.w.ready.test(self.r.mem_getter_id(i)),
+            ] {
                 [false, false] => '~',
                 [true, false] => 'F',
                 [false, true] => 'E',
@@ -727,8 +738,16 @@ impl<'a> Firer<'a> {
         memo_space.make_empty(me_pu, self.r, self.w, true);
     }
 
-    fn instruct_data_getters<F>(r: &ProtoR, po_ge: &[LocId], data_getters_count: usize, putter_id: LocId, space: &PutterSpace, cleanup: F)
-    where F: FnOnce() {
+    fn instruct_data_getters<F>(
+        r: &ProtoR,
+        po_ge: &[LocId],
+        data_getters_count: usize,
+        putter_id: LocId,
+        space: &PutterSpace,
+        cleanup: F,
+    ) where
+        F: FnOnce(),
+    {
         // 3. instruct port-getters. delegate clearing putters to them (unless 0 getters)
         match data_getters_count {
             0 => cleanup(),
@@ -770,7 +789,7 @@ impl<'a> Firer<'a> {
 
         // 1. port getters have move-priority
         let data_getters_count = self.release_sig_getters_count_getters(po_ge);
-        let Firer {r, w } = self;
+        let Firer { r, w } = self;
         Self::instruct_data_getters(r, po_ge, data_getters_count, me_pu, &memo_space.p, || {
             // cleanup function. invoked when there are 0 data-getters
             memo_space.make_empty(me_pu, r, w, true);
@@ -857,8 +876,7 @@ impl<'a> Firer<'a> {
     }
 }
 
-
-/// Recursively-defined predicate over putter-and-memory data 
+/// Recursively-defined predicate over putter-and-memory data
 // TODO check if we ever need to be able to define checks that reason about OTHER ports / memcells
 #[derive(Debug, Clone)]
 pub enum GuardPred {
@@ -1009,8 +1027,8 @@ mod tests {
         fn proto_def() -> ProtoDef {
             use GuardPred::*;
             ProtoDef {
-                po_pu_infos: type_infos![T0],   // 0..=0
-                po_ge_types: type_ids![T0],     // 1..=1
+                po_pu_infos: type_infos![T0],       // 0..=0
+                po_ge_types: type_ids![T0],         // 1..=1
                 mem_infos: type_infos![T0, T0, T0], // 2..=4
                 rule_defs: vec![
                     new_rule_def![True; 0=>2],
@@ -1028,7 +1046,6 @@ mod tests {
             putters_getters![p => 0, 1]
         }
     }
-
 
     #[test]
     fn fifo_3_run() {
@@ -1048,5 +1065,17 @@ mod tests {
             });
         })
         .expect("WENT BAD");
+    }
+
+    #[test]
+    fn fifo_3_api() {
+        let def = Fifo3::<u32>::proto_def();
+        let port_set = hashset!{0, 1};
+        let rbpa = def.new_rbpa(&port_set);
+        println!("rbpa {:#?}", &rbpa);
+        if let Ok(mut rbpa) = rbpa {
+            rbpa.normalize();
+            println!("rbpa {:#?}", &rbpa);
+        }
     }
 }

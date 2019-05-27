@@ -23,21 +23,110 @@ pub struct ProtoDef {
     pub rule_defs: Vec<RuleDef>,
 }
 
-
 #[derive(Debug)]
 pub struct Rbpa {
-    rules: Vec<RbpaRule>
+    rules: Vec<RbpaRule>,
 }
-#[derive(Debug)]
+impl Rbpa {
+    pub fn normalize(&mut self) {
+        let mut buf = vec![];
+        while let Some((i, _)) = self.rules.iter().enumerate().filter(|r| r.1.port.is_none()).next() {
+            let r1 = self.rules.remove(i);
+            for r2 in self.rules.iter() {
+                if let Some(c) = r1.compose(r2) {
+                    println!("... ({:?} + {:?}) = ({:?}). NOW AM: {:#?}", r1, r2, &c, &self);
+                    buf.push(c);
+                }
+            }
+            self.rules.append(&mut buf);
+        }
+    }
+}
+
+
+
 pub struct RbpaRule {
     port: Option<LocId>,
-    guard: HashMap<LocId, Option<bool>>,
-    assign: HashMap<LocId, Option<bool>>,
+    guard: HashMap<LocId, bool>,
+    assign: HashMap<LocId, bool>,
 }
+impl RbpaRule {
+    fn compose(&self, other: &RbpaRule) -> Option<RbpaRule> {
+        // can compose if:
+        // 1. 
+
+        assert!(self.port.is_none());
+        let port = other.port;
+
+        let mut guard = self.guard.clone();
+        for (id, v1) in other.guard.iter() {
+            match [self.guard.get(id), self.assign.get(id)] {
+                [None, None] => {
+                    // other imposes a new restriction
+                    guard.insert(*id, *v1);
+                },
+                [Some(v2), None] | [_, Some(v2)] => if v2!=v1 {
+                    // clash between output of r1 and input of r2
+                    return None
+                },
+            }
+        }
+
+        let mut assign = other.assign.clone();
+        for (id, v1) in self.assign.iter() {
+            match [other.guard.get(id), other.assign.get(id)] {
+                [None, None] => {
+                    // first rule propagates assignment
+                    assign.insert(*id, *v1);
+                },
+                [Some(v2), None] | [_, Some(v2)] => if v2!=v1 {
+                    // 2nd rule overshadows 1st
+                },
+            }
+        }
+
+        Some(RbpaRule {
+            port, guard, assign
+        })
+    }
+}
+impl fmt::Debug for RbpaRule {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut buf = vec![];
+        for (&k, &v) in self.guard.iter() {
+            if buf.len() <= k {
+                buf.resize_with(k+1, || 'X');
+            }
+            buf[k] = if v {'T'} else {'F'};
+        }
+        for b in buf.drain(..) {
+            write!(f, "{}", b)?;
+        }
+        match self.port {
+            Some(x) => write!(f, " ={}=> ", x),
+            None => write!(f, " =.=> "),
+        }?;
+        for (&k, &v) in self.assign.iter() {
+            if buf.len() <= k {
+                buf.resize_with(k+1, || 'X');
+            }
+            buf[k] = if v {'T'} else {'F'};
+        }
+        for b in buf.drain(..) {
+            write!(f, "{}", b)?;
+        }
+        Ok(())
+    }
+}
+
+
 
 #[derive(Debug, Copy, Clone)]
 pub enum RbpaBuildErr {
-    SynchronousFiring { loc_ids: [LocId; 2], rule_id: RuleId },
+    SynchronousFiring {
+        loc_ids: [LocId; 2],
+        rule_id: RuleId,
+    },
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -49,6 +138,7 @@ pub enum ProtoBuildErr {
 impl ProtoDef {
     pub fn new_rbpa(&self, port_set: &HashSet<LocId>) -> Result<Rbpa, RbpaBuildErr> {
         let mut rules = vec![];
+        let port_ids = 0..(self.po_pu_infos.len() + self.po_ge_types.len());
         for (rule_id, rule_def) in self.rule_defs.iter().enumerate() {
             use RbpaBuildErr::*;
             let mut guard = HashMap::default();
@@ -57,29 +147,36 @@ impl ProtoDef {
             let mut clos = |id: LocId| {
                 if port_set.contains(&id) {
                     if let Some(was) = port.replace(id) {
-                        return Some(SynchronousFiring { loc_ids: [was, id], rule_id })
+                        return Some(SynchronousFiring {
+                            loc_ids: [was, id],
+                            rule_id,
+                        });
                     }
                 }
                 None
             };
             for action in rule_def.actions.iter() {
                 if let Some(err) = clos(action.putter) {
-                    return Err(err)
+                    return Err(err);
                 }
-                guard.insert(action.putter, Some(false));
-                assign.insert(action.putter, Some(true));
+                if !port_ids.contains(&action.putter) {
+                    guard.insert(action.putter, true);
+                    assign.insert(action.putter, false);
+                }
                 for &getter in action.getters.iter() {
                     if let Some(err) = clos(getter) {
-                        return Err(err)
+                        return Err(err);
                     }
-                    guard.entry(getter).or_insert(Some(true));
-                    assign.insert(getter, Some(true));
+                    if !port_ids.contains(&getter) {
+                        guard.entry(getter).or_insert(false);
+                        assign.insert(getter, true);
+                    }
                 }
             }
             rules.push(RbpaRule {
                 port,
                 guard,
-                assign
+                assign,
             });
         }
         Ok(Rbpa { rules })

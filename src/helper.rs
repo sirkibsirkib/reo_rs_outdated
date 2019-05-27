@@ -69,7 +69,6 @@ macro_rules! bitset {
     };
 }
 
-
 #[macro_export]
 macro_rules! type_infos {
     ( $( $type:ty ),* ) => {{
@@ -138,12 +137,9 @@ impl<T: Iterator> Iterator for WithFirstIter<T> {
 
 pub trait WithFirst: Sized + Iterator {
     fn with_first(self) -> WithFirstIter<Self>;
-} 
+}
 impl<T: Iterator + Sized> WithFirst for T {
     fn with_first(self) -> WithFirstIter<Self> {
-        WithFirstIter {
-            t: self,
-            b: true,
-        }
+        WithFirstIter { t: self, b: true }
     }
-} 
+}
