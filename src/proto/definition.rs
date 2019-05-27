@@ -1,18 +1,20 @@
 use super::*;
 
+/// Defines an abstract protocol action. Describes one data-movement of 1 putter to N getters
 #[derive(derive_new::new, Debug)]
 pub struct ActionDef {
     pub putter: LocId,
     pub getters: &'static [LocId],
 }
+
+/// Defines an abstract rule comprised of some actions that fire atomically
 #[derive(derive_new::new, Debug)]
 pub struct RuleDef {
     pub guard_pred: GuardPred,
     pub actions: Vec<ActionDef>,
 }
-unsafe impl Send for RuleDef {}
-unsafe impl Sync for RuleDef {}
 
+/// Defines the entirety of a protocol, describing the LocId space and types
 #[derive(Debug)]
 pub struct ProtoDef {
     pub po_pu_infos: Vec<TypeInfo>,
@@ -20,6 +22,7 @@ pub struct ProtoDef {
     pub mem_infos: Vec<TypeInfo>,
     pub rule_defs: Vec<RuleDef>,
 }
+
 
 #[derive(Debug)]
 pub struct Rbpa {
