@@ -1,11 +1,11 @@
 use super::*;
 
-#[derive(derive_new::new)]
+#[derive(derive_new::new, Debug)]
 pub struct ActionDef {
     pub putter: LocId,
     pub getters: &'static [LocId],
 }
-#[derive(derive_new::new)]
+#[derive(derive_new::new, Debug)]
 pub struct RuleDef {
     pub guard_pred: GuardPred,
     pub actions: Vec<ActionDef>,
@@ -13,11 +13,28 @@ pub struct RuleDef {
 unsafe impl Send for RuleDef {}
 unsafe impl Sync for RuleDef {}
 
+#[derive(Debug)]
 pub struct ProtoDef {
     pub po_pu_infos: Vec<TypeInfo>,
-    pub po_ge_infos: Vec<TypeId>,
+    pub po_ge_types: Vec<TypeId>,
     pub mem_infos: Vec<TypeInfo>,
     pub rule_defs: Vec<RuleDef>,
+}
+
+#[derive(Debug)]
+pub struct Rbpa {
+    rules: Vec<RbpaRule>
+}
+#[derive(Debug)]
+pub struct RbpaRule {
+    port: Option<LocId>,
+    guard: HashMap<LocId, Option<bool>>,
+    assign: HashMap<LocId, Option<bool>>,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum RbpaBuildErr {
+    SynchronousFiring { loc_ids: [LocId; 2], rule_id: RuleId },
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -27,10 +44,47 @@ pub enum ProtoBuildErr {
     LocCannotPut { loc_id: LocId },
 }
 impl ProtoDef {
+    pub fn new_rbpa(&self, port_set: &HashSet<LocId>) -> Result<Rbpa, RbpaBuildErr> {
+        let mut rules = vec![];
+        for (rule_id, rule_def) in self.rule_defs.iter().enumerate() {
+            use RbpaBuildErr::*;
+            let mut guard = HashMap::default();
+            let mut assign = HashMap::default();
+            let mut port: Option<LocId> = None;
+            let mut clos = |id: LocId| {
+                if port_set.contains(&id) {
+                    if let Some(was) = port.replace(id) {
+                        return Some(SynchronousFiring { loc_ids: [was, id], rule_id })
+                    }
+                }
+                None
+            };
+            for action in rule_def.actions.iter() {
+                if let Some(err) = clos(action.putter) {
+                    return Err(err)
+                }
+                guard.insert(action.putter, Some(false));
+                assign.insert(action.putter, Some(true));
+                for &getter in action.getters.iter() {
+                    if let Some(err) = clos(getter) {
+                        return Err(err)
+                    }
+                    guard.entry(getter).or_insert(Some(true));
+                    assign.insert(getter, Some(true));
+                }
+            }
+            rules.push(RbpaRule {
+                port,
+                guard,
+                assign
+            });
+        }
+        Ok(Rbpa { rules })
+    }
     pub fn build(&self) -> Result<ProtoAll, ProtoBuildErr> {
         let rules = self.build_rules()?;
         let (mem_data, me_pu, po_pu, free_mems, ready) = self.build_core();
-        let po_ge = (0..self.po_ge_infos.len())
+        let po_ge = (0..self.po_ge_types.len())
             .map(|_| PoGeSpace::new())
             .collect();
         let r = ProtoR {
@@ -52,7 +106,7 @@ impl ProtoDef {
                 };
                 (id, upi)
             })
-            .chain(self.po_ge_infos.iter().enumerate().map(|(i, &type_id)| {
+            .chain(self.po_ge_types.iter().enumerate().map(|(i, &type_id)| {
                 let id = self.po_pu_infos.len() + i;
                 let upi = UnclaimedPortInfo {
                     putter: false,
@@ -85,7 +139,7 @@ impl ProtoDef {
         BitSet,
     ) {
         let mem_get_id_start =
-            self.mem_infos.len() + self.po_pu_infos.len() + self.po_ge_infos.len();
+            self.mem_infos.len() + self.po_pu_infos.len() + self.po_ge_types.len();
         let mut capacity = 0;
         let mut offsets_n_typeids = vec![];
         let mut mem_type_info: HashMap<TypeId, Arc<TypeInfo>> = self
@@ -210,12 +264,12 @@ impl ProtoDef {
         self.loc_is_po_ge(id) || self.loc_is_mem(id)
     }
     fn loc_is_po_ge(&self, id: LocId) -> bool {
-        let r = self.po_pu_infos.len() + self.po_ge_infos.len();
+        let r = self.po_pu_infos.len() + self.po_ge_types.len();
         self.po_pu_infos.len() <= id && id < r
     }
     fn loc_is_mem(&self, id: LocId) -> bool {
-        let l = self.po_pu_infos.len() + self.po_ge_infos.len();
-        let r = self.po_pu_infos.len() + self.po_ge_infos.len() + self.mem_infos.len();
+        let l = self.po_pu_infos.len() + self.po_ge_types.len();
+        let r = self.po_pu_infos.len() + self.po_ge_types.len() + self.mem_infos.len();
         l <= id && id < r
     }
     fn validate(&self) -> ProtoDefValidationResult {
@@ -238,11 +292,11 @@ impl ProtoDef {
     }
     fn type_for(&self, id: LocId) -> Option<TypeId> {
         let l1 = self.po_pu_infos.len();
-        let l2 = self.po_ge_infos.len();
+        let l2 = self.po_ge_types.len();
         self.po_pu_infos
             .get(id)
             .map(TypeInfo::get_tid)
-            .or(self.po_ge_infos.get(id - l1).copied())
+            .or(self.po_ge_types.get(id - l1).copied())
             .or(self.mem_infos.get(id - l1 - l2).map(TypeInfo::get_tid))
     }
 

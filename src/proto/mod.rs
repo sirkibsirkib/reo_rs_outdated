@@ -6,7 +6,8 @@ use reflection::TypeInfo;
 
 pub mod traits;
 use traits::{
-    HasMsgDropBox, HasUnclaimedPorts, MaybeClone, MaybeCopy, MaybePartialEq, PutterSpace,
+    HasMsgDropBox, HasUnclaimedPorts, MaybeClone, MaybeCopy, MaybePartialEq,
+    PutterSpace, WithFirst,
 };
 
 pub mod definition;
@@ -72,7 +73,7 @@ impl MemoSpace {
             }
             w.free_mems.get_mut(tid).expect("??").push(ptr);
         }
-        println!("MEMCELL BECAME EMPTY. SET");
+        // println!("MEMCELL BECAME EMPTY. SET");
         w.ready.set(r.mem_getter_id(my_id)); // GETTER ready
     }
 }
@@ -188,8 +189,15 @@ impl ProtoW {
     }
     fn enter(&mut self, r: &ProtoR, my_id: LocId) {
         println!("ENTER WITH GOAL {}", my_id);
+        Firer {
+            r,
+            w: &mut self.active,
+        }.debug_print_readiness();
         self.active.ready.set(my_id);
-        println!("READINESS IS {:?}", &self.active.ready);
+        Firer {
+            r,
+            w: &mut self.active,
+        }.debug_print_readiness();
         if self.commitment.is_some() {
             // some rule is waiting for completion
             return;
@@ -223,15 +231,24 @@ impl ProtoW {
                         r,
                         w: &mut self.active,
                     });
+                    Firer {
+                        r,
+                        w: &mut self.active,
+                    }.debug_print_readiness();
                     Self::notify_state_waiters(&self.active.ready, &mut self.awaiting_states, r);
-                    if !rule.guard_ready.test(my_id) {
-                        // job done!
-                        break 'inner;
-                    } else {
-                        continue 'outer;
-                    }
+                    // println!("raw bits are {:?}", &self.active.ready);
+                    // if !self.active.ready.test(my_id) {
+                    //     // job done!
+                    //     println!(".. goal met!");
+                    //     break 'inner;
+                    // } else {
+                    //     println!(".. goal not met!");
+                    //     continue 'outer;
+                    // }
+                    continue 'outer;
                 }
             }
+            println!("EXITING id={}", my_id);
             return;
         }
     }
@@ -319,12 +336,12 @@ impl MsgDropbox {
     #[inline]
     fn recv(&self) -> usize {
         let msg = self.r.recv().unwrap();
-        println!("MSG {:b} rcvd!", msg);
+        // println!("MSG {:b} rcvd!", msg);
         msg
     }
     #[inline]
     fn send(&self, msg: usize) {
-        println!("MSG {:b} sent!", msg);
+        // println!("MSG {:b} sent!", msg);
         self.s.try_send(msg).expect("Msgbox was full!")
     }
     fn send_nothing(&self) {
@@ -559,16 +576,44 @@ pub struct Firer<'a> {
     w: &'a mut ProtoActive,
 }
 impl<'a> Firer<'a> {
+    fn debug_print_readiness(&self) {
+        for i in 0..self.r.po_pu.len() {
+            let c = match self.w.ready.test(i) {
+                true => 'P',
+                false => '.',
+            };
+            print!("{}", c);
+        }
+        print!("|");
+        for i in (0..self.r.po_ge.len()).map(|x| x + self.r.po_pu.len()) {
+            let c = match self.w.ready.test(i) {
+                true => 'G',
+                false => ',',
+            };
+            print!("{}", c);
+        }
+        print!("|");
+        for i in (0..self.r.me_pu.len()).map(|x| x + self.r.po_pu.len() + self.r.po_ge.len()) {
+            let c = match [self.w.ready.test(i), self.w.ready.test(self.r.mem_getter_id(i))] {
+                [false, false] => '~',
+                [true, false] => 'F',
+                [false, true] => 'E',
+                [true, true] => '!',
+            };
+            print!("{}", c);
+        }
+        println!();
+    }
     // release signal-getters and count getters
     fn release_sig_getters_count_getters(&self, getters: &[LocId]) -> usize {
         let mut count = 0;
         for &g in getters {
             let po_ge = self.r.get_po_ge(g).expect("bad id");
             if po_ge.get_want_data() {
-                println!("ID={} wants some data", g);
+                // println!("ID={} wants some data", g);
                 count += 1;
             } else {
-                println!("SENDING NOTHING TO {}", g);
+                // println!("SENDING NOTHING TO {}", g);
                 po_ge.dropbox.send_nothing()
             }
         }
@@ -581,56 +626,66 @@ impl<'a> Firer<'a> {
         memo_space.make_empty(me_pu, self.r, self.w, true);
     }
 
-    pub fn mem_to_ports(&mut self, me_pu: LocId, po_ge: &[LocId]) {
-        println!("mem2ports");
-        let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
-
-        // 1. port getters have move-priority
-        let data_getters_count = self.release_sig_getters_count_getters(po_ge);
-
+    fn port_share<P,F>(r: &ProtoR, po_ge: &[LocId], data_getters_count: usize, putter_id: LocId, space: &P, cleanup: F)
+    where P: PutterSpace, F: FnOnce() {
         // 3. instruct port-getters. delegate clearing putters to them (unless 0 getters)
         match data_getters_count {
-            0 => {
-                // cleanup my damn self
-                println!("no movers!");
-                memo_space.make_empty(me_pu, self.r, self.w, true);
-            }
+            0 => cleanup(),
             1 => {
                 // solo mover
-                memo_space.cloner_countdown.store(1, Ordering::SeqCst);
+                space.get_cloner_countdown().store(1, Ordering::SeqCst);
                 let mut i = po_ge
                     .iter()
-                    .filter(|&&g| self.r.get_po_ge(g).unwrap().get_want_data());
+                    .filter(|&&g| r.get_po_ge(g).unwrap().get_want_data());
                 let mover = *i.next().unwrap();
-                println!("mover is {}", mover);
                 assert_eq!(None, i.next());
-                let msg = DataGetCase::OnlyMovers.include_in_msg(me_pu);
-                self.r.send_to_getter(mover, msg);
+                let msg = DataGetCase::OnlyMovers.include_in_msg(putter_id);
+                r.send_to_getter(mover, msg);
             }
             n => {
-                // n-1 cloners and 1 mover
-                println!("n= {}", n);
-                memo_space.cloner_countdown.store(n, Ordering::SeqCst);
-                for (i, &g) in po_ge
-                    .iter()
-                    .filter(|&&g| self.r.get_po_ge(g).unwrap().get_want_data())
-                    .enumerate()
-                {
-                    let msg = if i == 0 {
-                        // I choose you to be the mover!
-                        DataGetCase::BothYouMove
-                    } else {
-                        DataGetCase::BothYouClone
+                space.get_cloner_countdown().store(n, Ordering::SeqCst);
+                    if space.get_type_info().is_copy {
+                    for &g in po_ge
+                        .iter()
+                        .filter(|&&g| r.get_po_ge(g).unwrap().get_want_data())
+                    {
+                        let msg = DataGetCase::OnlyMovers.include_in_msg(putter_id);
+                        r.send_to_getter(g, msg);
                     }
-                    .include_in_msg(me_pu);
-                    self.r.send_to_getter(g, msg);
+                } else {
+                    // NON-COPY case
+                    for (is_first, &g) in po_ge
+                        .iter()
+                        .filter(|&&g| r.get_po_ge(g).unwrap().get_want_data())
+                        .with_first()
+                    {
+                        let msg = if is_first {
+                            DataGetCase::BothYouMove
+                        } else {
+                            DataGetCase::BothYouClone
+                        }
+                        .include_in_msg(putter_id);
+                        r.send_to_getter(g, msg);
+                    }
                 }
             }
         }
     }
 
+    pub fn mem_to_ports(&mut self, me_pu: LocId, po_ge: &[LocId]) {
+        // println!("mem2ports");
+        let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
+
+        // 1. port getters have move-priority
+        let data_getters_count = self.release_sig_getters_count_getters(po_ge);
+        let Firer {r, w } = self;
+        Self::port_share(r, po_ge, data_getters_count, me_pu, memo_space, || {
+            memo_space.make_empty(me_pu, r, w, true);
+        });
+    }
+
     pub fn mem_to_locs(&mut self, me_pu: LocId, me_ge: &[LocId], po_ge: &[LocId]) {
-        println!("mem_to_mem_and_ports");
+        // println!("mem_to_mem_and_ports");
         let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
         let tid = &memo_space.type_info.type_id;
         let src = memo_space.get_ptr();
@@ -650,7 +705,7 @@ impl<'a> Firer<'a> {
     }
 
     pub fn port_to_locs(&mut self, po_pu: LocId, me_ge: &[LocId], po_ge: &[LocId]) {
-        println!("port_to_mem_and_ports");
+        // println!("port_to_mem_and_ports");
         let po_pu_space = self.r.get_po_pu(po_pu).expect("ECH");
 
         // 1. port getters have move-priority
@@ -700,89 +755,20 @@ impl<'a> Firer<'a> {
             // println!("::port_to_mem_and_ports| ptr_refs={}", ptr_refs);
             self.w.mem_refs.insert(fresh_ptr, ptr_refs);
         }
-
-        // 2. instruct port-getters. delegate waking putter to them (unless 0 getters)
-
-        // tell the putter the number of MOVERS BUT don't wake them up yet!
-        match data_getters_count {
-            0 => {
-                // cleanup my damn self
-                println!("no movers!");
-                let mem_movers = if me_ge.is_empty() { 0 } else { 1 };
-                po_pu_space.dropbox.send(mem_movers);
-            }
-            1 => {
-                // solo mover
-                po_pu_space.cloner_countdown.store(1, Ordering::SeqCst);
-                let mut i = po_ge
-                    .iter()
-                    .filter(|&&g| self.r.get_po_ge(g).unwrap().get_want_data());
-                let mover = *i.next().unwrap();
-                println!("mover= {}", mover);
-                assert_eq!(None, i.next());
-                let msg = DataGetCase::OnlyMovers.include_in_msg(po_pu);
-                self.r.send_to_getter(mover, msg);
-            }
-            n => {
-                println!("n= {}", n);
-                // n-1 cloners and 1 mover
-                po_pu_space.cloner_countdown.store(n, Ordering::SeqCst);
-                for (i, &g) in po_ge
-                    .iter()
-                    .filter(|&&g| self.r.get_po_ge(g).unwrap().get_want_data())
-                    .enumerate()
-                {
-                    let msg = if i == 0 {
-                        // I choose you to be the mover!
-                        DataGetCase::BothYouMove
-                    } else {
-                        DataGetCase::BothYouClone
-                    }
-                    .include_in_msg(po_pu);
-                    self.r.send_to_getter(g, msg);
-                }
-            }
-        }
+        let Firer { r, .. } = self;
+        Self::port_share(r, po_ge, data_getters_count, po_pu, po_pu_space, || {
+            // memo_space.make_empty(me_pu, r, w, true);
+            let mem_movers = if me_ge.is_empty() { 0 } else { 1 };
+            po_pu_space.dropbox.send(mem_movers);
+        });
     }
 }
-
-// struct Rule {
-// 	guard_ready: BitSet,
-// 	guard_fn: GuardFn,
-// 	fire_fn: fn(Firer),
-// }
-// impl Rule {
-// 	fn fire(&self, f: Firer) {
-// 		(self.fire_fn)(f)
-// 	}
-// }
 
 pub trait Proto: Sized {
     type Interface: Sized;
     fn proto_def() -> ProtoDef;
     fn instantiate() -> ProtoAll;
     fn instantiate_and_claim() -> Self::Interface;
-}
-
-struct MyProto<T0>(PhantomData<T0>);
-impl<T0: 'static> Proto for MyProto<T0> {
-    type Interface = (Putter<T0>, Putter<T0>, Getter<T0>);
-    fn proto_def() -> ProtoDef {
-        use GuardPred::*;
-        ProtoDef {
-            po_pu_infos: vec![TypeInfo::new::<T0>(), TypeInfo::new::<T0>()],
-            po_ge_infos: vec![TypeId::of::<T0>()],
-            mem_infos: vec![TypeInfo::new::<T0>()],
-            rule_defs: vec![new_rule_def![True; 0=>2; 1=>3], new_rule_def![True; 3=>2]],
-        }
-    }
-    fn instantiate() -> ProtoAll {
-        Self::proto_def().build().expect("I goofd!")
-    }
-    fn instantiate_and_claim() -> Self::Interface {
-        let p = Arc::new(Self::instantiate());
-        putters_getters![p => 0, 1, 2]
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -873,10 +859,31 @@ impl DataGetCase {
 /////////////////// TESTS ////////////////////////
 
 mod tests {
+    struct Alternator<T0>(PhantomData<(T0,)>);
+    impl<T0: 'static> Proto for Alternator<T0> {
+        type Interface = (Putter<T0>, Putter<T0>, Getter<T0>);
+        fn proto_def() -> ProtoDef {
+            use GuardPred::*;
+            ProtoDef {
+                po_pu_infos: type_infos!(T0, T0),
+                po_ge_types: type_ids![T0],
+                mem_infos: type_infos![T0],
+                rule_defs: vec![new_rule_def![True; 0=>2; 1=>3], new_rule_def![True; 3=>2]],
+            }
+        }
+        fn instantiate() -> ProtoAll {
+            Self::proto_def().build().expect("I goofd!")
+        }
+        fn instantiate_and_claim() -> Self::Interface {
+            let p = Arc::new(Self::instantiate());
+            putters_getters![p => 0, 1, 2]
+        }
+    }
+
     use super::*;
     #[test]
-    fn test_my_proto() {
-        let (mut p1, mut p2, mut g3) = MyProto::instantiate_and_claim();
+    fn alternator_run() {
+        let (mut p1, mut p2, mut g3) = Alternator::instantiate_and_claim();
         crossbeam::scope(|s| {
             s.spawn(move |_| {
                 for i in 0..5 {
@@ -885,7 +892,7 @@ mod tests {
             });
 
             s.spawn(move |_| {
-                for i in 0..1000 {
+                for i in 0..7 {
                     let r = p2.put_timeout(i, Duration::from_millis(1900));
                     println!("r={:?}", r);
                 }
@@ -895,22 +902,58 @@ mod tests {
                 for _ in 0..5 {
                     // g3.get_signal(); g3.get_signal();
 
-                    let got = g3.get_signal();
-                    println!("============================. GOT:{:?}", got);
-                    // milli_sleep!(3000);
-                    let got = g3.get();
-                    println!("============================. GOT:{:?}", got);
-                    // milli_sleep!(3000);
+                    println!("GOT {:?}, {:?}", g3.get(), g3.get_signal());
+                    milli_sleep!(100);
                 }
             });
         })
-        .expect("WENT OK");
+        .expect("WENT BAD");
     }
-    #[derive(Debug)]
-    struct Testypoo;
-    impl Drop for Testypoo {
-        fn drop(&mut self) {
-            println!("I GOT MY ASS DROPPED");
+
+    struct Fifo3<T0>(PhantomData<(T0,)>);
+    impl<T0: 'static> Proto for Fifo3<T0> {
+        type Interface = (Putter<T0>, Getter<T0>);
+        fn proto_def() -> ProtoDef {
+            use GuardPred::*;
+            ProtoDef {
+                po_pu_infos: type_infos![T0],   // 0..=0
+                po_ge_types: type_ids![T0],     // 1..=1
+                mem_infos: type_infos![T0, T0, T0], // 2..=4
+                rule_defs: vec![
+                    new_rule_def![True; 0=>2],
+                    new_rule_def![True; 2=>3],
+                    new_rule_def![True; 3=>4],
+                    new_rule_def![True; 4=>1],
+                ],
+            }
         }
+        fn instantiate() -> ProtoAll {
+            Self::proto_def().build().expect("I goofd!")
+        }
+        fn instantiate_and_claim() -> Self::Interface {
+            let p = Arc::new(Self::instantiate());
+            putters_getters![p => 0, 1]
+        }
+    }
+
+
+    #[test]
+    fn fifo_3_run() {
+        let (mut p1, mut g1) = Fifo3::instantiate_and_claim();
+        crossbeam::scope(|s| {
+            s.spawn(move |_| {
+                for i in 0..1 {
+                    p1.put(i);
+                }
+            });
+
+            s.spawn(move |_| {
+                for _ in 0..1 {
+                    let r = g1.get();
+                    println!("OUT::::::::::: r={:?}", r);
+                }
+            });
+        })
+        .expect("WENT BAD");
     }
 }

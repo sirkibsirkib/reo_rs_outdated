@@ -61,4 +61,14 @@
 54. PortDatum trait and specialization in future
 55. procedural macros for tightening the critical region: fire and guard functions can be optimized while still exposing a safe API
 56. using declarative macros for creating sugar
-57. using procedural macros to exploit complie-time information (future work?) 
+57. using procedural macros to exploit complie-time information (future work?)
+58. why we use type erasure and why we make our OWN trait objects
+59. fundamental difference between CA and RBA is: "do we precompute all rules for a state?"
+60. RBA: we DONT STATICALLY KNOW which rules can be applied at any time
+61. RBA: we fundametally assume "sparse rules" and therefore "few rules"
+62. why threadless protocols cannot support 100% laziness (deadlock)
+63. when threadless protocols CAN support laziness: no other ports blocking for progress
+64. strategies for exiting CR:
+-- detect blocking threads if goal met and UNPARK a protothread
+-- disable lazy exit while 1+ progress-blocking ports
+-- no laziness

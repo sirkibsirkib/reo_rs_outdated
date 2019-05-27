@@ -69,6 +69,42 @@ macro_rules! bitset {
     };
 }
 
+
+#[macro_export]
+macro_rules! type_infos {
+    ( $( $type:ty ),* ) => {{
+        vec![
+            $(TypeInfo::new::<$type>()),*
+        ]
+    }}
+}
+#[macro_export]
+macro_rules! type_ids {
+    ( $( $type:ty ),* ) => {{
+        vec![
+            $(TypeId::of::<$type>()),*
+        ]
+    }}
+}
+
+#[macro_export]
+macro_rules! hashset {
+    (@single $($x:tt)*) => (());
+    (@count $($rest:expr),*) => (<[()]>::len(&[$(bitset!(@single $rest)),*]));
+
+    ($($value:expr,)+) => { bitset!($($value),+) };
+    ($($value:expr),*) => {
+        {
+            let _countcap = bitset!(@count $($value),*);
+            let mut _set = hashbrown::HashSet::with_capacity(_countcap);
+            $(
+                let _ = _set.insert($value);
+            )*
+            _set
+        }
+    };
+}
+
 #[macro_export]
 macro_rules! map {
     (@single $($x:tt)*) => (());

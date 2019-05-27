@@ -180,3 +180,28 @@ impl HasUnclaimedPorts for Arc<ProtoAll> {
         }
     }
 }
+
+pub struct WithFirstIter<T: Iterator> {
+    t: T,
+    b: bool,
+}
+impl<T: Iterator> Iterator for WithFirstIter<T> {
+    type Item = (bool, T::Item);
+    fn next(&mut self) -> Option<Self::Item> {
+        let was = self.b;
+        self.b = false;
+        self.t.next().map(|x| (was, x))
+    }
+}
+
+pub trait WithFirst: Sized + Iterator {
+    fn with_first(self) -> WithFirstIter<Self>;
+} 
+impl<T: Iterator + Sized> WithFirst for T {
+    fn with_first(self) -> WithFirstIter<Self> {
+        WithFirstIter {
+            t: self,
+            b: true,
+        }
+    }
+} 
