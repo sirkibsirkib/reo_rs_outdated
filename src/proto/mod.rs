@@ -6,8 +6,7 @@ use reflection::TypeInfo;
 
 pub mod traits;
 use traits::{
-    HasMsgDropBox, HasUnclaimedPorts, MaybeClone, MaybeCopy, MaybePartialEq,
-    WithFirst,
+    HasMsgDropBox, HasUnclaimedPorts, MaybeClone, MaybeCopy, MaybePartialEq, Proto
 };
 
 pub mod definition;
@@ -15,8 +14,11 @@ pub use definition::{ActionDef, ProtoDef, RuleDef};
 
 pub mod groups;
 
-use crate::bitset::BitSet;
-use crate::{LocId, RuleId};
+use crate::{
+    LocId, RuleId,
+    bitset::BitSet,
+    helper::WithFirst,
+};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
 use std::convert::TryInto;
@@ -855,17 +857,6 @@ impl<'a> Firer<'a> {
     }
 }
 
-/// User-facing protocol trait. Reo will generate structures that implement this.
-/// Contains two important things:
-/// 1. Definition of the `ProtoDef` which defines structure, behaviour etc.
-/// 2. Defines the interface (secondary concern) which allows
-/// for the convenient instantiate_and_claim function.
-pub trait Proto: Sized {
-    type Interface: Sized;
-    fn proto_def() -> ProtoDef;
-    fn instantiate() -> ProtoAll;
-    fn instantiate_and_claim() -> Self::Interface;
-}
 
 /// Recursively-defined predicate over putter-and-memory data 
 // TODO check if we ever need to be able to define checks that reason about OTHER ports / memcells

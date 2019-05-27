@@ -1,4 +1,19 @@
 use super::*;
+
+
+/// User-facing protocol trait. Reo will generate structures that implement this.
+///
+/// Contains two important things:
+/// 1. Definition of the `ProtoDef` which defines structure, behaviour etc.
+/// 2. Defines the interface which allows
+///     for the convenient `instantiate_and_claim` function.
+pub trait Proto: Sized {
+    type Interface: Sized;
+    fn proto_def() -> ProtoDef;
+    fn instantiate() -> ProtoAll;
+    fn instantiate_and_claim() -> Self::Interface;
+}
+
 pub(crate) trait HasMsgDropBox {
     fn get_dropbox(&self) -> &MsgDropbox;
     fn await_msg_timeout(&self, a: &ProtoAll, timeout: Duration, my_id: LocId) -> Option<usize> {
@@ -101,28 +116,3 @@ impl HasUnclaimedPorts for Arc<ProtoAll> {
         }
     }
 }
-
-pub struct WithFirstIter<T: Iterator> {
-    t: T,
-    b: bool,
-}
-impl<T: Iterator> Iterator for WithFirstIter<T> {
-    type Item = (bool, T::Item);
-    fn next(&mut self) -> Option<Self::Item> {
-        let was = self.b;
-        self.b = false;
-        self.t.next().map(|x| (was, x))
-    }
-}
-
-pub trait WithFirst: Sized + Iterator {
-    fn with_first(self) -> WithFirstIter<Self>;
-} 
-impl<T: Iterator + Sized> WithFirst for T {
-    fn with_first(self) -> WithFirstIter<Self> {
-        WithFirstIter {
-            t: self,
-            b: true,
-        }
-    }
-} 
