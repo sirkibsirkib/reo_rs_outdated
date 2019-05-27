@@ -195,7 +195,7 @@ impl ProtoDef {
             .collect();
         (buf, memo_spaces, po_pu_spaces, free_mems, ready)
     }
-    fn build_rules(&self) -> Result<Vec<Rule2>, ProtoBuildErr> {
+    fn build_rules(&self) -> Result<Vec<RunRule>, ProtoBuildErr> {
         use ProtoBuildErr::*;
         let mut rules = vec![];
         for (_rule_id, rule_def) in self.rule_defs.iter().enumerate() {
@@ -239,7 +239,7 @@ impl ProtoDef {
                     return Err(LocCannotPut { loc_id: p });
                 }
             }
-            rules.push(Rule2 {
+            rules.push(RunRule {
                 guard_ready,
                 guard_pred: rule_def.guard_pred.clone(),
                 actions,
