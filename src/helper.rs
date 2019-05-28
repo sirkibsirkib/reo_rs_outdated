@@ -87,14 +87,14 @@ macro_rules! type_ids {
 }
 
 #[macro_export]
-macro_rules! hashset {
+macro_rules! set {
     (@single $($x:tt)*) => (());
-    (@count $($rest:expr),*) => (<[()]>::len(&[$(bitset!(@single $rest)),*]));
+    (@count $($rest:expr),*) => (<[()]>::len(&[$(set!(@single $rest)),*]));
 
-    ($($value:expr,)+) => { bitset!($($value),+) };
+    ($($value:expr,)+) => { set!($($value),+) };
     ($($value:expr),*) => {
         {
-            let _countcap = bitset!(@count $($value),*);
+            let _countcap = set!(@count $($value),*);
             let mut _set = hashbrown::HashSet::with_capacity(_countcap);
             $(
                 let _ = _set.insert($value);

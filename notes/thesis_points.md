@@ -72,3 +72,10 @@
 -- detect blocking threads if goal met and UNPARK a protothread
 -- disable lazy exit while 1+ progress-blocking ports
 -- no laziness
+65. API 
+66. boundaries of the reo_rs API and what must be exposed as UNSAFE
+67. unsafety in rust: why we allow this to break the rules we set 
+68. rbpa normalization: composition + fusing
+69. generating API code. we need to discover statesets. the predicate at our disposal is a guard
+70. efficient mutex-paired powerset construction using integer iteration :)
+71. large-integer for future-proofing

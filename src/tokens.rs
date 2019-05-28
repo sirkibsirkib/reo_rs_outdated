@@ -1,9 +1,9 @@
-use crate::proto::{Getter, PortGroup, Proto, Putter};
-use crate::rbpa::Var;
+use crate::proto::groups::PortGroup;
+use crate::proto::{traits::Proto, Getter, Putter};
 use std::marker::PhantomData;
 use std::mem;
 
-use crate::{RuleId, PortId};
+use crate::{LocId, RuleId};
 
 pub trait Decimal: Token {}
 
@@ -16,57 +16,65 @@ pub unsafe trait Token: Sized {
 }
 unsafe impl Token for () {}
 
-macro_rules! def_decimal {
-    ($d:tt, $e:tt) => {
-        pub struct $d<T>(PhantomData<T>);
-        impl<T: Token> Decimal for $d<T> {}
-        unsafe impl<T: Token> Token for $d<T> {}
-        pub type $e = $d<()>;
-    };
+pub mod decimal {
+    use super::*;
+    macro_rules! def_decimal {
+        ($d:tt, $e:tt) => {
+            pub struct $d<T>(PhantomData<T>);
+            impl<T: Token> Decimal for $d<T> {}
+            unsafe impl<T: Token> Token for $d<T> {}
+            pub type $e = $d<()>;
+        };
+    }
+    def_decimal![D0, E0];
+    def_decimal![D1, E1];
+    def_decimal![D2, E2];
+    def_decimal![D3, E3];
+    def_decimal![D4, E4];
+    def_decimal![D5, E5];
+    def_decimal![D6, E6];
+    def_decimal![D7, E7];
+    def_decimal![D8, E8];
+    def_decimal![D9, E9];
 }
-def_decimal![D0, E0];
-def_decimal![D1, E1];
-def_decimal![D2, E2];
-def_decimal![D3, E3];
-def_decimal![D4, E4];
-def_decimal![D5, E5];
-def_decimal![D6, E6];
-def_decimal![D7, E7];
-def_decimal![D8, E8];
-def_decimal![D9, E9];
 
 pub struct Safe<D: Decimal, T> {
-    original_id: PortId,
+    original_id: LocId,
     inner: T,
     phantom: PhantomData<D>,
 }
 
-impl<D: Decimal, T> Safe<D, Getter<T>> {
-    pub unsafe fn new(mut inner: Getter<T>, leader: PortId) -> Self {
-        let original_id = inner.id;
-        inner.id = leader;
-        Self {
-            inner,
+impl<T: 'static> Getter<T> {
+    pub unsafe fn safe_wrap<D: Decimal>(mut self, leader: LocId) -> Safe<D, Self> {
+        let original_id = self.id;
+        self.id = leader;
+        Safe {
+            inner: self,
             phantom: PhantomData::default(),
             original_id,
         }
     }
-    pub fn get<R: Token>(&self, coupon: Coupon<D, R>) -> (T, R) {
+}
+impl<T: 'static> Putter<T> {
+    pub unsafe fn safe_wrap<D: Decimal>(mut self, leader: LocId) -> Safe<D, Self> {
+        let original_id = self.id;
+        self.id = leader;
+        Safe {
+            inner: self,
+            phantom: PhantomData::default(),
+            original_id,
+        }
+    }
+}
+
+impl<D: Decimal, T> Safe<D, Getter<T>> {
+    pub fn get<R: Token>(&mut self, coupon: Coupon<D, R>) -> (T, R) {
         let _ = coupon;
         (self.inner.get(), unsafe { R::fresh() })
     }
 }
 impl<D: Decimal, T> Safe<D, Putter<T>> {
-    pub unsafe fn new(mut inner: Putter<T>, leader: PortId) -> Self {
-        let original_id = inner.id;
-        inner.id = leader;
-        Self {
-            inner,
-            phantom: PhantomData::default(),
-            original_id,
-        }
-    }
-    pub fn put<R: Token>(&self, coupon: Coupon<D, R>, datum: T) -> R {
+    pub fn put<R: Token>(&mut self, coupon: Coupon<D, R>, datum: T) -> R {
         let _ = coupon;
         self.inner.put(datum);
         unsafe { R::fresh() }
@@ -86,21 +94,21 @@ unsafe impl Token for F {}
 unsafe impl Token for X {}
 
 pub trait Tern {
-    fn as_var() -> Var;
+    fn as_var() -> Option<bool>;
 }
 impl Tern for T {
-    fn as_var() -> Var {
-        Var::T
+    fn as_var() -> Option<bool> {
+        Some(true)
     }
 }
 impl Tern for F {
-    fn as_var() -> Var {
-        Var::F
+    fn as_var() -> Option<bool> {
+        Some(false)
     }
 }
 impl Tern for X {
-    fn as_var() -> Var {
-        Var::X
+    fn as_var() -> Option<bool> {
+        None
     }
 }
 
@@ -141,8 +149,13 @@ pub trait Advance<P: Proto>: Sized {
             _ => {
                 let rule_id = port_group.ready_wait_determine_commit();
                 Transition::from_rule_id(rule_id)
-            },
+            }
         };
         handler(choice)
     }
 }
+
+pub struct State<T> {
+    phantom: PhantomData<T>,
+}
+unsafe impl<T> Token for State<T> {}

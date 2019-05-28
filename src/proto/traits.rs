@@ -9,7 +9,7 @@ use super::*;
 pub trait Proto: Sized {
     type Interface: Sized;
     fn proto_def() -> ProtoDef;
-    fn instantiate() -> ProtoAll;
+    fn instantiate() -> Arc<ProtoAll>;
     fn instantiate_and_claim() -> Self::Interface;
 }
 
@@ -113,5 +113,19 @@ impl HasUnclaimedPorts for Arc<ProtoAll> {
         } else {
             NotUnclaimed
         }
+    }
+}
+
+pub trait HasProto {
+    fn get_proto(&self) -> &Arc<ProtoAll>;
+}
+impl<T: 'static> HasProto for Putter<T> {
+    fn get_proto(&self) -> &Arc<ProtoAll> {
+        &self.p
+    }
+}
+impl<T: 'static> HasProto for Getter<T> {
+    fn get_proto(&self) -> &Arc<ProtoAll> {
+        &self.p
     }
 }

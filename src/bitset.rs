@@ -26,7 +26,7 @@ impl<'a> Iterator for SparseIter<'a> {
                     let val = (1 << self.min) & x;
                     self.min += 1;
                     if val != 0 {
-                        return Some(self.maj * BitSet::BITS_PER_CHUNK + self.min);
+                        return Some(self.maj * BitSet::BITS_PER_CHUNK + (self.min-1));
                     }
                 }
                 None => return None,
@@ -77,7 +77,15 @@ impl BitSet {
     const BYTES_PER_CHUNK: usize = std::mem::size_of::<usize>();
     const BITS_PER_CHUNK: usize = Self::BYTES_PER_CHUNK * 8;
 
-    pub fn from_usizes<I: Iterator<Item = usize>>(it: I) -> Self {
+    pub fn from_set_iter<I: Iterator<Item = usize>>(it: I) -> Self {
+        let mut me = BitSet::default();
+        for i in it {
+            me.set_to(i, true);
+        }
+        me
+    }
+
+    pub fn from_chunks<I: Iterator<Item = usize>>(it: I) -> Self {
         let data = it.collect();
         let mut me = Self { data };
         me.strip_trailing_zeroes();
@@ -114,7 +122,7 @@ impl BitSet {
             min: 0,
         }
     }
-    pub fn from_usize(chunk: usize) -> Self {
+    pub fn from_chunk(chunk: usize) -> Self {
         if chunk == 0 {
             Self { data: vec![] }
         } else {
@@ -368,9 +376,9 @@ pub mod adaptors {
 
     #[test]
     pub fn bitset_tests() {
-        let a = BitSet::from_usize(0b0000001);
-        let b = BitSet::from_usize(0b0000010);
-        let c = BitSet::from_usize(0b0000011);
+        let a = BitSet::from_chunk(0b0000001);
+        let b = BitSet::from_chunk(0b0000010);
+        let c = BitSet::from_chunk(0b0000011);
         let ia = Identity::new(&a);
         let ib = Identity::new(&b);
         let ic = Identity::new(&c);

@@ -17,9 +17,10 @@ use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
 use std::convert::TryInto;
 use std::{
-    fmt,
+    ops::Range,
     any::TypeId,
     cell::UnsafeCell,
+    fmt,
     marker::PhantomData,
     mem::{transmute, ManuallyDrop, MaybeUninit},
     ptr::NonNull,
@@ -333,7 +334,7 @@ pub struct ProtoR {
     me_pu: Vec<MemoSpace>, // id range (#PoPu + #PoGe)..(#PoPu + #PoGe + #Memo)
 }
 impl ProtoR {
-    fn equal_put_data(&self, a: LocId, b: LocId) -> bool {
+    unsafe fn equal_put_data(&self, a: LocId, b: LocId) -> bool {
         let clos = |id| match self.get_space(id) {
             SpaceRef::Memo(space) => (&space.p.type_info, space.p.get_ptr()),
             SpaceRef::PoPu(space) => (&space.p.type_info, space.p.get_ptr()),
@@ -360,8 +361,11 @@ impl ProtoR {
     fn get_me_pu(&self, id: LocId) -> Option<&MemoSpace> {
         self.me_pu.get(id - self.po_pu.len() - self.po_ge.len())
     }
-    fn loc_is_port(&self, id: LocId) -> bool {
-        id < (self.po_pu.len() + self.po_ge.len())
+    pub fn loc_is_port(&self, id: LocId) -> bool {
+        self.port_id_rng().contains(&id)
+    }
+    pub fn loc_is_mem(&self, id: LocId) -> bool {
+        self.mem_id_rng().contains(&id)
     }
     fn get_space(&self, id: LocId) -> SpaceRef {
         use SpaceRef::*;
@@ -373,6 +377,15 @@ impl ProtoR {
             .or(self.po_ge.get(id - ppl).map(PoGe))
             .or(self.me_pu.get(id - ppl - pgl).map(Memo))
             .unwrap_or(None)
+    }
+    pub fn mem_id_rng(&self) -> Range<LocId> {
+        let start = self.po_pu.len() + self.po_ge.len();
+        let end = start + self.me_pu.len();
+        start..end
+    }
+    pub fn port_id_rng(&self) -> Range<LocId> {
+        let end = self.po_pu.len() + self.po_ge.len();
+        0..end
     }
 }
 
@@ -895,7 +908,7 @@ impl GuardPred {
             None(x) => !x.iter().any(clos),
             And(x) => !x.iter().all(clos),
             Or(x) => x.iter().any(clos),
-            Eq(a, b) => r.equal_put_data(*a, *b),
+            Eq(a, b) => unsafe { r.equal_put_data(*a, *b) },
         }
     }
 }
@@ -982,11 +995,11 @@ mod tests {
                 rule_defs: vec![new_rule_def![True; 0=>2; 1=>3], new_rule_def![True; 3=>2]],
             }
         }
-        fn instantiate() -> ProtoAll {
-            Self::proto_def().build().expect("I goofd!")
+        fn instantiate() -> Arc<ProtoAll> {
+            Arc::new(Self::proto_def().build().expect("I goofd!"))
         }
         fn instantiate_and_claim() -> Self::Interface {
-            let p = Arc::new(Self::instantiate());
+            let p = Self::instantiate();
             putters_getters![p => 0, 1, 2]
         }
     }
@@ -1038,11 +1051,11 @@ mod tests {
                 ],
             }
         }
-        fn instantiate() -> ProtoAll {
-            Self::proto_def().build().expect("I goofd!")
+        fn instantiate() -> Arc<ProtoAll> {
+            Arc::new(Self::proto_def().build().expect("I goofd!"))
         }
         fn instantiate_and_claim() -> Self::Interface {
-            let p = Arc::new(Self::instantiate());
+            let p = Self::instantiate();
             putters_getters![p => 0, 1]
         }
     }
@@ -1070,7 +1083,7 @@ mod tests {
     #[test]
     fn fifo_3_api() {
         let def = Fifo3::<u32>::proto_def();
-        let port_set = hashset!{0, 1};
+        let port_set = hashset! {0, 1};
         let rbpa = def.new_rbpa(&port_set);
         println!("rbpa {:#?}", &rbpa);
         if let Ok(mut rbpa) = rbpa {

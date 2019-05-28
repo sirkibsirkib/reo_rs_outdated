@@ -35,12 +35,12 @@ impl PortGroup {
         }
         // I received a notification that the state is ready!
     }
-    unsafe fn new(p: &Arc<ProtoAll>, id_set: &BitSet) -> Result<PortGroup, PortGroupError> {
+    pub unsafe fn new(p: &Arc<ProtoAll>, id_set: &BitSet) -> Result<PortGroup, PortGroupError> {
         use PortGroupError::*;
         let mut w = p.w.lock();
         // 1. check all loc_ids correspond with ports (not memory cells)
         for id in id_set.iter_sparse() {
-            if !p.r.loc_is_port(id) {
+            if p.r.loc_is_mem(id) {
                 return Err(MemId(id));
             }
         }
