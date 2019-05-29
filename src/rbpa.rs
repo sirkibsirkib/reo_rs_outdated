@@ -49,7 +49,9 @@ impl ProtoDef {
                 assign,
             };
             rule.normalize();
-            rules.push(rule);
+            if !rules.contains(&rule) {
+                rules.push(rule);
+            }
         }
         Ok(Rbpa { rules })
     }
@@ -89,8 +91,17 @@ impl Rbpa {
             self.rules.append(&mut buf);
             println!("now am: {:#?}", &self);
         }
+        let mut rules = Vec::with_capacity(self.rules.len());
+        std::mem::swap(&mut self.rules, &mut rules);
+        for r in rules.drain(..) {
+            if !self.rules.contains(&r) {
+                self.rules.push(r);
+            }
+        }
     }
 }
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct RbpaRule {
     port: Option<LocId>,
     guard: StatePred,
@@ -128,8 +139,14 @@ impl RbpaRule {
         };
         false
     }
+    pub fn has_effect(&self) -> bool {
+        !self.assign.is_empty()
+    }
     pub fn get_guard(&self) -> &StatePred {
         &self.guard
+    }
+    pub fn get_assign(&self) -> &StatePred {
+        &self.assign
     }
     fn fuse(&self, other: &Self) -> Option<Self> {
         if self.port != other.port {
@@ -141,11 +158,11 @@ impl RbpaRule {
         for id in self.guard.keys().chain(other.guard.keys()).unique() {
             match [self.guard.get(id), other.guard.get(id)] {
                 [Some(a), None] => match g_case {
-                    LeftSubsumes | Identical => g_case = LeftSubsumes,
+                    RightSubsumes | Identical => g_case = RightSubsumes,
                     _ => return None,
                 }
                 [None, Some(b)] => match g_case {
-                    RightSubsumes | Identical => g_case = RightSubsumes,
+                    LeftSubsumes | Identical => g_case = LeftSubsumes,
                     _ => return None,
                 }
                 [Some(a), Some(b)] if a!=b => match g_case {
