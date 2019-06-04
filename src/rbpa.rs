@@ -108,7 +108,6 @@ pub struct RbpaRule {
     assign: StatePred,
 }
 
-
 enum FuseCase {
     LeftSubsumes,
     RightSubsumes,

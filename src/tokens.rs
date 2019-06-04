@@ -5,38 +5,48 @@ use std::mem;
 
 use crate::{LocId, RuleId};
 
-pub trait Decimal: Token {}
 
 // for types that have NO SIZE and thus can be created without context
-pub unsafe trait Token: Sized {
+pub unsafe trait NilBytes: Sized {
     unsafe fn fresh() -> Self {
         debug_assert!(mem::size_of::<Self>() == 0);
         mem::uninitialized()
     }
 }
-unsafe impl Token for () {}
+unsafe impl NilBytes for () {}
 
 pub mod decimal {
     use super::*;
+
+    pub trait Decimal: NilBytes {
+        const N: usize;
+    }
+
     macro_rules! def_decimal {
-        ($d:tt, $e:tt) => {
+        ($d:tt, $e:tt, $n:tt) => {
             pub struct $d<T>(PhantomData<T>);
-            impl<T: Token> Decimal for $d<T> {}
-            unsafe impl<T: Token> Token for $d<T> {}
+            impl<T: Decimal> Decimal for $d<T> {
+                const N: usize = <T as Decimal>::N + $n;
+            }
+            impl Decimal for $d<()> {
+                const N: usize = $n;
+            }
+            unsafe impl<T: NilBytes> NilBytes for $d<T> {}
             pub type $e = $d<()>;
         };
     }
-    def_decimal![D0, E0];
-    def_decimal![D1, E1];
-    def_decimal![D2, E2];
-    def_decimal![D3, E3];
-    def_decimal![D4, E4];
-    def_decimal![D5, E5];
-    def_decimal![D6, E6];
-    def_decimal![D7, E7];
-    def_decimal![D8, E8];
-    def_decimal![D9, E9];
+    def_decimal![D0, E0, 0];
+    def_decimal![D1, E1, 1];
+    def_decimal![D2, E2, 2];
+    def_decimal![D3, E3, 3];
+    def_decimal![D4, E4, 4];
+    def_decimal![D5, E5, 5];
+    def_decimal![D6, E6, 6];
+    def_decimal![D7, E7, 7];
+    def_decimal![D8, E8, 8];
+    def_decimal![D9, E9, 9];
 }
+use decimal::*;
 
 pub struct Safe<D: Decimal, T> {
     original_id: LocId,
@@ -68,94 +78,112 @@ impl<T: 'static> Putter<T> {
 }
 
 impl<D: Decimal, T> Safe<D, Getter<T>> {
-    pub fn get<R: Token>(&mut self, coupon: Coupon<D, R>) -> (T, R) {
+    pub fn get<R: NilBytes>(&mut self, coupon: Coupon<D, R>) -> (T, R) {
         let _ = coupon;
         (self.inner.get(), unsafe { R::fresh() })
     }
 }
 impl<D: Decimal, T> Safe<D, Putter<T>> {
-    pub fn put<R: Token>(&mut self, coupon: Coupon<D, R>, datum: T) -> R {
+    pub fn put<R: NilBytes>(&mut self, coupon: Coupon<D, R>, datum: T) -> R {
         let _ = coupon;
         self.inner.put(datum);
         unsafe { R::fresh() }
     }
 }
 
-pub struct Coupon<D: Decimal, R: Token> {
+
+
+pub struct Coupon<D: Decimal, R: NilBytes> {
     phantom: PhantomData<(D, R)>,
 }
-unsafe impl<D: Decimal, R: Token> Token for Coupon<D, R> {}
+unsafe impl<D: Decimal, R: NilBytes> NilBytes for Coupon<D, R> {}
+
+////////////
+
+
+pub struct Discerned<Q> {
+    rule_id: usize,
+    phantom: PhantomData<Q>,
+}
+
+pub struct State<Q> {
+    phantom: PhantomData<Q>,
+}
+unsafe impl<Q> NilBytes for State<Q> {}
+
+pub trait MayBranch {
+    const BRANCHING: bool;
+}
+
+// terminal 0
+impl Discerned<()> {
+    pub fn match_nil(self) -> () {
+        ()
+    }
+}
+impl MayBranch for Discerned<()> {
+    const BRANCHING: bool = false;
+}
+// terminal 1
+impl<D: Decimal, S> Discerned<(Branch<D,S>,())> {
+    pub fn match_singleton(self) -> Branch<D,S> {
+        assert_eq!(self.rule_id, D::N);
+        Branch {
+            phantom: PhantomData::default(),
+        }
+    }
+}
+impl<D: Decimal, S> MayBranch for Discerned<(Branch<D,S>,())> {
+    const BRANCHING: bool = false;
+}
+
+// chain 2+
+impl<D: Decimal, S, N1, N2> Discerned<(Branch<D,S>,(N1, N2))> {
+    pub fn match_head(self) -> Result<Branch<D,S>, Discerned<(N1,N2)>> {
+        if D::N == self.rule_id {
+            Ok(Branch {
+                phantom: PhantomData::default(),
+            })
+        } else {
+            Err(Discerned {
+                rule_id: self.rule_id,
+                phantom: PhantomData::default(),
+            })
+        }
+    }
+}
+impl<D: Decimal, S, N1, N2> MayBranch for Discerned<(Branch<D,S>,(N1, N2))> {
+    const BRANCHING: bool = true;
+}
+
+
+
+pub struct Branch<D: Decimal, S> {
+    phantom: PhantomData<(D,S)>,
+}
+impl<D: Decimal, S> Branch<D,S> {
+    pub fn print(self) {
+        println!("Branch with N={:?}", D::N);
+    }
+}
+
+#[macro_export]
+macro_rules! match_list {
+    ($d:expr; ) => {{
+        $d.finalize()
+    }};
+    ($d:expr; $e:ident => $b:expr $(,)*) => {{
+        let $e = $d.match_singleton();
+        $b
+    }};
+    ($d:expr; $e:ident => $b:expr, $($en:ident => $bn:expr),+ $(,)*) => {{
+        match $d.match_head() {
+            Ok($e) => $b,
+            Err(__d) => match_list!(__d; $($en => $bn),+),
+        }
+    }};
+}
 
 pub struct T;
 pub struct F;
 pub struct X;
-unsafe impl Token for T {}
-unsafe impl Token for F {}
-unsafe impl Token for X {}
-
-pub trait Tern {
-    fn as_var() -> Option<bool>;
-}
-impl Tern for T {
-    fn as_var() -> Option<bool> {
-        Some(true)
-    }
-}
-impl Tern for F {
-    fn as_var() -> Option<bool> {
-        Some(false)
-    }
-}
-impl Tern for X {
-    fn as_var() -> Option<bool> {
-        None
-    }
-}
-
-pub struct Neg<T: Tern> {
-    phantom: PhantomData<T>,
-}
-unsafe impl<T: Tern> Token for Neg<T> {}
-
-pub trait Nand {}
-impl Nand for F {}
-impl Nand for Neg<T> {}
-
-// only left is NAND
-impl<A: Nand> Nand for (A, T) {}
-impl<A: Nand> Nand for (A, Neg<F>) {}
-impl<A: Nand> Nand for (A, X) {}
-impl<A: Nand> Nand for (A, Neg<X>) {}
-// only right is NAND
-impl<A: Nand> Nand for (T, A) {}
-impl<A: Nand> Nand for (Neg<F>, A) {}
-impl<A: Nand> Nand for (X, A) {}
-impl<A: Nand> Nand for (Neg<X>, A) {}
-// both sides are NAND
-impl<A: Nand, B: Nand> Nand for (A, B) {}
-
-pub trait Transition<P: Proto>: Sized {
-    fn from_rule_id(proto_rule_id: RuleId) -> Self;
-}
-
-pub trait Advance<P: Proto>: Sized {
-    type Opts: Transition<P>;
-    fn advance<F, R>(self, port_group: &PortGroup, handler: F) -> R
-    where
-        F: FnOnce(Self::Opts) -> R,
-    {
-        let choice: Self::Opts = match mem::size_of::<Self::Opts>() {
-            0 => unsafe { mem::uninitialized() },
-            _ => {
-                let rule_id = port_group.ready_wait_determine_commit();
-                Transition::from_rule_id(rule_id)
-            }
-        };
-        handler(choice)
-    }
-}
-
-pub struct State<T> {
-    phantom: PhantomData<T>,
-}
-unsafe impl<T> Token for State<T> {}

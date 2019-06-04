@@ -79,3 +79,6 @@
 69. generating API code. we need to discover statesets. the predicate at our disposal is a guard
 70. efficient mutex-paired powerset construction using integer iteration :)
 71. large-integer for future-proofing
+72. precomputing groups is problematic in general. can we avoid it?
+73. var enum approach. nested tuples for compiler - generated enums on the fly.
+74. covering up my compiler wizardry with sexy syntax sugar.

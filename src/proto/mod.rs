@@ -20,7 +20,6 @@ use std::{
     ops::Range,
     any::TypeId,
     cell::UnsafeCell,
-    fmt,
     marker::PhantomData,
     mem::{transmute, ManuallyDrop, MaybeUninit},
     ptr::NonNull,
@@ -1083,7 +1082,7 @@ mod tests {
     #[test]
     fn fifo_3_api() {
         let def = Fifo3::<u32>::proto_def();
-        let port_set = hashset! {0, 1};
+        let port_set = set! {0, 1};
         let rbpa = def.new_rbpa(&port_set);
         println!("rbpa {:#?}", &rbpa);
         if let Ok(mut rbpa) = rbpa {
