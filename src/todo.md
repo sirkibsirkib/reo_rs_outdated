@@ -6,6 +6,13 @@
 2. encode assignments into proto Rule objects. have the proto itself 
 	flip the state bits THE MOMENT IT COMMITS TO A RULE
 
-3. figure out the entrypoint to a generated API
+3. generated API once-off code
+-- grouping / ungrouping jazz
+-- Interface type
+-- figure out what is generic enough to end up in `reo_rs`
 
-4. figure out the interaction between generated API and `reo_rs` per transition
+
+4. generated API <==> reo_rs code each transition code
+-- how do we evaluate which variant is matched?
+	msg: (port_id, &MemBits)
+-- what is the control flow? WHEN exactly does this variant get chosen? pass a callback? 

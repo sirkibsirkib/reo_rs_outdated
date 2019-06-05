@@ -1,4 +1,5 @@
 
+use crate::bitset::BitSet;
 use crate::proto::{Getter, Putter};
 use std::marker::PhantomData;
 use std::{mem, fmt};
@@ -116,10 +117,95 @@ impl<D: Decimal, S> fmt::Debug for Coupon<D, S> {
 ///     Coupon<D,S> upon matching.
 /// Eg: Discerned<(Coupon<A,B>, (Coupon<C,D>, ())) represents a two-element list
 ///     and upon inspection may match either Coupon<A,B> or Coupon<C,D>.
-pub struct Discerned<Q> {
-    rule_id: usize,
+// pub struct Discerned<Q> {
+//     rule_id: usize,
+//     phantom: PhantomData<Q>,
+// }
+
+
+pub trait StateCheck {
+    fn state_check(against: &BitSet) -> bool;
+}
+
+pub trait Booly {
+    const BOOL: Option<bool>; 
+} 
+impl Booly for F {
+    const BOOL: Option<bool> = Some(false); 
+} 
+impl Booly for T {
+    const BOOL: Option<bool> = Some(true); 
+} 
+impl Booly for X {
+    const BOOL: Option<bool> = None; 
+} 
+
+impl<A,B> StateCheck for (A,B)
+where A: Booly, B: Booly {
+    fn state_check(x: &BitSet) -> bool {
+        (A::BOOL.filter(|&b| b != x.test(0))).is_none()
+        &&
+        (B::BOOL.filter(|&b| b != x.test(1))).is_none()
+    }
+}
+
+pub struct Discerned2<'a, Q> {
+    data: Option<(LocId, &'a BitSet)>, 
     phantom: PhantomData<Q>,
 }
+impl<Q> Discerned2<'_, Q> {
+    pub fn trivial() -> Self {
+        Self {
+            data: None,
+            phantom: PhantomData::default(),
+        }
+    }
+}
+
+// terminal 0
+impl Discerned2<'_, ()> {
+    pub fn match_nil(self) -> () {
+        ()
+    }
+}
+impl MayBranch for Discerned2<'_, ()> {
+    const BRANCHING: bool = false;
+}
+
+// terminal 1
+impl<R: Decimal, P: Decimal, S: StateCheck> Discerned2<'_, (Branch<R, P, S>, ())> {
+    pub fn match_singleton(self) -> Coupon<P, State<S>> {
+        Coupon {
+            phantom: PhantomData::default(),
+        }
+    }
+}
+impl<R: Decimal, P: Decimal, S> MayBranch for Discerned2<'_, (Branch<R, P, S>, ())> {
+    const BRANCHING: bool = false;
+}
+
+// chain 2+
+impl<'a, R: Decimal, P: Decimal, S: StateCheck, N1, N2> Discerned2<'a, (Branch<R, P, S>, (N1, N2))> {
+    pub fn match_head(self) -> Result<Coupon<P, State<S>>, Discerned2<'a, (N1, N2)>> {
+        let d = self.data.as_ref().expect("SINGLETON UNWRAP");
+        if P::N == d.0 && S::state_check(d.1) {
+            Ok(Coupon {
+                phantom: PhantomData::default(),
+            })
+        } else {
+            Err(Discerned2 {
+                data: self.data,
+                phantom: PhantomData::default(),
+            })
+        }
+    }
+}
+
+impl<R: Decimal, P: Decimal, S, N1, N2> MayBranch for Discerned2<'_, (Branch<R, P, S>, (N1, N2))> {
+    const BRANCHING: bool = true;
+}
+
+
 
 pub struct State<Q> {
     phantom: PhantomData<Q>,
@@ -138,48 +224,48 @@ pub struct Branch<R: Decimal, P: Decimal, S> {
     phantom: PhantomData<(R,P,S)>,
 }
 
-// terminal 0
-impl Discerned<()> {
-    pub fn match_nil(self) -> () {
-        ()
-    }
-}
-impl MayBranch for Discerned<()> {
-    const BRANCHING: bool = false;
-}
+// // terminal 0
+// impl Discerned<()> {
+//     pub fn match_nil(self) -> () {
+//         ()
+//     }
+// }
+// impl MayBranch for Discerned<()> {
+//     const BRANCHING: bool = false;
+// }
 
-// terminal 1
-impl<R: Decimal, P: Decimal, S> Discerned<(Branch<R, P, S>, ())> {
-    pub fn match_singleton(self) -> Coupon<P, State<S>> {
-        assert_eq!(self.rule_id, R::N);
-        Coupon {
-            phantom: PhantomData::default(),
-        }
-    }
-}
-impl<R: Decimal, P: Decimal, S> MayBranch for Discerned<(Branch<R, P, S>, ())> {
-    const BRANCHING: bool = false;
-}
+// // terminal 1
+// impl<R: Decimal, P: Decimal, S> Discerned<(Branch<R, P, S>, ())> {
+//     pub fn match_singleton(self) -> Coupon<P, State<S>> {
+//         assert_eq!(self.rule_id, R::N);
+//         Coupon {
+//             phantom: PhantomData::default(),
+//         }
+//     }
+// }
+// impl<R: Decimal, P: Decimal, S> MayBranch for Discerned<(Branch<R, P, S>, ())> {
+//     const BRANCHING: bool = false;
+// }
 
-// chain 2+
-impl<R: Decimal, P: Decimal, S, N1, N2> Discerned<(Branch<R, P, S>, (N1, N2))> {
-    pub fn match_head(self) -> Result<Coupon<P, State<S>>, Discerned<(N1, N2)>> {
-        if R::N == self.rule_id {
-            Ok(Coupon {
-                phantom: PhantomData::default(),
-            })
-        } else {
-            Err(Discerned {
-                rule_id: self.rule_id,
-                phantom: PhantomData::default(),
-            })
-        }
-    }
-}
+// // chain 2+
+// impl<R: Decimal, P: Decimal, S, N1, N2> Discerned<(Branch<R, P, S>, (N1, N2))> {
+//     pub fn match_head(self) -> Result<Coupon<P, State<S>>, Discerned<(N1, N2)>> {
+//         if R::N == self.rule_id {
+//             Ok(Coupon {
+//                 phantom: PhantomData::default(),
+//             })
+//         } else {
+//             Err(Discerned {
+//                 rule_id: self.rule_id,
+//                 phantom: PhantomData::default(),
+//             })
+//         }
+//     }
+// }
 
-impl<R: Decimal, P: Decimal, S, N1, N2> MayBranch for Discerned<(Branch<R, P, S>, (N1, N2))> {
-    const BRANCHING: bool = true;
-}
+// impl<R: Decimal, P: Decimal, S, N1, N2> MayBranch for Discerned<(Branch<R, P, S>, (N1, N2))> {
+//     const BRANCHING: bool = true;
+// }
 
 #[macro_export]
 macro_rules! match_list {
