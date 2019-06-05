@@ -18,7 +18,8 @@ _however_, it is a problem in helping the atomic to keep track of the protocol s
 such that it knows what comes _later_. "3" and "0" might have different implications
 on the protocol's state.
 
-# failed solution A: prime decomposition.
+# SOLUTION A: Associate a unique prime to each proto-rule.
+
 Idea is that instead of communicating the current rule_id, the protocol communicates
 X, which is the sum of all associated primes for rules applied so far.
 
@@ -31,9 +32,32 @@ PROTO: =0=> =2=> =0=>
 ATOMI can figure out that since the last 0-message, X has increased by 7,
 and thus it can distinguish "0" from "3".
 
-##BUT, this doesn't always work, obviously
+## Doesn't always work, obviously
 We cannot, for instance, distinguish (=1=> =2=> =0=>) from (=2=> =1=> =0=>).
 in the event 1 and 2 are both silent to the atomic, it will have two variants here,
 each with the value 3+5+2 == 5+3+2 == 10. 
 
-# Solution B: 
+# SOLUTION B: Allow atomic to peek into memory-bits
+protocol essentially transmits: (proto-rule-id, mem-bits)
+
+
+
+
+-----------------------------------------
+OK here's the plan:
+protocol object stores:
+1. ready-set
+2. memory-state as ??separate?? bitsets
+
+ready-set includes both port and memory data
+memory-state includes memory data
+
+
+
+{r:0, m:1} means a memory cells is GOING TO BE FULL but cannot be used for rules
+
+this means that the protocol can send the tuple:
+(RuleId, &MemoryState) 
+which requires 16 bytes and no serious precomputation.
+
+this is neato I suppose but causes some hassle
