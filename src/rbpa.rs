@@ -1,7 +1,7 @@
 use crate::{proto::definition::ProtoDef, LocId, RuleId};
 use hashbrown::{HashMap, HashSet};
-use std::{fmt};
 use itertools::Itertools;
+use std::fmt;
 
 pub type StatePred = HashMap<LocId, bool>;
 
@@ -115,11 +115,11 @@ enum FuseCase {
     Identical,
 }
 impl RbpaRule {
-    pub fn constrain_guard(&self, guard: &mut StatePred) -> Result<(),LocId> {
+    pub fn constrain_guard(&self, guard: &mut StatePred) -> Result<(), LocId> {
         for (&id, &b) in self.guard.iter() {
             let mut b2 = guard.entry(id).or_insert(b);
             if *b2 != b {
-                return Err(id)
+                return Err(id);
             }
         }
         Ok(())
@@ -135,7 +135,7 @@ impl RbpaRule {
                 [Some(a), Some(b)] if a != b => return true,
                 _ => (),
             }
-        };
+        }
         false
     }
     pub fn has_effect(&self) -> bool {
@@ -143,6 +143,9 @@ impl RbpaRule {
     }
     pub fn get_guard(&self) -> &StatePred {
         &self.guard
+    }
+    pub fn get_port(&self) -> &Option<LocId> {
+        &self.port
     }
     pub fn get_assign(&self) -> &StatePred {
         &self.assign
@@ -159,15 +162,15 @@ impl RbpaRule {
                 [Some(a), None] => match g_case {
                     RightSubsumes | Identical => g_case = RightSubsumes,
                     _ => return None,
-                }
+                },
                 [None, Some(b)] => match g_case {
                     LeftSubsumes | Identical => g_case = LeftSubsumes,
                     _ => return None,
-                }
-                [Some(a), Some(b)] if a!=b => match g_case {
+                },
+                [Some(a), Some(b)] if a != b => match g_case {
                     Identical => g_case = PartitionAt(*id),
                     _ => return None,
-                }
+                },
                 [Some(_), Some(_)] => (),
                 [None, None] => unreachable!(),
             }

@@ -17,11 +17,11 @@ use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
 use std::convert::TryInto;
 use std::{
-    ops::Range,
     any::TypeId,
     cell::UnsafeCell,
     marker::PhantomData,
     mem::{transmute, ManuallyDrop, MaybeUninit},
+    ops::Range,
     ptr::NonNull,
     sync::{
         atomic::{AtomicPtr, AtomicUsize, Ordering},

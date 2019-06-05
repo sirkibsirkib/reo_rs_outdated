@@ -26,7 +26,7 @@ impl<'a> Iterator for SparseIter<'a> {
                     let val = (1 << self.min) & x;
                     self.min += 1;
                     if val != 0 {
-                        return Some(self.maj * BitSet::BITS_PER_CHUNK + (self.min-1));
+                        return Some(self.maj * BitSet::BITS_PER_CHUNK + (self.min - 1));
                     }
                 }
                 None => return None,

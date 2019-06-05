@@ -1,24 +1,22 @@
-use crate::proto::groups::PortGroup;
-use crate::proto::{traits::Proto, Getter, Putter};
+
+use crate::proto::{Getter, Putter};
 use std::marker::PhantomData;
-use std::mem;
-
-use crate::{LocId, RuleId};
-
+use std::{mem, fmt};
+use crate::{LocId};
 
 // for types that have NO SIZE and thus can be created without context
-pub unsafe trait NilBytes: Sized {
+pub unsafe trait Token : Sized {
     unsafe fn fresh() -> Self {
         debug_assert!(mem::size_of::<Self>() == 0);
         mem::uninitialized()
     }
 }
-unsafe impl NilBytes for () {}
+unsafe impl Token  for () {}
 
 pub mod decimal {
     use super::*;
 
-    pub trait Decimal: NilBytes {
+    pub trait Decimal: Token  {
         const N: usize;
     }
 
@@ -31,7 +29,7 @@ pub mod decimal {
             impl Decimal for $d<()> {
                 const N: usize = $n;
             }
-            unsafe impl<T: NilBytes> NilBytes for $d<T> {}
+            unsafe impl<T: Token > Token  for $d<T> {}
             pub type $e = $d<()>;
         };
     }
@@ -78,29 +76,46 @@ impl<T: 'static> Putter<T> {
 }
 
 impl<D: Decimal, T> Safe<D, Getter<T>> {
-    pub fn get<R: NilBytes>(&mut self, coupon: Coupon<D, R>) -> (T, R) {
+    pub fn get<S>(&mut self, coupon: Coupon<D, S>) -> (T, State<S>) {
         let _ = coupon;
-        (self.inner.get(), unsafe { R::fresh() })
+        (self.inner.get(), unsafe { State::fresh() })
     }
 }
 impl<D: Decimal, T> Safe<D, Putter<T>> {
-    pub fn put<R: NilBytes>(&mut self, coupon: Coupon<D, R>, datum: T) -> R {
+    pub fn put<S>(&mut self, coupon: Coupon<D, S>, datum: T) -> State<S> {
         let _ = coupon;
         self.inner.put(datum);
-        unsafe { R::fresh() }
+        unsafe { State::fresh() }
     }
 }
 
-
-
-pub struct Coupon<D: Decimal, R: NilBytes> {
-    phantom: PhantomData<(D, R)>,
+/// A token structure which can be consumed in a Safe<Putter<D, _>>::put
+/// or Safe<Getter<D, _>>::get invocation, being consumed in the process,
+/// yielding a new state token, State<S>.
+pub struct Coupon<D: Decimal, S> {
+    phantom: PhantomData<(D, S)>,
 }
-unsafe impl<D: Decimal, R: NilBytes> NilBytes for Coupon<D, R> {}
+unsafe impl<D: Decimal, S> Token for Coupon<D, S> {}
+impl<D: Decimal, S> fmt::Debug for Coupon<D, S> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Coupon for port with N={}", D::N)
+    }
+}
 
 ////////////
 
-
+/// A dynamically-created enum class. Contains the data which determines its Coupon
+/// variant upon creation (at run-time). Can be inspected to determine
+/// which variant is matched. This simulates "matching" an enum, allowing one
+/// to differentiate behaviour at compile-time, based on the variant
+/// (determined at run-time).
+///
+/// Eg: Discerned<()> represents an empty set (no variants) which can only be
+///     trivially discarded.
+/// Eg: Discerned<(Coupon<D,S>, ())> represents a singleton set which yields
+///     Coupon<D,S> upon matching.
+/// Eg: Discerned<(Coupon<A,B>, (Coupon<C,D>, ())) represents a two-element list
+///     and upon inspection may match either Coupon<A,B> or Coupon<C,D>.
 pub struct Discerned<Q> {
     rule_id: usize,
     phantom: PhantomData<Q>,
@@ -109,10 +124,18 @@ pub struct Discerned<Q> {
 pub struct State<Q> {
     phantom: PhantomData<Q>,
 }
-unsafe impl<Q> NilBytes for State<Q> {}
+unsafe impl<Q> Token for State<Q> {}
 
 pub trait MayBranch {
     const BRANCHING: bool;
+}
+
+/// Represents en element of a Discerned list (variant of a simulated enum).
+/// R: decimal which numbers the rule matched.
+/// P: decimal which numbers the port involved.
+/// S: generic arg Q of State<Q>, determining the resulting state.
+pub struct Branch<R: Decimal, P: Decimal, S> {
+    phantom: PhantomData<(R,P,S)>,
 }
 
 // terminal 0
@@ -124,24 +147,25 @@ impl Discerned<()> {
 impl MayBranch for Discerned<()> {
     const BRANCHING: bool = false;
 }
+
 // terminal 1
-impl<D: Decimal, S> Discerned<(Branch<D,S>,())> {
-    pub fn match_singleton(self) -> Branch<D,S> {
-        assert_eq!(self.rule_id, D::N);
-        Branch {
+impl<R: Decimal, P: Decimal, S> Discerned<(Branch<R, P, S>, ())> {
+    pub fn match_singleton(self) -> Coupon<P, State<S>> {
+        assert_eq!(self.rule_id, R::N);
+        Coupon {
             phantom: PhantomData::default(),
         }
     }
 }
-impl<D: Decimal, S> MayBranch for Discerned<(Branch<D,S>,())> {
+impl<R: Decimal, P: Decimal, S> MayBranch for Discerned<(Branch<R, P, S>, ())> {
     const BRANCHING: bool = false;
 }
 
 // chain 2+
-impl<D: Decimal, S, N1, N2> Discerned<(Branch<D,S>,(N1, N2))> {
-    pub fn match_head(self) -> Result<Branch<D,S>, Discerned<(N1,N2)>> {
-        if D::N == self.rule_id {
-            Ok(Branch {
+impl<R: Decimal, P: Decimal, S, N1, N2> Discerned<(Branch<R, P, S>, (N1, N2))> {
+    pub fn match_head(self) -> Result<Coupon<P, State<S>>, Discerned<(N1, N2)>> {
+        if R::N == self.rule_id {
+            Ok(Coupon {
                 phantom: PhantomData::default(),
             })
         } else {
@@ -152,19 +176,9 @@ impl<D: Decimal, S, N1, N2> Discerned<(Branch<D,S>,(N1, N2))> {
         }
     }
 }
-impl<D: Decimal, S, N1, N2> MayBranch for Discerned<(Branch<D,S>,(N1, N2))> {
+
+impl<R: Decimal, P: Decimal, S, N1, N2> MayBranch for Discerned<(Branch<R, P, S>, (N1, N2))> {
     const BRANCHING: bool = true;
-}
-
-
-
-pub struct Branch<D: Decimal, S> {
-    phantom: PhantomData<(D,S)>,
-}
-impl<D: Decimal, S> Branch<D,S> {
-    pub fn print(self) {
-        println!("Branch with N={:?}", D::N);
-    }
 }
 
 #[macro_export]
