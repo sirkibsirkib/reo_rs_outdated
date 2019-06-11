@@ -32,7 +32,7 @@ pub enum ProtoBuildErr {
 impl ProtoDef {
     pub fn build(&self) -> Result<ProtoAll, ProtoBuildErr> {
         let rules = self.build_rules()?;
-        let (mem_data, me_pu, po_pu, free_mems, ready) = self.build_core();
+        let (mem_data, me_pu, po_pu, free_mems, ready, memory_quatset) = self.build_core();
         let po_ge = (0..self.po_ge_types.len())
             .map(|_| PoGeSpace::new())
             .collect();
@@ -65,6 +65,7 @@ impl ProtoDef {
             }))
             .collect();
         let w = Mutex::new(ProtoW {
+            memory_quatset,
             rules,
             active: ProtoActive {
                 ready,
@@ -86,7 +87,9 @@ impl ProtoDef {
         Vec<PoPuSpace>,
         HashMap<TypeId, Vec<*mut u8>>,
         BitSet,
+        QuatSet,
     ) {
+        let mut memory_quatset = QuatSet::default();
         let mem_get_id_start =
             self.mem_infos.len() + self.po_pu_infos.len() + self.po_ge_types.len();
         let mut capacity = 0;
@@ -99,6 +102,7 @@ impl ProtoDef {
         let mut ready = BitSet::default();
         let mut free_mems = HashMap::default();
         for (mem_id, info) in self.mem_infos.iter().enumerate() {
+            memory_quatset.set(mem_id, Quat::FT);
             ready.set(mem_id + mem_get_id_start); // set GETTER
             let rem = capacity % info.align.max(1);
             if rem > 0 {
@@ -142,7 +146,7 @@ impl ProtoDef {
                 PoPuSpace::new(info)
             })
             .collect();
-        (buf, memo_spaces, po_pu_spaces, free_mems, ready)
+        (buf, memo_spaces, po_pu_spaces, free_mems, ready, memory_quatset)
     }
     fn build_rules(&self) -> Result<Vec<RunRule>, ProtoBuildErr> {
         use ProtoBuildErr::*;
@@ -150,6 +154,7 @@ impl ProtoDef {
         for (_rule_id, rule_def) in self.rule_defs.iter().enumerate() {
             let mut guard_ready = BitSet::default();
             let mut actions = vec![];
+            let mut memory_assignments: HashMap<LocId, bool> = Default::default();
             // let mut seen = HashSet::<LocId>::default();
             for action_def in rule_def.actions.iter() {
                 let mut mg = vec![];
@@ -175,6 +180,7 @@ impl ProtoDef {
                     } else {
                         return Err(LocCannotGet { loc_id: g });
                     }
+                    memory_assignments.insert(g, true);
                 }
                 if guard_ready.set_to(p, true) {
                     return Err(SynchronousFiring { loc_id: p });
@@ -187,10 +193,12 @@ impl ProtoDef {
                 } else {
                     return Err(LocCannotPut { loc_id: p });
                 }
+                memory_assignments.entry(p).or_insert(false);
             }
             rules.push(RunRule {
                 guard_ready,
                 guard_pred: rule_def.guard_pred.clone(),
+                memory_assignments,
                 actions,
             });
         }

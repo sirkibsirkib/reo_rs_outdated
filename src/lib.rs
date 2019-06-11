@@ -10,3 +10,4 @@ pub mod bitset;
 pub mod proto;
 pub mod rbpa;
 pub mod tokens;
+pub(crate) mod quatset;

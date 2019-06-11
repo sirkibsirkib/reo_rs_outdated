@@ -1,9 +1,12 @@
 use itertools::izip;
 use std::fmt;
 
+
+
+
 #[derive(Default, Clone)]
 pub struct BitSet {
-    data: Vec<usize>,
+    pub(crate) data: Vec<usize>,
 }
 
 pub struct SparseIter<'a> {

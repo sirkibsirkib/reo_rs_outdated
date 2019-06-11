@@ -12,7 +12,7 @@ pub use definition::{ActionDef, ProtoDef, RuleDef};
 
 pub mod groups;
 
-use crate::{bitset::BitSet, helper::WithFirst, LocId, RuleId};
+use crate::{bitset::BitSet, quatset::{Quat, QuatSet}, helper::WithFirst, LocId, RuleId};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
 use std::convert::TryInto;
@@ -217,6 +217,7 @@ struct StateWaiter {
 
 /// The portion of the protcol that is proected by the lock.
 struct ProtoW {
+    memory_quatset: QuatSet,
     rules: Vec<RunRule>,
     active: ProtoActive,
     commitment: Option<Commitment>,
@@ -263,6 +264,17 @@ impl ProtoW {
         'outer: loop {
             'inner: for (rule_id, rule) in self.rules.iter().enumerate() {
                 if self.active.ready.is_superset(&rule.guard_ready) && rule.guard_pred.eval(r) {
+                    println!("assign: {:?}", &rule.memory_assignments);
+                    for (&loc_id, &b) in rule.memory_assignments.iter() {
+                        let q = match b {
+                            true => Quat::TF,
+                            false => Quat::FT,
+                        };
+                        self.memory_quatset.set(loc_id, q);
+                    }
+                    println!("MEMORY QUATSET: {:?}", &self.memory_quatset);
+
+
                     println!("FIRING {}", rule_id);
                     self.active.ready.difference_with(&rule.guard_ready);
 
@@ -342,7 +354,7 @@ impl ProtoR {
         let (i1, p1) = clos(a);
         let (i2, p2) = clos(b);
         assert_eq!(i1.type_id, i2.type_id);
-        unsafe { i1.partial_eq_fn.execute(p1, p2) }
+        i1.partial_eq_fn.execute(p1, p2)
     }
     fn send_to_getter(&self, id: LocId, msg: usize) {
         self.get_po_ge(id).expect("NOPOGE").dropbox.send(msg)
@@ -475,6 +487,7 @@ impl<T: 'static> TryInto<Getter<T>> for ClaimResult<T> {
 struct RunRule {
     guard_ready: BitSet,
     guard_pred: GuardPred,
+    memory_assignments: HashMap<LocId, bool>,
     actions: Vec<Action>,
 }
 impl RunRule {
