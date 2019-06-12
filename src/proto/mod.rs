@@ -267,9 +267,8 @@ impl ProtoW {
         let mut num_tenatives = 0;
         'outer: loop {
             'inner: for (rule_id, rule) in self.rules.iter().enumerate() {
-                if is_ready(&mut self.memory_bits, &mut self.active.ready, rule)
-                    && rule.guard_pred.eval(r)
-                {
+                let bits_ready = is_ready(&self.memory_bits, &self.active.ready, rule);
+                if bits_ready && rule.guard_pred.eval(r) {
                     println!("FIRING {}: {:?}", rule_id, rule);
                     println!("FIRING BEFORE:");
                     (r, self as &ProtoW).debug_print();
@@ -331,19 +330,16 @@ impl ProtoW {
 }
 
 fn subtract_readiness(ready: &mut BitSet, rule: &RunRule) {
-    ready.pad_trailing_zeroes(rule.guard_ready.data.len());
-    for (mr, &gr) in izip!(
-        ready.data.iter_mut(),
-        rule.guard_ready.data.iter(),
-    ) {
+    // ready.pad_trailing_zeroes(rule.guard_ready.data.len());
+    for (mr, &gr) in izip!(ready.data.iter_mut(), rule.guard_ready.data.iter(),) {
         *mr &= !gr;
     }
 }
 
-fn is_ready(memory: &mut BitSet, ready: &mut BitSet, rule: &RunRule) -> bool {
-    memory.pad_trailing_zeroes(rule.guard_ready.data.len());
-    ready.pad_trailing_zeroes(rule.guard_ready.data.len());
-    // println!("rlen {:?}", ready.data.len());
+/// Returns TRUE if the given memory and readiness bitsets satisfy the guard
+/// of the provided rule. The guard is able to specify which bits should be
+/// ready & true, and which should be ready & false.
+fn is_ready(memory: &BitSet, ready: &BitSet, rule: &RunRule) -> bool {
     for (&mr, &mv, &gr, &gv) in izip!(
         ready.data.iter(),
         memory.data.iter(),
@@ -354,18 +350,15 @@ fn is_ready(memory: &mut BitSet, ready: &mut BitSet, rule: &RunRule) -> bool {
         let should_be_neg = gr & !gv;
         let are_pos = mr & mv;
         let are_neg = mr & !mv;
-        println!(
-            "{:b}, {:b}, {:b}, {:b}, ",
-            should_be_pos, should_be_neg, are_pos, are_neg
-        );
-        let false_pos = should_be_pos & !(are_pos);
-        let false_neg = should_be_neg & !(are_neg);
-        if (false_pos | false_neg) != 0 {
+        let false_neg = should_be_pos & !(are_pos);
+        let false_pos = should_be_neg & !(are_neg);
+        if (false_neg | false_pos) != 0 {
             return false;
         }
     }
     true
 }
+
 
 /// updates the memory bitset to reflect the effects of applying this rule.
 /// rule has (values, mask). where bits of:
@@ -376,7 +369,7 @@ fn is_ready(memory: &mut BitSet, ready: &mut BitSet, rule: &RunRule) -> bool {
 ///  |= 000010
 ///  &= 010111
 fn assign_memory_bits(memory: &mut BitSet, rule: &RunRule) {
-    memory.pad_trailing_zeroes(rule.assign_mask.data.len());
+    // memory.pad_trailing_zeroes(rule.assign_mask.data.len());
     for (mv, &av, &am) in izip!(
         memory.data.iter_mut(),
         rule.assign_vals.data.iter(),
@@ -387,7 +380,6 @@ fn assign_memory_bits(memory: &mut BitSet, rule: &RunRule) {
         // unset falses
         *mv &= av | !am;
     }
-    memory.strip_trailing_zeroes();
 }
 
 /// Part of the protocol NOT protected by the lock

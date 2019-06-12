@@ -200,6 +200,10 @@ impl BitSet {
             (cap / Self::BITS_PER_CHUNK) + 1
         }
     }
+    pub fn pad_trailing_zeroes_to_capacity(&mut self, cap: usize) {
+        let chunks = Self::len_needed_for_capacity(cap);
+        self.pad_trailing_zeroes(chunks);
+    }
     pub fn pad_trailing_zeroes(&mut self, len: usize) {
         while self.data.len() < len {
             self.data.push(0);

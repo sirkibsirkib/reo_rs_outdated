@@ -145,6 +145,9 @@ impl ProtoDef {
                 PoPuSpace::new(info)
             })
             .collect();
+        let c = self.loc_id_range().end;
+        ready.pad_trailing_zeroes_to_capacity(c);
+        memory_bits.pad_trailing_zeroes_to_capacity(c);
         (
             buf,
             memo_spaces,
@@ -157,14 +160,6 @@ impl ProtoDef {
     fn build_rules(&self) -> Result<Vec<RunRule>, ProtoBuildErr> {
         use ProtoBuildErr::*;
         let mut rules = vec![];
-        let max_id: LocId = self
-            .rule_defs
-            .iter()
-            .flat_map(|r| r.actions.iter())
-            .flat_map(|a| a.getters.iter())
-            .max()
-            .copied()
-            .unwrap_or(0);
         for (_rule_id, rule_def) in self.rule_defs.iter().enumerate() {
             let mut guard_ready = BitSet::default();
             let mut guard_full = BitSet::default();
@@ -223,12 +218,11 @@ impl ProtoDef {
                     LocType::Mem => Action::MemPut { putter: p, mg, pg },
                 });
             }
-            let need_cap = BitSet::len_needed_for_capacity(max_id + 1);
-            let resize_fn = move |b: &mut BitSet| b.pad_trailing_zeroes(need_cap);
-            resize_fn(&mut guard_ready);
-            resize_fn(&mut guard_full);
-            resize_fn(&mut assign_vals);
-            resize_fn(&mut assign_mask);
+            let c = self.loc_id_range().end;
+            guard_ready.pad_trailing_zeroes_to_capacity(c);
+            guard_full.pad_trailing_zeroes_to_capacity(c);
+            assign_vals.pad_trailing_zeroes_to_capacity(c);
+            assign_mask.pad_trailing_zeroes_to_capacity(c);
             rules.push(RunRule {
                 guard_ready,
                 guard_full,
@@ -266,9 +260,13 @@ impl ProtoDef {
         self.po_pu_infos.len() <= id && id < r
     }
     fn loc_is_mem(&self, id: LocId) -> bool {
-        let l = self.po_pu_infos.len() + self.po_ge_types.len();
-        let r = self.po_pu_infos.len() + self.po_ge_types.len() + self.mem_infos.len();
+        let r = self.loc_id_range().end;
+        let l = r - self.mem_infos.len();
         l <= id && id < r
+    }
+    pub fn loc_id_range(&self) -> Range<LocId> {
+        let r = self.po_pu_infos.len() + self.po_ge_types.len() + self.mem_infos.len();
+        0..r
     }
     pub fn validate(&self) -> ProtoDefValidationResult {
         self.check_data_types_match()?;
