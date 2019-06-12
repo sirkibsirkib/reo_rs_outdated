@@ -359,7 +359,6 @@ fn is_ready(memory: &BitSet, ready: &BitSet, rule: &RunRule) -> bool {
     true
 }
 
-
 /// updates the memory bitset to reflect the effects of applying this rule.
 /// rule has (values, mask). where bits of:
 /// - (0, 1) signify a bit that will be UNSET in memory
@@ -410,10 +409,6 @@ impl ProtoR {
     fn send_to_getter(&self, id: LocId, msg: usize) {
         self.get_po_ge(id).expect("NOPOGE").dropbox.send(msg)
     }
-    // #[inline]
-    // fn mem_getter_id(&self, id: LocId) -> LocId {
-    //     id + self.me_pu.len()
-    // }
     fn get_po_pu(&self, id: LocId) -> Option<&PoPuSpace> {
         self.po_pu.get(id)
     }
@@ -1025,9 +1020,10 @@ mod tests {
         fn proto_def() -> ProtoDef {
             use GuardPred::*;
             ProtoDef {
-                po_pu_infos: type_infos!(T0, T0),
+                type_info: type_info_map![T0],
+                po_pu_types: type_ids![T0, T0],
                 po_ge_types: type_ids![T0],
-                mem_infos: type_infos![T0],
+                mem_types: type_ids![T0],
                 rule_defs: vec![new_rule_def![True; 0=>2; 1=>3], new_rule_def![True; 3=>2]],
             }
         }
@@ -1076,9 +1072,10 @@ mod tests {
         fn proto_def() -> ProtoDef {
             use GuardPred::*;
             ProtoDef {
-                po_pu_infos: type_infos![T0],       // 0..=0
-                po_ge_types: type_ids![T0],         // 1..=1
-                mem_infos: type_infos![T0, T0, T0], // 2..=4
+                type_info: type_info_map![T0],
+                po_pu_types: type_ids![T0],       // 0..=0
+                po_ge_types: type_ids![T0],       // 1..=1
+                mem_types: type_ids![T0, T0, T0], // 2..=4
                 rule_defs: vec![
                     new_rule_def![True; 0=>2],
                     new_rule_def![True; 2=>3],

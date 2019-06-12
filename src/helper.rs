@@ -70,10 +70,12 @@ macro_rules! bitset {
 }
 
 #[macro_export]
-macro_rules! type_infos {
+macro_rules! type_info_map {
     ( $( $type:ty ),* ) => {{
-        vec![
-            $(TypeInfo::new::<$type>()),*
+        map![
+            $(
+                TypeId::of::<$type>() => Arc::new(TypeInfo::new::<$type>())
+            ),*
         ]
     }}
 }
@@ -135,7 +137,7 @@ impl<T: Iterator> Iterator for WithFirstIter<T> {
     }
 }
 
-pub trait WithFirst: Sized + Iterator {
+pub(crate) trait WithFirst: Sized + Iterator {
     fn with_first(self) -> WithFirstIter<Self>;
 }
 impl<T: Iterator + Sized> WithFirst for T {

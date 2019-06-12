@@ -17,10 +17,11 @@ pub struct RuleDef {
 /// Defines the entirety of a protocol, describing the LocId space and types
 #[derive(Debug)]
 pub struct ProtoDef {
-    pub po_pu_infos: Vec<TypeInfo>,
+    pub po_pu_types: Vec<TypeId>,
     pub po_ge_types: Vec<TypeId>,
-    pub mem_infos: Vec<TypeInfo>,
+    pub mem_types: Vec<TypeId>,
     pub rule_defs: Vec<RuleDef>,
+    pub type_info: HashMap<TypeId, Arc<TypeInfo>>,
 }
 impl ProtoDef {
     pub fn build(&self) -> Result<ProtoAll, ProtoBuildErr> {
@@ -39,12 +40,11 @@ impl ProtoDef {
             po_ge,
         };
         let unclaimed_ports = self
-            .po_pu_infos
+            .po_pu_types
             .iter()
             .enumerate()
-            .map(|(i, type_info)| {
+            .map(|(i, &type_id)| {
                 let id = i;
-                let type_id = type_info.type_id;
                 let upi = UnclaimedPortInfo {
                     putter: true,
                     type_id,
@@ -52,7 +52,7 @@ impl ProtoDef {
                 (id, upi)
             })
             .chain(self.po_ge_types.iter().enumerate().map(|(i, &type_id)| {
-                let id = self.po_pu_infos.len() + i;
+                let id = self.po_pu_types.len() + i;
                 let upi = UnclaimedPortInfo {
                     putter: false,
                     type_id,
@@ -86,32 +86,24 @@ impl ProtoDef {
         BitSet,
     ) {
         let mut memory_bits = BitSet::default();
-        let mem_id_start = self.po_ge_types.len() + self.po_pu_infos.len();
+        let mem_id_start = self.po_ge_types.len() + self.po_pu_types.len();
         let mut capacity = 0;
         let mut offsets_n_typeids = vec![];
-        let mut mem_type_info: HashMap<TypeId, Arc<TypeInfo>> = self
-            .po_pu_infos
-            .iter()
-            .map(|&info| (info.type_id, Arc::new(info)))
-            .collect();
         let mut ready = BitSet::default();
         let mut free_mems = HashMap::default();
-        for (mem_id, info) in self
-            .mem_infos
-            .iter()
-            .enumerate()
-            .map(|(i, info)| (i + mem_id_start, info))
-        {
+        for (mem_id, info) in self.mem_types.iter().enumerate().map(|(i, id)| {
+            (
+                i + mem_id_start,
+                self.type_info.get(id).expect("unknown type"),
+            )
+        }) {
             memory_bits.set_to(mem_id, false);
-            ready.set_to(mem_id, true); // set GETTER
+            ready.set_to(mem_id, true);
             let rem = capacity % info.align.max(1);
             if rem > 0 {
                 capacity += info.align - rem;
             }
             offsets_n_typeids.push((capacity, info.type_id));
-            mem_type_info
-                .entry(info.type_id)
-                .or_insert_with(|| Arc::new(*info));
             capacity += info.bytes.max(1); // make pointers unique even with 0-byte data
         }
 
@@ -130,18 +122,15 @@ impl ProtoDef {
             .map(|(offset, type_id)| unsafe {
                 let ptr: *mut u8 = buf.as_mut_ptr().offset(offset as isize + meta_offset);
                 free_mems.entry(type_id).or_insert(vec![]).push(ptr);
-                let type_info = mem_type_info.get(&type_id).expect("Missed a type").clone();
+                let type_info = self.type_info.get(&type_id).expect("Missed a type").clone();
                 MemoSpace::new(ptr, type_info)
             })
             .collect();
         let po_pu_spaces = self
-            .po_pu_infos
+            .po_pu_types
             .iter()
-            .map(|info| {
-                let info = mem_type_info
-                    .get(&info.type_id)
-                    .expect("Missed a type")
-                    .clone();
+            .map(|type_id| {
+                let info = self.type_info.get(type_id).expect("Missed a type").clone();
                 PoPuSpace::new(info)
             })
             .collect();
@@ -253,19 +242,19 @@ impl ProtoDef {
         }
     }
     fn loc_is_po_pu(&self, id: LocId) -> bool {
-        id < self.po_pu_infos.len()
+        id < self.po_pu_types.len()
     }
     fn loc_is_po_ge(&self, id: LocId) -> bool {
-        let r = self.po_pu_infos.len() + self.po_ge_types.len();
-        self.po_pu_infos.len() <= id && id < r
+        let r = self.po_pu_types.len() + self.po_ge_types.len();
+        self.po_pu_types.len() <= id && id < r
     }
     fn loc_is_mem(&self, id: LocId) -> bool {
         let r = self.loc_id_range().end;
-        let l = r - self.mem_infos.len();
+        let l = r - self.mem_types.len();
         l <= id && id < r
     }
     pub fn loc_id_range(&self) -> Range<LocId> {
-        let r = self.po_pu_infos.len() + self.po_ge_types.len() + self.mem_infos.len();
+        let r = self.po_pu_types.len() + self.po_ge_types.len() + self.mem_types.len();
         0..r
     }
     pub fn validate(&self) -> ProtoDefValidationResult {
@@ -287,13 +276,13 @@ impl ProtoDef {
         Ok(())
     }
     fn type_for(&self, id: LocId) -> Option<TypeId> {
-        let l1 = self.po_pu_infos.len();
+        let l1 = self.po_pu_types.len();
         let l2 = self.po_ge_types.len();
-        self.po_pu_infos
+        self.po_pu_types
             .get(id)
-            .map(TypeInfo::get_tid)
-            .or(self.po_ge_types.get(id - l1).copied())
-            .or(self.mem_infos.get(id - l1 - l2).map(TypeInfo::get_tid))
+            .or(self.po_ge_types.get(id - l1))
+            .or(self.mem_types.get(id - l1 - l2))
+            .copied()
     }
 
     fn check_rule_guards(&self) -> ProtoDefValidationResult {

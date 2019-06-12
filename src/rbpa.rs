@@ -8,7 +8,7 @@ pub type StatePred = HashMap<LocId, bool>;
 impl ProtoDef {
     pub fn new_rbpa(&self, port_set: &HashSet<LocId>) -> Result<Rbpa, RbpaBuildErr> {
         let mut rules = vec![];
-        let port_ids = 0..(self.po_pu_infos.len() + self.po_ge_types.len());
+        let port_ids = 0..(self.po_pu_types.len() + self.po_ge_types.len());
         for (rule_id, rule_def) in self.rule_defs.iter().enumerate() {
             use RbpaBuildErr::*;
             let mut guard = HashMap::default();
@@ -117,7 +117,7 @@ enum FuseCase {
 impl RbpaRule {
     pub fn constrain_guard(&self, guard: &mut StatePred) -> Result<(), LocId> {
         for (&id, &b) in self.guard.iter() {
-            let mut b2 = guard.entry(id).or_insert(b);
+            let b2 = guard.entry(id).or_insert(b);
             if *b2 != b {
                 return Err(id);
             }
@@ -159,11 +159,11 @@ impl RbpaRule {
         let mut g_case = Identical;
         for id in self.guard.keys().chain(other.guard.keys()).unique() {
             match [self.guard.get(id), other.guard.get(id)] {
-                [Some(a), None] => match g_case {
+                [Some(_), None] => match g_case {
                     RightSubsumes | Identical => g_case = RightSubsumes,
                     _ => return None,
                 },
-                [None, Some(b)] => match g_case {
+                [None, Some(_)] => match g_case {
                     LeftSubsumes | Identical => g_case = LeftSubsumes,
                     _ => return None,
                 },
