@@ -13,7 +13,7 @@ impl Quat {
         use Quat::*;
         match self {
             FF | FT => false,
-            TF | TT => true,
+            TF | TT => true, 
         } 
     }
 
