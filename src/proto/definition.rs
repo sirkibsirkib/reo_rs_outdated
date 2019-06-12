@@ -13,6 +13,21 @@ pub struct RuleDef {
     pub guard_pred: GuardPred,
     pub actions: Vec<ActionDef>,
 }
+impl RuleDef {
+    fn involves_loc_id(&self, id: LocId) -> bool {
+        for a in self.actions.iter() {
+            if id == a.putter {
+                return true;
+            }
+            for &g in a.getters.iter() {
+                if g == id {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
 
 #[derive(Debug, Copy, Clone)]
 pub enum PortType {
@@ -24,11 +39,19 @@ pub enum PortType {
 #[derive(Debug)]
 pub struct ProtoDef {
     pub port_info: Vec<PortInfo>,
-    pub mem_types: Vec<TypeId>,
+    // pub mem_types: Vec<TypeId>,
     pub rule_defs: Vec<RuleDef>,
     pub type_info: HashMap<TypeId, Arc<TypeInfo>>,
 }
 impl ProtoDef {
+    pub fn iter_used_mem_ids(&self) -> impl Iterator<Item = LocId> + '_ {
+        use itertools::Itertools;
+        self.rule_defs
+            .iter()
+            .flat_map(|r| r.actions.iter())
+            .flat_map(|a| a.getters.iter().copied().chain(std::iter::once(a.putter)))
+            .unique()
+    }
     pub fn build(&self) -> Result<ProtoAll, ProtoBuildErr> {
         let rules = self.build_rules()?;
         for (i, r) in rules.iter().enumerate() {
@@ -59,6 +82,39 @@ impl ProtoDef {
         });
         Ok(ProtoAll { w, r })
     }
+    fn build_mem_info(&self) -> HashMap<LocId, TypeId> {
+        // starts full
+        let mut unknown_type_rules: Vec<_> = (0..self.rule_defs.len()).collect();
+        let mut unknown_type_rules2 = vec![];
+        // starts empty. when empty no more progress is possible.
+        let mut new_known_types: Vec<(LocId, TypeId)> = self
+            .port_info
+            .iter()
+            .enumerate()
+            .map(|(i, info)| (i, info.type_id))
+            .collect();
+
+        // return value
+        let mut mem_types = HashMap::<LocId, TypeId>::default();
+        while let Some((loc_id, type_id)) = new_known_types.pop() {
+            while let Some(rule_id) = unknown_type_rules.pop() {
+                let rule = self.rule_defs[rule_id];
+                if rule.involves_loc_id(loc_id) {
+                    let id_iter = rule
+                        .actions
+                        .iter()
+                        .flat_map(|a| a.getters.iter().copied().chain(std::iter::once(a.putter)))
+                        .filter(|id| !self.loc_is_port(*id) && !mem_types.contains_key(id));
+                    new_known_types.extend(id_iter.map(|id| (id, type_id)));
+                } else {
+                    // still not able to solve this one
+                    unknown_type_rules2.push(rule_id);
+                }
+            }
+            std::mem::swap(&mut unknown_type_rules, &mut unknown_type_rules2);
+        }
+        mem_types
+    }
     fn build_core(
         &self,
     ) -> (
@@ -76,7 +132,8 @@ impl ProtoDef {
         let mut offsets_n_typeids = vec![];
         let mut ready = BitSet::default();
         let mut free_mems = HashMap::default();
-        for (mem_id, info) in self.mem_types.iter().enumerate().map(|(i, id)| {
+
+        for (mem_id, info) in mem_types.iter().enumerate().map(|(i, id)| {
             (
                 i + mem_id_start,
                 self.type_info.get(id).expect("unknown type"),
@@ -215,7 +272,7 @@ impl ProtoDef {
     fn get_putter_type(&self, id: LocId) -> Option<LocType> {
         if self.loc_is_po_pu(id) {
             Some(LocType::Port)
-        } else if self.loc_is_mem(id) {
+        } else if !self.loc_is_port(id) {
             Some(LocType::Mem)
         } else {
             None
@@ -224,7 +281,7 @@ impl ProtoDef {
     fn get_getter_type(&self, id: LocId) -> Option<LocType> {
         if self.loc_is_po_ge(id) {
             Some(LocType::Port)
-        } else if self.loc_is_mem(id) {
+        } else if !self.loc_is_port(id) {
             Some(LocType::Mem)
         } else {
             None
@@ -242,15 +299,18 @@ impl ProtoDef {
             .map(|x| x.role == PortRole::Getter)
             .unwrap_or(false)
     }
-    fn loc_is_mem(&self, id: LocId) -> bool {
-        let r = self.loc_id_range().end;
-        let l = r - self.mem_types.len();
-        l <= id && id < r
+    fn loc_is_port(&self, id: LocId) -> bool {
+        id < self.port_info.len()
     }
-    pub fn loc_id_range(&self) -> Range<LocId> {
-        let r = self.port_info.len() + self.mem_types.len();
-        0..r
-    }
+    // fn loc_is_mem(&self, id: LocId) -> bool {
+    //     let r = self.loc_id_range().end;
+    //     let l = r - self.mem_types.len();
+    //     l <= id && id < r
+    // }
+    // pub fn loc_id_range(&self) -> Range<LocId> {
+    //     let r = self.port_info.len() + self.mem_types.len();
+    //     0..r
+    // }
     pub fn validate(&self) -> ProtoDefValidationResult {
         self.check_data_types_match()?;
         self.check_rule_guards()

@@ -185,14 +185,6 @@ impl PoGeSpace {
     }
 }
 
-// /// generalizes over all location types. Everyone needs access to their own space.
-// enum SpaceRef<'a> {
-//     Memo(&'a MemoSpace),
-//     PoPu(&'a PoPuSpace),
-//     PoGe(&'a PoGeSpace),
-//     None,
-// }
-
 /// portion of the Protocol state that is both:
 /// 1. protected by the lock
 /// 2. mutably accessed when firing rules
