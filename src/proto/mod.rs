@@ -12,7 +12,7 @@ pub use definition::{ActionDef, ProtoDef, RuleDef};
 
 pub mod groups;
 
-use crate::{bitset::BitSet, quatset::{Quat, QuatSet}, helper::WithFirst, LocId, RuleId};
+use crate::{bitset::BitSet, helper::WithFirst, LocId, RuleId};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
 use std::convert::TryInto;
@@ -217,7 +217,7 @@ struct StateWaiter {
 
 /// The portion of the protcol that is proected by the lock.
 struct ProtoW {
-    memory_quatset: QuatSet,
+    memory_bits: BitSet,
     rules: Vec<RunRule>,
     active: ProtoActive,
     commitment: Option<Commitment>,
@@ -264,16 +264,7 @@ impl ProtoW {
         'outer: loop {
             'inner: for (rule_id, rule) in self.rules.iter().enumerate() {
                 if self.active.ready.is_superset(&rule.guard_ready) && rule.guard_pred.eval(r) {
-                    println!("assign: {:?}", &rule.memory_assignments);
-                    for (&loc_id, &b) in rule.memory_assignments.iter() {
-                        let q = match b {
-                            true => Quat::TF,
-                            false => Quat::FT,
-                        };
-                        self.memory_quatset.set(loc_id, q);
-                    }
-                    println!("MEMORY QUATSET: {:?}", &self.memory_quatset);
-
+                    println!("assign:  vals:{:?} | mask:{:?}", &rule.assign_vals, &rule.assign_mask);
 
                     println!("FIRING {}", rule_id);
                     self.active.ready.difference_with(&rule.guard_ready);
@@ -487,7 +478,8 @@ impl<T: 'static> TryInto<Getter<T>> for ClaimResult<T> {
 struct RunRule {
     guard_ready: BitSet,
     guard_pred: GuardPred,
-    memory_assignments: HashMap<LocId, bool>,
+    assign_vals: BitSet,
+    assign_mask: BitSet,
     actions: Vec<Action>,
 }
 impl RunRule {
