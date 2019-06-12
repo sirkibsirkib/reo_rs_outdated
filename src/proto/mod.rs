@@ -120,7 +120,7 @@ impl MemoSpace {
             w.free_mems.get_mut(tid).expect("??").push(ptr);
         }
         // println!("MEMCELL BECAME EMPTY. SET");
-        w.ready.set(r.mem_getter_id(my_id)); // GETTER ready
+        w.ready.set(my_id); // GETTER ready
     }
 }
 
@@ -217,6 +217,17 @@ struct StateWaiter {
     whom: LocId,
 }
 
+trait DebugPrint {
+    fn debug_print(&self);
+}
+impl<'a, 'b> DebugPrint for (&'a ProtoR, &'b ProtoW) {
+    fn debug_print(&self) {
+        println!(":: MEMOR: {:?}", &self.1.memory_bits);
+        println!(":: READY: {:?}", &self.1.active.ready);
+        println!(":: TENTA: {:?}", &self.1.ready_tentative);
+    }
+}
+
 /// The portion of the protcol that is proected by the lock.
 struct ProtoW {
     memory_bits: BitSet,
@@ -247,17 +258,8 @@ impl ProtoW {
     /// call this per proto at a time.
     fn enter(&mut self, r: &ProtoR, my_id: LocId) {
         println!("ENTER WITH GOAL {}", my_id);
-        Firer {
-            r,
-            w: &mut self.active,
-        }
-        .debug_print_readiness();
+        (r, self as &ProtoW).debug_print();
         self.active.ready.set(my_id);
-        Firer {
-            r,
-            w: &mut self.active,
-        }
-        .debug_print_readiness();
         if self.commitment.is_some() {
             // some rule is waiting for completion
             return;
@@ -265,14 +267,17 @@ impl ProtoW {
         let mut num_tenatives = 0;
         'outer: loop {
             'inner: for (rule_id, rule) in self.rules.iter().enumerate() {
-                if self.active.ready.is_superset(&rule.guard_ready) && rule.guard_pred.eval(r) {
-                    println!("MEM IS {:?}", &self.memory_bits);
-                    println!("assign:  vals:{:?} | mask:{:?}", &rule.assign_vals, &rule.assign_mask);
+                if is_ready(&mut self.memory_bits, &mut self.active.ready, rule) && rule.guard_pred.eval(r) {
+                // if self.active.ready.is_superset(&rule.guard_ready) && rule.guard_pred.eval(r) {
+                    // println!("MEM IS {:?}", &self.memory_bits);
+                    // println!("assign:  vals:{:?} | mask:{:?}", &rule.assign_vals, &rule.assign_mask);
                     assign_memory_bits(&mut self.memory_bits, rule);
-
-
-                    println!("FIRING {}", rule_id);
                     self.active.ready.difference_with(&rule.guard_ready);
+
+
+                    println!("FIRING {}: {:?}", rule_id, rule);
+                    (r, self as &ProtoW).debug_print();
+                    println!("----------");
 
                     for id in self.active.ready.iter_and(&self.ready_tentative) {
                         num_tenatives += 1;
@@ -296,11 +301,6 @@ impl ProtoW {
                         r,
                         w: &mut self.active,
                     });
-                    Firer {
-                        r,
-                        w: &mut self.active,
-                    }
-                    .debug_print_readiness();
                     Self::notify_state_waiters(&self.active.ready, &mut self.awaiting_states, r);
                     continue 'outer;
                 }
@@ -328,8 +328,38 @@ impl ProtoW {
     }
 }
 
+fn is_ready(memory: &mut BitSet, ready: &mut BitSet, rule: &RunRule) -> bool {
+    memory.pad_trailing_zeroes(rule.guard_ready.data.len());
+    ready.pad_trailing_zeroes(rule.guard_ready.data.len());
+    for (&mr, &mv, &gr, &gv) in izip!(
+        memory.data.iter(),
+        ready.data.iter(),
+        rule.guard_ready.data.iter(),
+        rule.guard_full.data.iter(),
+    ) {
 
-#[inline]
+        let t = (gv&gr) & !(mv&mr);
+        let f = (!gv&gr) & !(!mv&mr);
+        if (t|f) != 0 {
+            memory.strip_trailing_zeroes();
+            ready.strip_trailing_zeroes();
+            return false
+        }
+    }
+    memory.strip_trailing_zeroes();
+    ready.strip_trailing_zeroes();
+    true
+}
+
+
+/// updates the memory bitset to reflect the effects of applying this rule.
+/// rule has (values, mask). where bits of:
+/// - (0, 1) signify a bit that will be UNSET in memory
+/// - (1, 1) signify a bit that will be SET in memory 
+/// eg rule with (000111, 101010) will do 
+///     memory
+///  |= 000010
+///  &= 010111 
 fn assign_memory_bits(memory: &mut BitSet, rule: &RunRule) {
     memory.pad_trailing_zeroes(rule.assign_mask.data.len());
     for (mv, &av, &am) in izip!(
@@ -372,10 +402,10 @@ impl ProtoR {
     fn send_to_getter(&self, id: LocId, msg: usize) {
         self.get_po_ge(id).expect("NOPOGE").dropbox.send(msg)
     }
-    #[inline]
-    fn mem_getter_id(&self, id: LocId) -> LocId {
-        id + self.me_pu.len()
-    }
+    // #[inline]
+    // fn mem_getter_id(&self, id: LocId) -> LocId {
+    //     id + self.me_pu.len()
+    // }
     fn get_po_pu(&self, id: LocId) -> Option<&PoPuSpace> {
         self.po_pu.get(id)
     }
@@ -497,8 +527,10 @@ impl<T: 'static> TryInto<Getter<T>> for ClaimResult<T> {
 }
 
 /// Structure corresponding with one protocol rule at runtime
+#[derive(Debug)]
 struct RunRule {
     guard_ready: BitSet,
+    guard_full: BitSet,
     guard_pred: GuardPred,
     assign_vals: BitSet,
     assign_mask: BitSet,
@@ -516,6 +548,7 @@ impl RunRule {
 }
 
 /// Structure corresponing to one data-movement action (with 1 putter and N getters)
+#[derive(Debug)]
 enum Action {
     PortPut {
         putter: LocId,
@@ -727,37 +760,37 @@ pub struct Firer<'a> {
     w: &'a mut ProtoActive,
 }
 impl<'a> Firer<'a> {
-    fn debug_print_readiness(&self) {
-        for i in 0..self.r.po_pu.len() {
-            let c = match self.w.ready.test(i) {
-                true => 'P',
-                false => '.',
-            };
-            print!("{}", c);
-        }
-        print!("|");
-        for i in (0..self.r.po_ge.len()).map(|x| x + self.r.po_pu.len()) {
-            let c = match self.w.ready.test(i) {
-                true => 'G',
-                false => ',',
-            };
-            print!("{}", c);
-        }
-        print!("|");
-        for i in (0..self.r.me_pu.len()).map(|x| x + self.r.po_pu.len() + self.r.po_ge.len()) {
-            let c = match [
-                self.w.ready.test(i),
-                self.w.ready.test(self.r.mem_getter_id(i)),
-            ] {
-                [false, false] => '~',
-                [true, false] => 'F',
-                [false, true] => 'E',
-                [true, true] => '!',
-            };
-            print!("{}", c);
-        }
-        println!();
-    }
+    // fn debug_print_readiness(&self) {
+    //     for i in 0..self.r.po_pu.len() {
+    //         let c = match self.w.ready.test(i) {
+    //             true => 'P',
+    //             false => '.',
+    //         };
+    //         print!("{}", c);
+    //     }
+    //     print!("|");
+    //     for i in (0..self.r.po_ge.len()).map(|x| x + self.r.po_pu.len()) {
+    //         let c = match self.w.ready.test(i) {
+    //             true => 'G',
+    //             false => ',',
+    //         };
+    //         print!("{}", c);
+    //     }
+    //     print!("|");
+    //     for i in (0..self.r.me_pu.len()).map(|x| x + self.r.po_pu.len() + self.r.po_ge.len()) {
+    //         let c = match [
+    //             self.w.ready.test(i),
+    //             self.w.ready.test(self.r.mem_getter_id(i)),
+    //         ] {
+    //             [false, false] => '~',
+    //             [true, false] => 'F',
+    //             [false, true] => 'E',
+    //             [true, true] => '!',
+    //         };
+    //         print!("{}", c);
+    //     }
+    //     println!();
+    // }
     fn release_sig_getters_count_getters(&self, getters: &[LocId]) -> usize {
         let mut count = 0;
         for &g in getters {

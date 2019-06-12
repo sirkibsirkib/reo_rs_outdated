@@ -22,16 +22,12 @@ pub struct ProtoDef {
     pub mem_infos: Vec<TypeInfo>,
     pub rule_defs: Vec<RuleDef>,
 }
-
-#[derive(Debug, Copy, Clone)]
-pub enum ProtoBuildErr {
-    SynchronousFiring { loc_id: LocId },
-    LocCannotGet { loc_id: LocId },
-    LocCannotPut { loc_id: LocId },
-}
 impl ProtoDef {
     pub fn build(&self) -> Result<ProtoAll, ProtoBuildErr> {
         let rules = self.build_rules()?;
+        for (i, r) in rules.iter().enumerate() {
+            println!("{} => {:?}", i, r);
+        }
         let (mem_data, me_pu, po_pu, free_mems, ready, memory_bits) = self.build_core();
         let po_ge = (0..self.po_ge_types.len())
             .map(|_| PoGeSpace::new())
@@ -90,8 +86,9 @@ impl ProtoDef {
         BitSet,
     ) {
         let mut memory_bits = BitSet::default();
-        let mem_get_id_start =
-            self.mem_infos.len() + self.po_pu_infos.len() + self.po_ge_types.len();
+        let mem_id_start = self.po_ge_types.len() + self.po_pu_infos.len();
+        // let mem_get_id_start =
+        //     self.mem_infos.len() + self.po_pu_infos.len() + self.po_ge_types.len();
         let mut capacity = 0;
         let mut offsets_n_typeids = vec![];
         let mut mem_type_info: HashMap<TypeId, Arc<TypeInfo>> = self
@@ -101,9 +98,9 @@ impl ProtoDef {
             .collect();
         let mut ready = BitSet::default();
         let mut free_mems = HashMap::default();
-        for (mem_id, info) in self.mem_infos.iter().enumerate() {
+        for (mem_id, info) in self.mem_infos.iter().enumerate().map(|(i, info)| (i+mem_id_start, info)) {
             memory_bits.set_to(mem_id, false);
-            ready.set(mem_id + mem_get_id_start); // set GETTER
+            ready.set(mem_id); // set GETTER
             let rem = capacity % info.align.max(1);
             if rem > 0 {
                 capacity += info.align - rem;
@@ -153,53 +150,61 @@ impl ProtoDef {
         let mut rules = vec![];
         for (_rule_id, rule_def) in self.rule_defs.iter().enumerate() {
             let mut guard_ready = BitSet::default();
+            let mut guard_full = BitSet::default();
             let mut actions = vec![];
             let mut assign_vals = BitSet::default();
             let mut assign_mask = BitSet::default();
-            // let mut seen = HashSet::<LocId>::default();
+
             for action_def in rule_def.actions.iter() {
                 let mut mg = vec![];
                 let mut pg = vec![];
+
                 let p = action_def.putter;
-                if let Some(g) = self.mem_getter_id(p) {
-                    if guard_ready.test(g) {
-                        // mem is getter in one action and putter in another
-                        return Err(SynchronousFiring { loc_id: p });
-                    }
-                }
-                for &g in action_def.getters.iter() {
-                    if self.loc_is_po_ge(g) {
-                        pg.push(g);
-                        if guard_ready.set_to(g, true) {
-                            return Err(SynchronousFiring { loc_id: g });
-                        }
-                    } else if self.loc_is_mem(g) {
-                        mg.push(g);
-                        if guard_ready.set_to(self.mem_getter_id(g).expect("BAD MEM ID"), true) {
-                            return Err(SynchronousFiring { loc_id: g });
-                        }
-                    } else {
-                        return Err(LocCannotGet { loc_id: g });
-                    }
-                    assign_mask.set_to(g, true);
-                    assign_vals.set_to(g, true);
-                }
-                if guard_ready.set_to(p, true) {
+                let putter_type = self.get_putter_type(p).ok_or(LocCannotPut { loc_id: p })?;
+                if guard_ready.test(p) {
                     return Err(SynchronousFiring { loc_id: p });
                 }
-                // seen.insert(action_def.putter);
-                if self.loc_is_po_pu(p) {
-                    actions.push(Action::PortPut { putter: p, mg, pg });
-                } else if self.loc_is_mem(p) {
-                    actions.push(Action::MemPut { putter: p, mg, pg });
-                } else {
-                    return Err(LocCannotPut { loc_id: p });
+                guard_full.set_to(p, true); // putter must be full!
+                assign_vals.set_to(p, false); // putter becomes empty!
+                assign_mask.set_to(p, true); // putter memory fullness changes!
+                let was = guard_ready.set_to(p, true); // putter is involved!
+                if was {
+                    // this putter was involved in a different action!
+                    return Err(SynchronousFiring { loc_id: p });
                 }
-                assign_mask.set_to(p, true);
-                assign_vals.set_to(p, false);
+
+                use itertools::Itertools;
+                for &g in action_def.getters.iter().unique() {
+                    let getter_type = self.get_getter_type(g).ok_or(LocCannotGet { loc_id: g })?;
+                    match getter_type {
+                        LocType::Port => &mut pg,
+                        LocType::Mem => &mut mg,
+                    }.push(g);
+
+                    guard_full.set_to(g, false); // getter must be empty!
+                    assign_vals.set_to(g, true); // getter becomes full!
+                    assign_mask.set_to(g, true); // getter memory fullness changes!
+                    let was_set = guard_ready.set_to(g, true);
+                    if was_set {
+                        // oh no! this getter was already involved in the firing
+                        if g == p && LocType::Mem == putter_type {
+                            // nevermind. its OK for memory to put and get to itself
+                            guard_full.set_to(g, true); // getter must be full (because its also the putter)!
+                            assign_mask.set_to(g, false); // getter memory fullness DOES NOT change (Full -> Full)!
+                            assign_vals.set_to(g, false);
+                        } else {
+                            return Err(SynchronousFiring { loc_id: g });
+                        }
+                    }
+                }
+                actions.push(match putter_type {
+                    LocType::Port => Action::PortPut { putter: p, mg, pg },
+                    LocType::Mem => Action::MemPut { putter: p, mg, pg },
+                });
             }
             rules.push(RunRule {
                 guard_ready,
+                guard_full,
                 guard_pred: rule_def.guard_pred.clone(),
                 assign_vals,
                 assign_mask,
@@ -208,9 +213,27 @@ impl ProtoDef {
         }
         Ok(rules)
     }
-    fn mem_getter_id(&self, id: LocId) -> Option<LocId> {
-        if self.loc_is_mem(id) {
-            Some(id + self.mem_infos.len())
+    // fn mem_getter_id(&self, id: LocId) -> Option<LocId> {
+    //     if self.loc_is_mem(id) {
+    //         Some(id + self.mem_infos.len())
+    //     } else {
+    //         None
+    //     }
+    // }
+    fn get_putter_type(&self, id: LocId) -> Option<LocType> {
+        if self.loc_is_po_pu(id) {
+            Some(LocType::Port)
+        } else if self.loc_is_mem(id) {
+            Some(LocType::Mem)
+        } else {
+            None
+        }
+    }
+    fn get_getter_type(&self, id: LocId) -> Option<LocType> {
+        if self.loc_is_po_ge(id) {
+            Some(LocType::Port)
+        } else if self.loc_is_mem(id) {
+            Some(LocType::Mem)
         } else {
             None
         }
@@ -295,6 +318,18 @@ impl ProtoDef {
         };
         Ok(())
     }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum LocType {
+    Port, Mem
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum ProtoBuildErr {
+    SynchronousFiring { loc_id: LocId },
+    LocCannotGet { loc_id: LocId },
+    LocCannotPut { loc_id: LocId },
 }
 
 type ProtoDefValidationResult = Result<(), ProtoDefValidationError>;
