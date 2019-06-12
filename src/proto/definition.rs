@@ -87,8 +87,6 @@ impl ProtoDef {
     ) {
         let mut memory_bits = BitSet::default();
         let mem_id_start = self.po_ge_types.len() + self.po_pu_infos.len();
-        // let mem_get_id_start =
-        //     self.mem_infos.len() + self.po_pu_infos.len() + self.po_ge_types.len();
         let mut capacity = 0;
         let mut offsets_n_typeids = vec![];
         let mut mem_type_info: HashMap<TypeId, Arc<TypeInfo>> = self
@@ -105,7 +103,7 @@ impl ProtoDef {
             .map(|(i, info)| (i + mem_id_start, info))
         {
             memory_bits.set_to(mem_id, false);
-            ready.set(mem_id); // set GETTER
+            ready.set_to(mem_id, true); // set GETTER
             let rem = capacity % info.align.max(1);
             if rem > 0 {
                 capacity += info.align - rem;
@@ -116,7 +114,6 @@ impl ProtoDef {
                 .or_insert_with(|| Arc::new(*info));
             capacity += info.bytes.max(1); // make pointers unique even with 0-byte data
         }
-        // println!("CAP IS {:?}", capacity);
 
         // meta-offset used to ensure the start of the vec alsigns to 64-bits (covers all cases)
         // almost always unnecessary
@@ -243,13 +240,6 @@ impl ProtoDef {
         }
         Ok(rules)
     }
-    // fn mem_getter_id(&self, id: LocId) -> Option<LocId> {
-    //     if self.loc_is_mem(id) {
-    //         Some(id + self.mem_infos.len())
-    //     } else {
-    //         None
-    //     }
-    // }
     fn get_putter_type(&self, id: LocId) -> Option<LocType> {
         if self.loc_is_po_pu(id) {
             Some(LocType::Port)
@@ -271,12 +261,6 @@ impl ProtoDef {
     fn loc_is_po_pu(&self, id: LocId) -> bool {
         id < self.po_pu_infos.len()
     }
-    fn loc_can_put(&self, id: LocId) -> bool {
-        self.loc_is_po_pu(id) || self.loc_is_mem(id)
-    }
-    fn loc_can_get(&self, id: LocId) -> bool {
-        self.loc_is_po_ge(id) || self.loc_is_mem(id)
-    }
     fn loc_is_po_ge(&self, id: LocId) -> bool {
         let r = self.po_pu_infos.len() + self.po_ge_types.len();
         self.po_pu_infos.len() <= id && id < r
@@ -286,7 +270,7 @@ impl ProtoDef {
         let r = self.po_pu_infos.len() + self.po_ge_types.len() + self.mem_infos.len();
         l <= id && id < r
     }
-    fn validate(&self) -> ProtoDefValidationResult {
+    pub fn validate(&self) -> ProtoDefValidationResult {
         self.check_data_types_match()?;
         self.check_rule_guards()
     }
@@ -363,10 +347,10 @@ pub enum ProtoBuildErr {
     LocCannotPut { loc_id: LocId },
 }
 
-type ProtoDefValidationResult = Result<(), ProtoDefValidationError>;
+pub type ProtoDefValidationResult = Result<(), ProtoDefValidationError>;
 
 #[derive(Debug, Copy, Clone)]
-enum ProtoDefValidationError {
+pub enum ProtoDefValidationError {
     GuardReasonsOverAbsentData,
     ActionOnNonexistantId,
     GuardEqTypeMismatch,

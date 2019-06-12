@@ -1,5 +1,5 @@
 ////////// DEBUG DEBUG
-#![allow(dead_code)]
+// #![allow(dead_code)]
 
 use itertools::izip;
 
@@ -103,7 +103,7 @@ impl MemoSpace {
             p: PutterSpace::new(ptr, type_info),
         }
     }
-    fn make_empty(&self, my_id: LocId, r: &ProtoR, w: &mut ProtoActive, do_drop: bool) {
+    fn make_empty(&self, my_id: LocId, w: &mut ProtoActive, do_drop: bool) {
         let ptr = self.p.get_ptr();
         let src_refs = w.mem_refs.get_mut(&ptr).expect("WAS DANGLING");
         let tid = &self.p.type_info.get_tid();
@@ -120,7 +120,7 @@ impl MemoSpace {
             w.free_mems.get_mut(tid).expect("??").push(ptr);
         }
         // println!("MEMCELL BECAME EMPTY. SET");
-        w.ready.set(my_id); // GETTER ready
+        w.ready.set_to(my_id, true); // GETTER ready
     }
 }
 
@@ -164,7 +164,7 @@ impl PoGeSpace {
             SpaceRef::Memo(space) => {
                 let finish_fn = |do_drop| {
                     let mut w = a.w.lock();
-                    space.make_empty(putter_id, &a.r, &mut w.active, do_drop);
+                    space.make_empty(putter_id, &mut w.active, do_drop);
                     let ProtoW {
                         ref active,
                         ref mut awaiting_states,
@@ -394,6 +394,7 @@ fn assign_memory_bits(memory: &mut BitSet, rule: &RunRule) {
 pub struct ProtoR {
     /// This buffer stores the ACTUAL memory data. The contents are never accessed
     /// here, it's just stored inside ProtoR to ensure it's freed at the right time.
+    #[allow(dead_code)]
     mem_data: Vec<u8>,
 
     // Ready layout:  [PoPu|PoGe|MePu|MeGe]
@@ -775,37 +776,6 @@ pub struct Firer<'a> {
     w: &'a mut ProtoActive,
 }
 impl<'a> Firer<'a> {
-    // fn debug_print_readiness(&self) {
-    //     for i in 0..self.r.po_pu.len() {
-    //         let c = match self.w.ready.test(i) {
-    //             true => 'P',
-    //             false => '.',
-    //         };
-    //         print!("{}", c);
-    //     }
-    //     print!("|");
-    //     for i in (0..self.r.po_ge.len()).map(|x| x + self.r.po_pu.len()) {
-    //         let c = match self.w.ready.test(i) {
-    //             true => 'G',
-    //             false => ',',
-    //         };
-    //         print!("{}", c);
-    //     }
-    //     print!("|");
-    //     for i in (0..self.r.me_pu.len()).map(|x| x + self.r.po_pu.len() + self.r.po_ge.len()) {
-    //         let c = match [
-    //             self.w.ready.test(i),
-    //             self.w.ready.test(self.r.mem_getter_id(i)),
-    //         ] {
-    //             [false, false] => '~',
-    //             [true, false] => 'F',
-    //             [false, true] => 'E',
-    //             [true, true] => '!',
-    //         };
-    //         print!("{}", c);
-    //     }
-    //     println!();
-    // }
     fn release_sig_getters_count_getters(&self, getters: &[LocId]) -> usize {
         let mut count = 0;
         for &g in getters {
@@ -822,7 +792,7 @@ impl<'a> Firer<'a> {
     /// A fire action that
     pub fn mem_to_nowhere(&mut self, me_pu: LocId) {
         let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
-        memo_space.make_empty(me_pu, self.r, self.w, true);
+        memo_space.make_empty(me_pu, self.w, true);
     }
 
     fn instruct_data_getters<F>(
@@ -879,7 +849,7 @@ impl<'a> Firer<'a> {
         let Firer { r, w } = self;
         Self::instruct_data_getters(r, po_ge, data_getters_count, me_pu, &memo_space.p, || {
             // cleanup function. invoked when there are 0 data-getters
-            memo_space.make_empty(me_pu, r, w, true);
+            memo_space.make_empty(me_pu, w, true);
         });
     }
 
@@ -895,7 +865,7 @@ impl<'a> Firer<'a> {
             let me_ge_space = self.r.get_me_pu(g).expect("gggg");
             debug_assert_eq!(*tid, me_ge_space.p.type_info.type_id);
             me_ge_space.p.set_ptr(src);
-            self.w.ready.set(g); // PUTTER is ready
+            self.w.ready.set_to(g, true); // PUTTER is ready
         }
         // 2. increment memory pointer refs of me_pu
         let src_refs = self.w.mem_refs.get_mut(&src).expect("UNKNWN");
@@ -916,7 +886,7 @@ impl<'a> Firer<'a> {
         if let Some(first_me_ge) = me_ge_iter.next() {
             // println!("::port_to_mem_and_ports| first_me_ge={:?}", first_me_ge);
             let first_me_ge_space = self.r.get_me_pu(first_me_ge).expect("wfew");
-            self.w.ready.set(first_me_ge); // GETTER is ready
+            self.w.ready.set_to(first_me_ge, true); // GETTER is ready
             let tid = &first_me_ge_space.p.type_info.type_id;
             let info = &first_me_ge_space.p.type_info;
             // 3. acquire a fresh ptr for this memcell
@@ -948,7 +918,7 @@ impl<'a> Firer<'a> {
 
                 // 5. dec refs for existing ptr. free if refs are now 0
                 me_ge_space.p.set_ptr(fresh_ptr);
-                self.w.ready.set(g); // GETTER is ready
+                self.w.ready.set_to(g, true); // GETTER is ready
                 ptr_refs += 1;
             }
             // println!("::port_to_mem_and_ports| ptr_refs={}", ptr_refs);

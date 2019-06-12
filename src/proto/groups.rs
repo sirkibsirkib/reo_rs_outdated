@@ -19,7 +19,7 @@ pub struct PortGroup {
 }
 impl PortGroup {
     /// block until the protocol is in this state
-    unsafe fn await_state(&self, state_pred: BitSet) {
+    pub unsafe fn await_state(&self, state_pred: BitSet) {
         // TODO check the given state pred is OK? maybe unnecessary since function is internal
         {
             let w = self.p.w.lock();
@@ -58,7 +58,7 @@ impl PortGroup {
                     if let Some(specific_port) = rule.guard_ready.iter_and(id_set).next() {
                         disambiguation.insert(rule_id, specific_port);
                         rule.guard_ready.set_to(specific_port, false);
-                        rule.guard_ready.set(leader);
+                        rule.guard_ready.set_to(leader, true);
                     }
                 }
                 Ok(PortGroup {
@@ -74,8 +74,8 @@ impl PortGroup {
         let space = self.p.r.get_space(self.leader);
         {
             let mut w = self.p.w.lock();
-            w.ready_tentative.set(self.leader);
-            w.active.ready.set(self.leader);
+            w.ready_tentative.set_to(self.leader, true);
+            w.active.ready.set_to(self.leader, true);
         }
         let rule_id = match space {
             SpaceRef::PoPu(po_pu_space) => po_pu_space.dropbox.recv(),
@@ -93,7 +93,7 @@ impl Drop for PortGroup {
             if let Some(&specific_port) = self.disambiguation.get(&rule_id) {
                 if self.leader != specific_port {
                     rule.guard_ready.set_to(self.leader, false);
-                    rule.guard_ready.set(specific_port);
+                    rule.guard_ready.set_to(specific_port, true);
                 }
             }
         }
