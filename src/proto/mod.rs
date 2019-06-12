@@ -1,6 +1,8 @@
 ////////// DEBUG DEBUG
 #![allow(dead_code)]
 
+use itertools::izip;
+
 pub mod reflection;
 use reflection::TypeInfo;
 
@@ -264,7 +266,10 @@ impl ProtoW {
         'outer: loop {
             'inner: for (rule_id, rule) in self.rules.iter().enumerate() {
                 if self.active.ready.is_superset(&rule.guard_ready) && rule.guard_pred.eval(r) {
+                    println!("MEM IS {:?}", &self.memory_bits);
                     println!("assign:  vals:{:?} | mask:{:?}", &rule.assign_vals, &rule.assign_mask);
+                    assign_memory_bits(&mut self.memory_bits, rule);
+
 
                     println!("FIRING {}", rule_id);
                     self.active.ready.difference_with(&rule.guard_ready);
@@ -321,6 +326,23 @@ impl ProtoW {
             w: &mut self.active,
         });
     }
+}
+
+
+#[inline]
+fn assign_memory_bits(memory: &mut BitSet, rule: &RunRule) {
+    memory.pad_trailing_zeroes(rule.assign_mask.data.len());
+    for (mv, &av, &am) in izip!(
+        memory.data.iter_mut(),
+        rule.assign_vals.data.iter(),
+        rule.assign_mask.data.iter(),
+    ) {
+        // set trues
+        *mv |= av | am;
+        // unset falses
+        *mv &= av | !am;
+    }
+    memory.strip_trailing_zeroes();
 }
 
 /// Part of the protocol NOT protected by the lock

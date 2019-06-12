@@ -203,7 +203,12 @@ impl BitSet {
         }
         true
     }
-    fn strip_trailing_zeroes(&mut self) {
+    pub fn pad_trailing_zeroes(&mut self, len: usize) {
+        while self.data.len() < len {
+            self.data.push(0);
+        }
+    }
+    pub fn strip_trailing_zeroes(&mut self) {
         // restore invariant
         while let Some(x) = self.data.pop() {
             if x != 0 {
