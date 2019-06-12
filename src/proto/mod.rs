@@ -257,9 +257,9 @@ impl ProtoW {
     /// "Act as protocol" procedure. Mutable reference ensures 0/1 threads
     /// call this per proto at a time.
     fn enter(&mut self, r: &ProtoR, my_id: LocId) {
-        println!("ENTER WITH GOAL {}", my_id);
+        println!("ENTER WITH ID {}", my_id);
+        self.active.ready.set_to(my_id, true);
         (r, self as &ProtoW).debug_print();
-        self.active.ready.set(my_id);
         if self.commitment.is_some() {
             // some rule is waiting for completion
             return;
@@ -267,15 +267,20 @@ impl ProtoW {
         let mut num_tenatives = 0;
         'outer: loop {
             'inner: for (rule_id, rule) in self.rules.iter().enumerate() {
-                if is_ready(&mut self.memory_bits, &mut self.active.ready, rule) && rule.guard_pred.eval(r) {
-                // if self.active.ready.is_superset(&rule.guard_ready) && rule.guard_pred.eval(r) {
+                if is_ready(&mut self.memory_bits, &mut self.active.ready, rule)
+                    && rule.guard_pred.eval(r)
+                {
+                    // if self.active.ready.is_superset(&rule.guard_ready) && rule.guard_pred.eval(r) {
                     // println!("MEM IS {:?}", &self.memory_bits);
                     // println!("assign:  vals:{:?} | mask:{:?}", &rule.assign_vals, &rule.assign_mask);
+                    println!("FIRING {}: {:?}", rule_id, rule);
+                    println!("FIRING BEFORE:");
+                    (r, self as &ProtoW).debug_print();
+
                     assign_memory_bits(&mut self.memory_bits, rule);
                     self.active.ready.difference_with(&rule.guard_ready);
 
-
-                    println!("FIRING {}: {:?}", rule_id, rule);
+                    println!("FIRING AFTER:");
                     (r, self as &ProtoW).debug_print();
                     println!("----------");
 
@@ -331,19 +336,27 @@ impl ProtoW {
 fn is_ready(memory: &mut BitSet, ready: &mut BitSet, rule: &RunRule) -> bool {
     memory.pad_trailing_zeroes(rule.guard_ready.data.len());
     ready.pad_trailing_zeroes(rule.guard_ready.data.len());
+    println!("rlen {:?}", ready.data.len());
     for (&mr, &mv, &gr, &gv) in izip!(
-        memory.data.iter(),
         ready.data.iter(),
+        memory.data.iter(),
         rule.guard_ready.data.iter(),
         rule.guard_full.data.iter(),
     ) {
-
-        let t = (gv&gr) & !(mv&mr);
-        let f = (!gv&gr) & !(!mv&mr);
-        if (t|f) != 0 {
+        let should_be_pos = gr & gv;
+        let should_be_neg = gr & !gv;
+        let are_pos = mr & mv;
+        let are_neg = mr & !mv;
+        println!(
+            "{:b}, {:b}, {:b}, {:b}, ",
+            should_be_pos, should_be_neg, are_pos, are_neg
+        );
+        let false_pos = should_be_pos & !(are_pos);
+        let false_neg = should_be_neg & !(are_neg);
+        if (false_pos | false_neg) != 0 {
             memory.strip_trailing_zeroes();
             ready.strip_trailing_zeroes();
-            return false
+            return false;
         }
     }
     memory.strip_trailing_zeroes();
@@ -351,15 +364,14 @@ fn is_ready(memory: &mut BitSet, ready: &mut BitSet, rule: &RunRule) -> bool {
     true
 }
 
-
 /// updates the memory bitset to reflect the effects of applying this rule.
 /// rule has (values, mask). where bits of:
 /// - (0, 1) signify a bit that will be UNSET in memory
-/// - (1, 1) signify a bit that will be SET in memory 
-/// eg rule with (000111, 101010) will do 
+/// - (1, 1) signify a bit that will be SET in memory
+/// eg rule with (000111, 101010) will do
 ///     memory
 ///  |= 000010
-///  &= 010111 
+///  &= 010111
 fn assign_memory_bits(memory: &mut BitSet, rule: &RunRule) {
     memory.pad_trailing_zeroes(rule.assign_mask.data.len());
     for (mv, &av, &am) in izip!(

@@ -1,23 +1,22 @@
-
 use crate::bitset::BitSet;
 use crate::proto::{Getter, Putter};
+use crate::LocId;
 use std::marker::PhantomData;
-use std::{mem, fmt};
-use crate::{LocId};
+use std::{fmt, mem};
 
 // for types that have NO SIZE and thus can be created without context
-pub unsafe trait Token : Sized {
+pub unsafe trait Token: Sized {
     unsafe fn fresh() -> Self {
         debug_assert!(mem::size_of::<Self>() == 0);
         mem::uninitialized()
     }
 }
-unsafe impl Token  for () {}
+unsafe impl Token for () {}
 
 pub mod decimal {
     use super::*;
 
-    pub trait Decimal: Token  {
+    pub trait Decimal: Token {
         const N: usize;
     }
 
@@ -122,35 +121,36 @@ impl<D: Decimal, S> fmt::Debug for Coupon<D, S> {
 //     phantom: PhantomData<Q>,
 // }
 
-
 pub trait StateCheck {
     fn explains_state(against: &BitSet) -> bool;
 }
 
 pub trait Booly {
-    const BOOL: Option<bool>; 
-} 
+    const BOOL: Option<bool>;
+}
 impl Booly for F {
-    const BOOL: Option<bool> = Some(false); 
-} 
+    const BOOL: Option<bool> = Some(false);
+}
 impl Booly for T {
-    const BOOL: Option<bool> = Some(true); 
-} 
+    const BOOL: Option<bool> = Some(true);
+}
 impl Booly for X {
-    const BOOL: Option<bool> = None; 
-} 
+    const BOOL: Option<bool> = None;
+}
 
-impl<A,B> StateCheck for (A,B)
-where A: Booly, B: Booly {
+impl<A, B> StateCheck for (A, B)
+where
+    A: Booly,
+    B: Booly,
+{
     fn explains_state(x: &BitSet) -> bool {
         (A::BOOL.filter(|&b| b != x.test(0))).is_none()
-        &&
-        (B::BOOL.filter(|&b| b != x.test(1))).is_none()
+            && (B::BOOL.filter(|&b| b != x.test(1))).is_none()
     }
 }
 
 pub struct Discerned2<'a, Q> {
-    data: Option<(LocId, &'a BitSet)>, 
+    data: Option<(LocId, &'a BitSet)>,
     phantom: PhantomData<Q>,
 }
 impl<Q> Discerned2<'_, Q> {
@@ -185,7 +185,9 @@ impl<R: Decimal, P: Decimal, S> MayBranch for Discerned2<'_, (Branch<R, P, S>, (
 }
 
 // chain 2+
-impl<'a, R: Decimal, P: Decimal, S: StateCheck, N1, N2> Discerned2<'a, (Branch<R, P, S>, (N1, N2))> {
+impl<'a, R: Decimal, P: Decimal, S: StateCheck, N1, N2>
+    Discerned2<'a, (Branch<R, P, S>, (N1, N2))>
+{
     pub fn match_head(self) -> Result<Coupon<P, State<S>>, Discerned2<'a, (N1, N2)>> {
         let d = self.data.as_ref().expect("SINGLETON UNWRAP");
         if P::N == d.0 && S::explains_state(d.1) {
@@ -205,8 +207,6 @@ impl<R: Decimal, P: Decimal, S, N1, N2> MayBranch for Discerned2<'_, (Branch<R, 
     const BRANCHING: bool = true;
 }
 
-
-
 pub struct State<Q> {
     phantom: PhantomData<Q>,
 }
@@ -221,7 +221,7 @@ pub trait MayBranch {
 /// P: decimal which numbers the port involved.
 /// S: generic arg Q of State<Q>, determining the resulting state.
 pub struct Branch<R: Decimal, P: Decimal, S> {
-    phantom: PhantomData<(R,P,S)>,
+    phantom: PhantomData<(R, P, S)>,
 }
 
 #[macro_export]

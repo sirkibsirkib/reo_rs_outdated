@@ -1,9 +1,6 @@
 use itertools::izip;
 use std::fmt;
 
-
-
-
 #[derive(Default, Clone)]
 pub struct BitSet {
     pub(crate) data: Vec<usize>,
@@ -137,11 +134,7 @@ impl BitSet {
     }
 
     pub fn with_capacity(min_capacity: usize) -> Self {
-        let chunks = if min_capacity.is_power_of_two() {
-            min_capacity
-        } else {
-            min_capacity + 1
-        } / 64;
+        let chunks = Self::len_needed_for_capacity(min_capacity);
         // let chunks = min_capacity + 1
         Self {
             data: std::iter::repeat(0).take(chunks).collect(),
@@ -203,6 +196,13 @@ impl BitSet {
         }
         true
     }
+    pub fn len_needed_for_capacity(cap: usize) -> usize {
+        if cap % Self::BITS_PER_CHUNK == 0 {
+            cap / Self::BITS_PER_CHUNK
+        } else {
+            (cap / Self::BITS_PER_CHUNK) + 1
+        }
+    }
     pub fn pad_trailing_zeroes(&mut self, len: usize) {
         while self.data.len() < len {
             self.data.push(0);
@@ -222,7 +222,7 @@ impl BitSet {
         for (s, &o) in izip!(self.data.iter_mut(), other.data.iter()) {
             *s &= !o
         }
-        self.strip_trailing_zeroes();
+        // self.strip_trailing_zeroes();
     }
     pub fn or_with(&mut self, other: &Self) {
         for (s, &o) in izip!(self.data.iter_mut(), other.data.iter()) {
@@ -230,7 +230,7 @@ impl BitSet {
         }
         if other.data.len() > self.data.len() {
             self.data.extend_from_slice(&other.data[..]);
-            self.strip_trailing_zeroes();
+            // self.strip_trailing_zeroes();
         }
     }
 }

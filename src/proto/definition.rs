@@ -98,7 +98,12 @@ impl ProtoDef {
             .collect();
         let mut ready = BitSet::default();
         let mut free_mems = HashMap::default();
-        for (mem_id, info) in self.mem_infos.iter().enumerate().map(|(i, info)| (i+mem_id_start, info)) {
+        for (mem_id, info) in self
+            .mem_infos
+            .iter()
+            .enumerate()
+            .map(|(i, info)| (i + mem_id_start, info))
+        {
             memory_bits.set_to(mem_id, false);
             ready.set(mem_id); // set GETTER
             let rem = capacity % info.align.max(1);
@@ -143,11 +148,26 @@ impl ProtoDef {
                 PoPuSpace::new(info)
             })
             .collect();
-        (buf, memo_spaces, po_pu_spaces, free_mems, ready, memory_bits)
+        (
+            buf,
+            memo_spaces,
+            po_pu_spaces,
+            free_mems,
+            ready,
+            memory_bits,
+        )
     }
     fn build_rules(&self) -> Result<Vec<RunRule>, ProtoBuildErr> {
         use ProtoBuildErr::*;
         let mut rules = vec![];
+        let max_id: LocId = self
+            .rule_defs
+            .iter()
+            .flat_map(|r| r.actions.iter())
+            .flat_map(|a| a.getters.iter())
+            .max()
+            .copied()
+            .unwrap_or(0);
         for (_rule_id, rule_def) in self.rule_defs.iter().enumerate() {
             let mut guard_ready = BitSet::default();
             let mut guard_full = BitSet::default();
@@ -164,9 +184,11 @@ impl ProtoDef {
                 if guard_ready.test(p) {
                     return Err(SynchronousFiring { loc_id: p });
                 }
-                guard_full.set_to(p, true); // putter must be full!
-                assign_vals.set_to(p, false); // putter becomes empty!
-                assign_mask.set_to(p, true); // putter memory fullness changes!
+                if putter_type == LocType::Mem {
+                    guard_full.set_to(p, true); // putter must be full!
+                    assign_vals.set_to(p, false); // putter becomes empty!
+                    assign_mask.set_to(p, true); // putter memory fullness changes!
+                }
                 let was = guard_ready.set_to(p, true); // putter is involved!
                 if was {
                     // this putter was involved in a different action!
@@ -179,11 +201,13 @@ impl ProtoDef {
                     match getter_type {
                         LocType::Port => &mut pg,
                         LocType::Mem => &mut mg,
-                    }.push(g);
-
-                    guard_full.set_to(g, false); // getter must be empty!
-                    assign_vals.set_to(g, true); // getter becomes full!
-                    assign_mask.set_to(g, true); // getter memory fullness changes!
+                    }
+                    .push(g);
+                    if getter_type == LocType::Mem {
+                        guard_full.set_to(g, false); // getter must be empty!
+                        assign_vals.set_to(g, true); // getter becomes full!
+                        assign_mask.set_to(g, true); // getter memory fullness changes!
+                    }
                     let was_set = guard_ready.set_to(g, true);
                     if was_set {
                         // oh no! this getter was already involved in the firing
@@ -202,6 +226,12 @@ impl ProtoDef {
                     LocType::Mem => Action::MemPut { putter: p, mg, pg },
                 });
             }
+            let need_cap = BitSet::len_needed_for_capacity(max_id + 1);
+            let resize_fn = move |b: &mut BitSet| b.pad_trailing_zeroes(need_cap);
+            resize_fn(&mut guard_ready);
+            resize_fn(&mut guard_full);
+            resize_fn(&mut assign_vals);
+            resize_fn(&mut assign_mask);
             rules.push(RunRule {
                 guard_ready,
                 guard_full,
@@ -322,7 +352,8 @@ impl ProtoDef {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum LocType {
-    Port, Mem
+    Port,
+    Mem,
 }
 
 #[derive(Debug, Copy, Clone)]
