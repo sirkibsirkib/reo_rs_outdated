@@ -70,6 +70,20 @@ macro_rules! bitset {
 }
 
 #[macro_export]
+macro_rules! port_info {
+    ( $( ($type:ty, $role:expr) ),* ) => {{
+        vec![
+            $(
+                PortInfo {
+                    role: $role,
+                    type_id: TypeId::of::<$type>(),
+                }
+            ),*
+        ]
+    }}
+}
+
+#[macro_export]
 macro_rules! type_info_map {
     ( $( $type:ty ),* ) => {{
         map![

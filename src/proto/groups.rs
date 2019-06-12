@@ -29,8 +29,8 @@ impl PortGroup {
         } // release lock
         let space = self.p.r.get_space(self.leader);
         match space {
-            SpaceRef::PoPu(po_pu_space) => po_pu_space.dropbox.recv_nothing(),
-            SpaceRef::PoGe(po_ge_space) => po_ge_space.dropbox.recv_nothing(),
+            Some(Space::PoPu(po_pu_space)) => po_pu_space.dropbox.recv_nothing(),
+            Some(Space::PoGe(po_ge_space)) => po_ge_space.dropbox.recv_nothing(),
             _ => panic!("BAD ID"),
         }
         // I received a notification that the state is ready!
@@ -78,8 +78,8 @@ impl PortGroup {
             w.active.ready.set_to(self.leader, true);
         }
         let rule_id = match space {
-            SpaceRef::PoPu(po_pu_space) => po_pu_space.dropbox.recv(),
-            SpaceRef::PoGe(po_ge_space) => po_ge_space.dropbox.recv(),
+            Some(Space::PoPu(po_pu_space)) => po_pu_space.dropbox.recv(),
+            Some(Space::PoGe(po_ge_space)) => po_ge_space.dropbox.recv(),
             _ => panic!("BAD ID"),
         };
         *self.disambiguation.get(&rule_id).expect("SHOULD BE OK")

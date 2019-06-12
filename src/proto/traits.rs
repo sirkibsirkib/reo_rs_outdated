@@ -105,20 +105,19 @@ impl HasUnclaimedPorts for Arc<ProtoAll> {
         let mut w = self.w.lock();
         if let Some(x) = w.unclaimed_ports.get(&id) {
             if x.type_id == TypeId::of::<T>() {
-                let putter = x.putter;
+                let role = x.role;
                 let _ = w.unclaimed_ports.remove(&id);
-                if putter {
-                    GotPutter(Putter {
+                match role {
+                    PortRole::Putter => GotPutter(Putter {
                         p: self.clone(),
                         id,
                         phantom: PhantomData::default(),
-                    })
-                } else {
-                    GotGetter(Getter {
+                    }),
+                    PortRole::Getter => GotGetter(Getter {
                         p: self.clone(),
                         id,
                         phantom: PhantomData::default(),
-                    })
+                    }),
                 }
             } else {
                 TypeMismatch

@@ -161,7 +161,7 @@ impl PoGeSpace {
     unsafe fn participate_with_msg(&self, a: &ProtoAll, msg: usize, out_ptr: *mut u8) {
         let (case, putter_id) = DataGetCase::parse_msg(msg);
         match a.r.get_space(putter_id) {
-            SpaceRef::Memo(space) => {
+            Some(Space::Memo(space)) => {
                 let finish_fn = |do_drop| {
                     let mut w = a.w.lock();
                     space.make_empty(putter_id, &mut w.active, do_drop);
@@ -174,7 +174,7 @@ impl PoGeSpace {
                 };
                 space.p.get_datum_from(case, out_ptr, finish_fn);
             }
-            SpaceRef::PoPu(space) => {
+            Some(Space::PoPu(space)) => {
                 let finish_fn = |do_drop| {
                     space.dropbox.send(if do_drop { 0 } else { 1 });
                 };
@@ -185,13 +185,13 @@ impl PoGeSpace {
     }
 }
 
-/// generalizes over all location types. Everyone needs access to their own space.
-enum SpaceRef<'a> {
-    Memo(&'a MemoSpace),
-    PoPu(&'a PoPuSpace),
-    PoGe(&'a PoGeSpace),
-    None,
-}
+// /// generalizes over all location types. Everyone needs access to their own space.
+// enum SpaceRef<'a> {
+//     Memo(&'a MemoSpace),
+//     PoPu(&'a PoPuSpace),
+//     PoGe(&'a PoGeSpace),
+//     None,
+// }
 
 /// portion of the Protocol state that is both:
 /// 1. protected by the lock
@@ -236,15 +236,15 @@ struct ProtoW {
     commitment: Option<Commitment>,
     ready_tentative: BitSet,
     awaiting_states: Vec<StateWaiter>,
-    unclaimed_ports: HashMap<LocId, UnclaimedPortInfo>,
+    unclaimed_ports: HashMap<LocId, PortInfo>,
 }
 impl ProtoW {
     fn notify_state_waiters(ready: &BitSet, awaiting_states: &mut Vec<StateWaiter>, r: &ProtoR) {
         awaiting_states.retain(|awaiting_state| {
             let retain = if ready.is_superset(&awaiting_state.state) {
                 match r.get_space(awaiting_state.whom) {
-                    SpaceRef::PoPu(space) => space.dropbox.send_nothing(),
-                    SpaceRef::PoGe(space) => space.dropbox.send_nothing(),
+                    Some(Space::PoPu(space)) => space.dropbox.send_nothing(),
+                    Some(Space::PoGe(space)) => space.dropbox.send_nothing(),
                     _ => panic!("bad state-waiter LocId!"),
                 };
                 false
@@ -283,8 +283,8 @@ impl ProtoW {
                     for id in self.active.ready.iter_and(&self.ready_tentative) {
                         num_tenatives += 1;
                         match r.get_space(id) {
-                            SpaceRef::PoPu(po_pu) => po_pu.dropbox.send(rule_id),
-                            SpaceRef::PoGe(po_ge) => po_ge.dropbox.send(rule_id),
+                            Some(Space::PoPu(po_pu)) => po_pu.dropbox.send(rule_id),
+                            Some(Space::PoGe(po_ge)) => po_ge.dropbox.send(rule_id),
                             _ => panic!("bad tentative!"),
                         }
                     }
@@ -381,6 +381,12 @@ fn assign_memory_bits(memory: &mut BitSet, rule: &RunRule) {
     }
 }
 
+enum Space {
+    PoPu(PoPuSpace),
+    PoGe(PoGeSpace),
+    Memo(MemoSpace),
+}
+
 /// Part of the protocol NOT protected by the lock
 pub struct ProtoR {
     /// This buffer stores the ACTUAL memory data. The contents are never accessed
@@ -388,17 +394,13 @@ pub struct ProtoR {
     #[allow(dead_code)]
     mem_data: Vec<u8>,
 
-    // Ready layout:  [PoPu|PoGe|MePu|MeGe]
-    // Spaces layout: [PoPu|PoGe|Memo]
-    po_pu: Vec<PoPuSpace>, // id range 0..#PoPu
-    po_ge: Vec<PoGeSpace>, // id range #PoPu..(#PoPu + #PoGe)
-    me_pu: Vec<MemoSpace>, // id range (#PoPu + #PoGe)..(#PoPu + #PoGe + #Memo)
+    spaces: Vec<Space>,
 }
 impl ProtoR {
     unsafe fn equal_put_data(&self, a: LocId, b: LocId) -> bool {
         let clos = |id| match self.get_space(id) {
-            SpaceRef::Memo(space) => (&space.p.type_info, space.p.get_ptr()),
-            SpaceRef::PoPu(space) => (&space.p.type_info, space.p.get_ptr()),
+            Some(Space::Memo(space)) => (&space.p.type_info, space.p.get_ptr()),
+            Some(Space::PoPu(space)) => (&space.p.type_info, space.p.get_ptr()),
             _ => panic!("NO SPACE PTR"),
         };
         let (i1, p1) = clos(a);
@@ -407,42 +409,41 @@ impl ProtoR {
         i1.partial_eq_fn.execute(p1, p2)
     }
     fn send_to_getter(&self, id: LocId, msg: usize) {
-        self.get_po_ge(id).expect("NOPOGE").dropbox.send(msg)
+        if let Some(Space::PoGe(space)) = self.get_space(id) {
+            space.dropbox.send(msg)
+        } else {
+            panic!("not a getter!")
+        }
     }
     fn get_po_pu(&self, id: LocId) -> Option<&PoPuSpace> {
-        self.po_pu.get(id)
+        if let Some(Space::PoPu(space)) = self.get_space(id) {
+            return Some(space);
+        } else {
+            None
+        }
     }
     fn get_po_ge(&self, id: LocId) -> Option<&PoGeSpace> {
-        self.po_ge.get(id - self.po_pu.len())
+        if let Some(Space::PoGe(space)) = self.get_space(id) {
+            Some(space)
+        } else {
+            None
+        }
     }
     fn get_me_pu(&self, id: LocId) -> Option<&MemoSpace> {
-        self.me_pu.get(id - self.po_pu.len() - self.po_ge.len())
+        if let Some(Space::Memo(space)) = self.get_space(id) {
+            Some(space)
+        } else {
+            None
+        }
     }
-    pub fn loc_is_port(&self, id: LocId) -> bool {
-        self.port_id_rng().contains(&id)
+    fn get_space(&self, id: LocId) -> Option<&Space> {
+        self.spaces.get(id)
     }
     pub fn loc_is_mem(&self, id: LocId) -> bool {
-        self.mem_id_rng().contains(&id)
-    }
-    fn get_space(&self, id: LocId) -> SpaceRef {
-        use SpaceRef::*;
-        let ppl = self.po_pu.len();
-        let pgl = self.po_ge.len();
-        self.po_pu
-            .get(id)
-            .map(PoPu)
-            .or(self.po_ge.get(id - ppl).map(PoGe))
-            .or(self.me_pu.get(id - ppl - pgl).map(Memo))
-            .unwrap_or(None)
-    }
-    pub fn mem_id_rng(&self) -> Range<LocId> {
-        let start = self.po_pu.len() + self.po_ge.len();
-        let end = start + self.me_pu.len();
-        start..end
-    }
-    pub fn port_id_rng(&self) -> Range<LocId> {
-        let end = self.po_pu.len() + self.po_ge.len();
-        0..end
+        match self.spaces.get(id) {
+            Some(Space::Memo(_)) => true,
+            _ => false,
+        }
     }
 }
 
@@ -493,9 +494,16 @@ pub struct ProtoAll {
 
 /// Part of protocol Meta-state. Remembers that a Putter / Getter with this
 /// ID has not yet been constructed for this proto.
-struct UnclaimedPortInfo {
-    putter: bool,
+#[derive(Debug, Copy, Clone)]
+pub struct PortInfo {
+    role: PortRole,
     type_id: TypeId,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum PortRole {
+    Putter,
+    Getter,
 }
 
 /// Result of attempting to claim a given port Id from the protocol.
@@ -626,9 +634,9 @@ impl<T: 'static> Drop for Getter<T> {
     fn drop(&mut self) {
         self.p.w.lock().unclaimed_ports.insert(
             self.id,
-            UnclaimedPortInfo {
+            PortInfo {
                 type_id: TypeId::of::<T>(),
-                putter: false,
+                role: PortRole::Getter,
             },
         );
     }
@@ -749,9 +757,9 @@ impl<T: 'static> Drop for Putter<T> {
     fn drop(&mut self) {
         self.p.w.lock().unclaimed_ports.insert(
             self.id,
-            UnclaimedPortInfo {
+            PortInfo {
                 type_id: TypeId::of::<T>(),
-                putter: true,
+                role: PortRole::Putter,
             },
         );
     }
@@ -1019,10 +1027,10 @@ mod tests {
         type Interface = (Putter<T0>, Putter<T0>, Getter<T0>);
         fn proto_def() -> ProtoDef {
             use GuardPred::*;
+            use PortRole::*;
             ProtoDef {
                 type_info: type_info_map![T0],
-                po_pu_types: type_ids![T0, T0],
-                po_ge_types: type_ids![T0],
+                port_info: port_info![(T0, Putter), (T0, Putter), (T0, Getter)],
                 mem_types: type_ids![T0],
                 rule_defs: vec![new_rule_def![True; 0=>2; 1=>3], new_rule_def![True; 3=>2]],
             }
@@ -1071,10 +1079,10 @@ mod tests {
         type Interface = (Putter<T0>, Getter<T0>);
         fn proto_def() -> ProtoDef {
             use GuardPred::*;
+            use PortRole::*;
             ProtoDef {
                 type_info: type_info_map![T0],
-                po_pu_types: type_ids![T0],       // 0..=0
-                po_ge_types: type_ids![T0],       // 1..=1
+                port_info: port_info![(T0, Putter), (T0, Getter)],
                 mem_types: type_ids![T0, T0, T0], // 2..=4
                 rule_defs: vec![
                     new_rule_def![True; 0=>2],

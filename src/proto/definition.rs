@@ -14,11 +14,16 @@ pub struct RuleDef {
     pub actions: Vec<ActionDef>,
 }
 
+#[derive(Debug, Copy, Clone)]
+pub enum PortType {
+    Putter,
+    Getter,
+}
+
 /// Defines the entirety of a protocol, describing the LocId space and types
 #[derive(Debug)]
 pub struct ProtoDef {
-    pub po_pu_types: Vec<TypeId>,
-    pub po_ge_types: Vec<TypeId>,
+    pub port_info: Vec<PortInfo>,
     pub mem_types: Vec<TypeId>,
     pub rule_defs: Vec<RuleDef>,
     pub type_info: HashMap<TypeId, Arc<TypeInfo>>,
@@ -29,37 +34,16 @@ impl ProtoDef {
         for (i, r) in rules.iter().enumerate() {
             println!("{} => {:?}", i, r);
         }
-        let (mem_data, me_pu, po_pu, free_mems, ready, memory_bits) = self.build_core();
-        let po_ge = (0..self.po_ge_types.len())
-            .map(|_| PoGeSpace::new())
-            .collect();
+        let (mem_data, spaces, free_mems, ready, memory_bits) = self.build_core();
+
         let r = ProtoR {
             mem_data,
-            me_pu,
-            po_pu,
-            po_ge,
+            spaces,
+            // me_pu,
+            // po_pu,
+            // po_ge,
         };
-        let unclaimed_ports = self
-            .po_pu_types
-            .iter()
-            .enumerate()
-            .map(|(i, &type_id)| {
-                let id = i;
-                let upi = UnclaimedPortInfo {
-                    putter: true,
-                    type_id,
-                };
-                (id, upi)
-            })
-            .chain(self.po_ge_types.iter().enumerate().map(|(i, &type_id)| {
-                let id = self.po_pu_types.len() + i;
-                let upi = UnclaimedPortInfo {
-                    putter: false,
-                    type_id,
-                };
-                (id, upi)
-            }))
-            .collect();
+        let unclaimed_ports = self.port_info.iter().copied().enumerate().collect();
         let w = Mutex::new(ProtoW {
             memory_bits,
             rules,
@@ -79,14 +63,15 @@ impl ProtoDef {
         &self,
     ) -> (
         Vec<u8>, // buffer
-        Vec<MemoSpace>,
-        Vec<PoPuSpace>,
+        Vec<Space>,
+        // Vec<MemoSpace>,
+        // Vec<PoPuSpace>,
         HashMap<TypeId, Vec<*mut u8>>,
         BitSet,
         BitSet,
     ) {
         let mut memory_bits = BitSet::default();
-        let mem_id_start = self.po_ge_types.len() + self.po_pu_types.len();
+        let mem_id_start = self.port_info.len();
         let mut capacity = 0;
         let mut offsets_n_typeids = vec![];
         let mut ready = BitSet::default();
@@ -117,30 +102,34 @@ impl ProtoDef {
         unsafe {
             buf.set_len(capacity);
         }
-        let memo_spaces = offsets_n_typeids
+        let port_iter = self.port_info.iter().map(|port_info| {
+            let type_info = self
+                .type_info
+                .get(&port_info.type_id)
+                .expect("Missed a type")
+                .clone();
+            match port_info.role {
+                PortRole::Putter => Space::PoPu(PoPuSpace::new(type_info)),
+                PortRole::Getter => Space::PoGe(PoGeSpace::new()),
+            }
+        });
+        let memo_iter = offsets_n_typeids
             .into_iter()
             .map(|(offset, type_id)| unsafe {
                 let ptr: *mut u8 = buf.as_mut_ptr().offset(offset as isize + meta_offset);
                 free_mems.entry(type_id).or_insert(vec![]).push(ptr);
                 let type_info = self.type_info.get(&type_id).expect("Missed a type").clone();
-                MemoSpace::new(ptr, type_info)
-            })
-            .collect();
-        let po_pu_spaces = self
-            .po_pu_types
-            .iter()
-            .map(|type_id| {
-                let info = self.type_info.get(type_id).expect("Missed a type").clone();
-                PoPuSpace::new(info)
-            })
-            .collect();
+                Space::Memo(MemoSpace::new(ptr, type_info))
+            });
+        let spaces = port_iter.chain(memo_iter).collect();
         let c = self.loc_id_range().end;
         ready.pad_trailing_zeroes_to_capacity(c);
         memory_bits.pad_trailing_zeroes_to_capacity(c);
         (
             buf,
-            memo_spaces,
-            po_pu_spaces,
+            spaces,
+            // memo_spaces,
+            // po_pu_spaces,
             free_mems,
             ready,
             memory_bits,
@@ -242,11 +231,16 @@ impl ProtoDef {
         }
     }
     fn loc_is_po_pu(&self, id: LocId) -> bool {
-        id < self.po_pu_types.len()
+        self.port_info
+            .get(id)
+            .map(|x| x.role == PortRole::Putter)
+            .unwrap_or(false)
     }
     fn loc_is_po_ge(&self, id: LocId) -> bool {
-        let r = self.po_pu_types.len() + self.po_ge_types.len();
-        self.po_pu_types.len() <= id && id < r
+        self.port_info
+            .get(id)
+            .map(|x| x.role == PortRole::Getter)
+            .unwrap_or(false)
     }
     fn loc_is_mem(&self, id: LocId) -> bool {
         let r = self.loc_id_range().end;
@@ -254,7 +248,7 @@ impl ProtoDef {
         l <= id && id < r
     }
     pub fn loc_id_range(&self) -> Range<LocId> {
-        let r = self.po_pu_types.len() + self.po_ge_types.len() + self.mem_types.len();
+        let r = self.port_info.len() + self.mem_types.len();
         0..r
     }
     pub fn validate(&self) -> ProtoDefValidationResult {
@@ -276,13 +270,10 @@ impl ProtoDef {
         Ok(())
     }
     fn type_for(&self, id: LocId) -> Option<TypeId> {
-        let l1 = self.po_pu_types.len();
-        let l2 = self.po_ge_types.len();
-        self.po_pu_types
+        self.port_info
             .get(id)
-            .or(self.po_ge_types.get(id - l1))
-            .or(self.mem_types.get(id - l1 - l2))
-            .copied()
+            .map(|x| x.type_id)
+            .or_else(|| self.mem_types.get(id - self.port_info.len()).copied())
     }
 
     fn check_rule_guards(&self) -> ProtoDefValidationResult {
