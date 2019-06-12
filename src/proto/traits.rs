@@ -1,5 +1,14 @@
 use super::*;
 
+pub trait EndlessIter {
+    fn endless_iter(&self) -> std::iter::Chain<std::slice::Iter<'_, usize>, std::iter::Repeat<&usize>>;
+}
+impl EndlessIter for Vec<usize> {
+    fn endless_iter(&self) -> std::iter::Chain<std::slice::Iter<'_, usize>, std::iter::Repeat<&usize>> {
+        self.iter().chain(std::iter::repeat(&0))
+    }
+}
+
 /// User-facing protocol trait. Reo will generate structures that implement this.
 ///
 /// Contains two important things:

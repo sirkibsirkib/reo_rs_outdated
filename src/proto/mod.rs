@@ -270,15 +270,12 @@ impl ProtoW {
                 if is_ready(&mut self.memory_bits, &mut self.active.ready, rule)
                     && rule.guard_pred.eval(r)
                 {
-                    // if self.active.ready.is_superset(&rule.guard_ready) && rule.guard_pred.eval(r) {
-                    // println!("MEM IS {:?}", &self.memory_bits);
-                    // println!("assign:  vals:{:?} | mask:{:?}", &rule.assign_vals, &rule.assign_mask);
                     println!("FIRING {}: {:?}", rule_id, rule);
                     println!("FIRING BEFORE:");
                     (r, self as &ProtoW).debug_print();
 
                     assign_memory_bits(&mut self.memory_bits, rule);
-                    self.active.ready.difference_with(&rule.guard_ready);
+                    subtract_readiness(&mut self.active.ready, rule);
 
                     println!("FIRING AFTER:");
                     (r, self as &ProtoW).debug_print();
@@ -333,10 +330,20 @@ impl ProtoW {
     }
 }
 
+fn subtract_readiness(ready: &mut BitSet, rule: &RunRule) {
+    ready.pad_trailing_zeroes(rule.guard_ready.data.len());
+    for (mr, &gr) in izip!(
+        ready.data.iter_mut(),
+        rule.guard_ready.data.iter(),
+    ) {
+        *mr &= !gr;
+    }
+}
+
 fn is_ready(memory: &mut BitSet, ready: &mut BitSet, rule: &RunRule) -> bool {
     memory.pad_trailing_zeroes(rule.guard_ready.data.len());
     ready.pad_trailing_zeroes(rule.guard_ready.data.len());
-    println!("rlen {:?}", ready.data.len());
+    // println!("rlen {:?}", ready.data.len());
     for (&mr, &mv, &gr, &gv) in izip!(
         ready.data.iter(),
         memory.data.iter(),
@@ -354,13 +361,9 @@ fn is_ready(memory: &mut BitSet, ready: &mut BitSet, rule: &RunRule) -> bool {
         let false_pos = should_be_pos & !(are_pos);
         let false_neg = should_be_neg & !(are_neg);
         if (false_pos | false_neg) != 0 {
-            memory.strip_trailing_zeroes();
-            ready.strip_trailing_zeroes();
             return false;
         }
     }
-    memory.strip_trailing_zeroes();
-    ready.strip_trailing_zeroes();
     true
 }
 
