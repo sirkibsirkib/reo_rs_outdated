@@ -11,6 +11,9 @@ use hashbrown::HashMap;
 use itertools::izip;
 use parking_lot::MutexGuard;
 use std::sync::Arc;
+use super::ClaimResult as Cr;
+use GroupAddError as Gae;
+use crate::proto::traits::HasUnclaimedPorts;
 
 pub struct PortGroup {
     maybe_proto: Option<Arc<ProtoAll>>,
@@ -20,12 +23,13 @@ pub struct PortGroup {
 }
 
 fn proto_handle_eq(a: &ProtoHandle, b: &ProtoHandle) -> bool {
-    let cst = |x| x as &ProtoHandle as *const ProtoHandle;
+    let cst = |x: &ProtoHandle| {
+        let x: &ProtoAll = &x;
+        x as *const ProtoAll
+    };
     std::ptr::eq(cst(a), cst(b))
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct DifferentProtoInstance;
 pub enum PortGroupError {
     PortAlreadyClaimed(LocId),
 }
@@ -40,23 +44,37 @@ impl PortGroup {
     }
     pub fn add_putter<D: Decimal, T>(
         &mut self,
-        m: Putter<T>,
-    ) -> Result<Grouped<D, Putter<T>>, DifferentProtoInstance> {
-        let p = self.maybe_proto.get_or_insert_with(|| m.c.p.clone());
+        handle: &ProtoHandle,
+        id: LocId,
+    ) -> Result<Grouped<D, Putter<T>>, GroupAddError> {
+        let m = match handle.claim::<T>(id) {
+            Cr::GotGetter(_) => return Err(Gae::GotGetterExpectedPutter),
+            Cr::GotPutter(p) => p,
+            Cr::NotUnclaimed => return Err(Gae::NotUnclaimed),
+            Cr::TypeMismatch => return Err(Gae::TypeMismatch),
+        };
+        let p = self.maybe_proto.get_or_insert_with(|| handle.clone());
         if !proto_handle_eq(p, &m.c.p) {
-            return Err(DifferentProtoInstance);
+            return Err(Gae::DifferentProtoInstance);
         }
-        Ok(m.safe_wrap())
+        Ok(unsafe {std::mem::transmute(m)})
     }
     pub fn add_getter<D: Decimal, T>(
         &mut self,
-        m: Getter<T>,
-    ) -> Result<Grouped<D, Getter<T>>, DifferentProtoInstance> {
-        let p = self.maybe_proto.get_or_insert_with(|| m.c.p.clone());
+        handle: &ProtoHandle,
+        id: LocId,
+    ) -> Result<Grouped<D, Getter<T>>, GroupAddError> {
+        let m = match handle.claim::<T>(id) {
+            Cr::GotGetter(g) => g,
+            Cr::GotPutter(_) => return Err(Gae::GotPutterExpectedGetter),
+            Cr::NotUnclaimed => return Err(Gae::NotUnclaimed),
+            Cr::TypeMismatch => return Err(Gae::TypeMismatch),
+        };
+        let p = self.maybe_proto.get_or_insert_with(|| handle.clone());
         if !proto_handle_eq(p, &m.c.p) {
-            return Err(DifferentProtoInstance);
+            return Err(Gae::DifferentProtoInstance);
         }
-        Ok(m.safe_wrap())
+        Ok(unsafe {std::mem::transmute(m)})
     }
     pub fn deliberate(&mut self) -> (LocId, LockedProto) {
         // step 1: prepare for callback (does not require lock)
@@ -162,4 +180,14 @@ impl Drop for LockedProto<'_> {
             *ready |= members;
         }
     }
+}
+
+
+#[derive(Debug, Copy, Clone)]
+pub enum GroupAddError {
+    DifferentProtoInstance,
+    GotGetterExpectedPutter,
+    GotPutterExpectedGetter,
+    NotUnclaimed,
+    TypeMismatch,
 }

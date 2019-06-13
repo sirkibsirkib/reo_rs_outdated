@@ -55,17 +55,6 @@ pub struct Grouped<D: Decimal, T> {
     phantom: PhantomData<(D, T)>,
 }
 
-impl<T: 'static> Getter<T> {
-    pub(crate) fn safe_wrap<D: Decimal>(mut self) -> Grouped<D, Self> {
-        unsafe { std::mem::transmute(self) }
-    }
-}
-impl<T: 'static> Putter<T> {
-    pub(crate) fn safe_wrap<D: Decimal>(mut self) -> Grouped<D, Self> {
-        unsafe { std::mem::transmute(self) }
-    }
-}
-
 impl<D: Decimal, T> Grouped<D, Getter<T>> {
     pub fn get<S>(&mut self, coupon: Coupon<D, S>) -> (T, State<S>) {
         let me: &mut Getter<T> = unsafe { std::mem::transmute(self) };

@@ -1120,14 +1120,28 @@ mod tests {
     }
 
     #[test]
-    fn fifo_3_api() {
-        let def = Fifo3::<u32>::proto_def();
-        let port_set = set! {0, 1};
-        let rbpa = def.new_rbpa(&port_set);
-        println!("rbpa {:#?}", &rbpa);
-        if let Ok(mut rbpa) = rbpa {
-            rbpa.normalize();
-            println!("rbpa {:#?}", &rbpa);
-        }
+    fn fifo_3_group() {
+        let handle = Fifo3::<i8>::instantiate();
+        api_begin(&handle, my_func).expect("O NO");
+        println!("DONE");
     }
+    fn my_func(ports: Interface<i8>) {
+        let _ = ports;
+    }
+    ////
+    use crate::tokens::Grouped;
+    use crate::tokens::decimal::*;
+    use crate::ProtoHandle;
+    use crate::proto::groups2::PortGroup;
+    use crate::proto::groups2::GroupAddError;
+    type Interface<T> = (Grouped<E0, Putter<T>>, Grouped<E0, Getter<T>>); 
+    fn api_begin<F,R,T: 'static>(handle: &ProtoHandle, func: F) -> Result<R, GroupAddError>
+    where F: FnOnce(Interface<T>)->R {
+        let mut group = PortGroup::new();
+        let ports = (
+            group.add_putter(handle, 0)?,
+            group.add_getter(handle, 1)?,
+        );
+        Ok(func(ports))
+    } 
 }
