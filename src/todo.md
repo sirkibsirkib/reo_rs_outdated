@@ -1,18 +1,19 @@
-1. overhaul bitsets in `reo_rs`. We simply want two bitsets:
-	ready: ports + mems
-	state: mems
-	tentative: ports
+1. consider the 'static protocol description.
+	the idea:	we can now use a constant to describe the protocol's SHAPE
+		(shape has all protocol information except type reification)
+-- see how it would change Proto trait
+-- investigate Serde. Need it ONLY for the API jazz
 
-2. encode assignments into proto Rule objects. have the proto itself 
-	flip the state bits THE MOMENT IT COMMITS TO A RULE
+2. finish up the crossover of api and reo_rs stuff:
+-- a state should receive a determine() function that works as expected.
+-- what does the API function need? (State<..>, Interface, ??) &mut PortGroup?
+maybe something more opaque. "Determiner?" yeah sounds good.
 
-3. generated API once-off code
--- grouping / ungrouping jazz
--- Interface type
--- figure out what is generic enough to end up in `reo_rs`
+3. eventually switch over from importing protocols into API thingy into reading them from
+a file given as arg. Maybe bincode? maybe RON? maybe support both idk.
 
+4. update the reo_rs interface according to whatever happens with static protocol defs
 
-4. generated API <==> reo_rs code each transition code
--- how do we evaluate which variant is matched?
-	msg: (port_id, &MemBits)
--- what is the control flow? WHEN exactly does this variant get chosen? pass a callback? 
+5. copy out the Reo template jazz I did already. Throw away Reo. re-clone the repo
+
+6. do some more writing
