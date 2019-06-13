@@ -13,6 +13,7 @@ pub mod definition;
 pub use definition::{ActionDef, ProtoDef, RuleDef};
 
 pub mod groups;
+pub mod groups2;
 
 use crate::{bitset::BitSet, helper::WithFirst, LocId, RuleId};
 use hashbrown::{HashMap, HashSet};
