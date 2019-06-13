@@ -566,10 +566,9 @@ enum Action {
     },
 }
 
-
 pub(crate) struct PortCommon {
     p: Arc<ProtoAll>,
-    id: LocId,    
+    id: LocId,
 }
 
 /// User-facing port-object with the role of "Getter" of type T.
@@ -587,7 +586,9 @@ impl<T: 'static> Getter<T> {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
         po_ge.set_want_data(false);
         self.c.p.w.lock().enter(&self.c.p.r, self.c.id);
-        po_ge.await_msg_timeout(&self.c.p, timeout, self.c.id).is_some()
+        po_ge
+            .await_msg_timeout(&self.c.p, timeout, self.c.id)
+            .is_some()
     }
     /// like `get`, but doesn't acquire any data. Useful for participation
     /// in synchrony when the data isn't useful.

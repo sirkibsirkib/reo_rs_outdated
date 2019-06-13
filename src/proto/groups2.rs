@@ -1,11 +1,11 @@
-use crate::proto::Getter;
-use crate::ProtoHandle;
-use crate::tokens::decimal::Decimal;
-use crate::proto::Putter;
-use crate::tokens::Grouped;
 use crate::bitset::BitSet;
+use crate::proto::Getter;
+use crate::proto::Putter;
 use crate::proto::{PortInfo, ProtoAll, ProtoW, Space};
+use crate::tokens::decimal::Decimal;
+use crate::tokens::Grouped;
 use crate::LocId;
+use crate::ProtoHandle;
 use crossbeam::channel::Select;
 use hashbrown::HashMap;
 use itertools::izip;
@@ -24,7 +24,6 @@ fn proto_handle_eq(a: &ProtoHandle, b: &ProtoHandle) -> bool {
     std::ptr::eq(cst(a), cst(b))
 }
 
-
 #[derive(Debug, Copy, Clone)]
 pub struct DifferentProtoInstance;
 pub enum PortGroupError {
@@ -39,17 +38,23 @@ impl PortGroup {
             members_indexed: Default::default(),
         }
     }
-    pub fn add_putter<D: Decimal,T>(&mut self, m: Putter<T>) -> Result<Grouped<D, Putter<T>>, DifferentProtoInstance> {
+    pub fn add_putter<D: Decimal, T>(
+        &mut self,
+        m: Putter<T>,
+    ) -> Result<Grouped<D, Putter<T>>, DifferentProtoInstance> {
         let p = self.maybe_proto.get_or_insert_with(|| m.c.p.clone());
         if !proto_handle_eq(p, &m.c.p) {
-            return Err(DifferentProtoInstance)
+            return Err(DifferentProtoInstance);
         }
         Ok(m.safe_wrap())
     }
-    pub fn add_getter<D: Decimal,T>(&mut self, m: Getter<T>) -> Result<Grouped<D, Getter<T>>, DifferentProtoInstance> {
+    pub fn add_getter<D: Decimal, T>(
+        &mut self,
+        m: Getter<T>,
+    ) -> Result<Grouped<D, Getter<T>>, DifferentProtoInstance> {
         let p = self.maybe_proto.get_or_insert_with(|| m.c.p.clone());
         if !proto_handle_eq(p, &m.c.p) {
-            return Err(DifferentProtoInstance)
+            return Err(DifferentProtoInstance);
         }
         Ok(m.safe_wrap())
     }
@@ -105,13 +110,12 @@ impl PortGroup {
             active.ready.data.iter_mut(),
             self.members.data.iter()
         ) {
-
             assert_eq!(*ready & members, members); // COMPLETE overlap beforehand
             *ready &= !members;
             *tenta &= !members;
         }
 
-        // step 5: return which port was committed AND 
+        // step 5: return which port was committed AND
         let locked_proto = LockedProto {
             w,
             members: &self.members,

@@ -1,5 +1,5 @@
-use crate::proto::PortCommon;
 use crate::bitset::BitSet;
+use crate::proto::PortCommon;
 use crate::proto::{Getter, Putter};
 use crate::LocId;
 use std::marker::PhantomData;
@@ -52,34 +52,30 @@ use decimal::*;
 /// un-claim the port, as Putter<T> does, as Safe<> corresponds to some PortGroup
 pub struct Grouped<D: Decimal, T> {
     c: PortCommon,
-    phantom: PhantomData<(D,T)>,
+    phantom: PhantomData<(D, T)>,
 }
 
 impl<T: 'static> Getter<T> {
     pub(crate) fn safe_wrap<D: Decimal>(mut self) -> Grouped<D, Self> {
-        unsafe {
-            std::mem::transmute(self)
-        }
+        unsafe { std::mem::transmute(self) }
     }
 }
 impl<T: 'static> Putter<T> {
     pub(crate) fn safe_wrap<D: Decimal>(mut self) -> Grouped<D, Self> {
-        unsafe {
-            std::mem::transmute(self)
-        }
+        unsafe { std::mem::transmute(self) }
     }
 }
 
 impl<D: Decimal, T> Grouped<D, Getter<T>> {
     pub fn get<S>(&mut self, coupon: Coupon<D, S>) -> (T, State<S>) {
-        let me: &mut Getter<T> = unsafe {std::mem::transmute(self)};
+        let me: &mut Getter<T> = unsafe { std::mem::transmute(self) };
         let _ = coupon;
         (me.get(), unsafe { State::fresh() })
     }
 }
 impl<D: Decimal, T> Grouped<D, Putter<T>> {
     pub fn put<S>(&mut self, coupon: Coupon<D, S>, datum: T) -> (Option<T>, State<S>) {
-        let me: &mut Putter<T> = unsafe {std::mem::transmute(self)};
+        let me: &mut Putter<T> = unsafe { std::mem::transmute(self) };
         let _ = coupon;
         (me.put(datum), unsafe { State::fresh() })
     }
