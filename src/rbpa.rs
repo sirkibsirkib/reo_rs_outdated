@@ -78,7 +78,7 @@ impl Rbpa {
                     let mut did_fuse = false;
                     for r3 in self.rules.iter_mut() {
                         if let Some(fused) = r3.fuse(&c) {
-                            println!("({:?}) | ({:?}) = ({:?})", c, r3, &fused);
+                            // println!("({:?}) | ({:?}) = ({:?})", c, r3, &fused);
                             *r3 = fused;
                             did_fuse = true;
                         }
@@ -89,7 +89,7 @@ impl Rbpa {
                 }
             }
             self.rules.append(&mut buf);
-            println!("now am: {:#?}", &self);
+            // println!("now am: {:#?}", &self);
         }
         let mut rules = Vec::with_capacity(self.rules.len());
         std::mem::swap(&mut self.rules, &mut rules);

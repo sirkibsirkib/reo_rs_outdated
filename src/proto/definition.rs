@@ -13,13 +13,6 @@ pub struct RuleDef {
     pub guard_pred: GuardPred,
     pub actions: Vec<ActionDef>,
 }
-
-#[derive(Debug, Copy, Clone)]
-pub enum PortType {
-    Putter,
-    Getter,
-}
-
 /// Defines the entirety of a protocol, describing the LocId space and types
 #[derive(Debug)]
 pub struct ProtoDef {

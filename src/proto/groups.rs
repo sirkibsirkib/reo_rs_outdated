@@ -1,4 +1,3 @@
-
 use super::*;
 use ClaimResult as Cr;
 use GroupAddError as Gae;
@@ -11,13 +10,13 @@ pub struct PortGroup {
 }
 
 /// Compiles down to 2 pointer-follows and a sete
-fn proto_handle_eq(a: &ProtoHandle, b: &ProtoHandle) -> bool {
-    let cst = |x: &ProtoHandle| {
-        let x: &ProtoAll = &x;
-        x as *const ProtoAll
-    };
-    std::ptr::eq(cst(a), cst(b))
-}
+// fn proto_handle_eq(a: &ProtoHandle, b: &ProtoHandle) -> bool {
+//     let cst = |x: &ProtoHandle| {
+//         let x: &ProtoAll = &x;
+//         x as *const ProtoAll
+//     };
+//     std::ptr::eq(cst(a), cst(b))
+// }
 
 pub enum PortGroupError {
     PortAlreadyClaimed(LocId),
@@ -31,6 +30,7 @@ impl PortGroup {
             members_indexed: Default::default(),
         }
     }
+
     pub fn add_putter<D: Decimal, T>(
         &mut self,
         handle: &ProtoHandle,
@@ -43,11 +43,12 @@ impl PortGroup {
             Cr::TypeMismatch => return Err(Gae::TypeMismatch),
         };
         let p = self.maybe_proto.get_or_insert_with(|| handle.clone());
-        if !proto_handle_eq(p, &m.c.p) {
+        if !Arc::ptr_eq(p, &m.c.p) {
             return Err(Gae::DifferentProtoInstance);
         }
         Ok(Grouped::from_putter(m))
     }
+
     pub fn add_getter<D: Decimal, T>(
         &mut self,
         handle: &ProtoHandle,
@@ -60,24 +61,24 @@ impl PortGroup {
             Cr::TypeMismatch => return Err(Gae::TypeMismatch),
         };
         let p = self.maybe_proto.get_or_insert_with(|| handle.clone());
-        if !proto_handle_eq(p, &m.c.p) {
+        if !Arc::ptr_eq(p, &m.c.p) {
             return Err(Gae::DifferentProtoInstance);
         }
         Ok(Grouped::from_getter(m))
     }
+
     pub fn deliberate(&mut self) -> (LocId, LockedProto) {
         // step 1: prepare for callback (does not require lock)
         let mut sel = crossbeam::channel::Select::new();
         let proto: &ProtoHandle = self.maybe_proto.as_ref().expect("NO PROTO??");
         for (expected_index, &id) in self.members_indexed.iter().enumerate() {
-            // register this id's MsgDropbox as part of the selection
             let r = match proto.r.get_space(id) {
                 Some(Space::PoPu(space)) => &space.dropbox.r,
                 Some(Space::PoGe(space)) => &space.dropbox.r,
                 _ => unreachable!(),
             };
-            let index = sel.recv(r);
-            assert_eq!(index, expected_index);
+            let index = sel.recv(r); // add recv() of this msgdropbox to sel.
+            assert_eq!(index, expected_index); // sanity check.
         }
 
         // step 2: lock proto and batch-flag readiness and tentativeness
@@ -171,7 +172,6 @@ impl Drop for LockedProto<'_> {
         }
     }
 }
-
 
 #[derive(Debug, Copy, Clone)]
 pub enum GroupAddError {

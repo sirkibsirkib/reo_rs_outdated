@@ -3,7 +3,10 @@ use crate::proto::PortCommon;
 use crate::proto::{Getter, Putter};
 use crate::LocId;
 use std::marker::PhantomData;
-use std::{fmt, mem::{self, transmute}};
+use std::{
+    fmt,
+    mem::{self, transmute},
+};
 
 // for types that have NO SIZE and thus can be created without context
 pub unsafe trait Token: Sized {
@@ -59,7 +62,8 @@ impl<D: Decimal, T> Grouped<D, Getter<T>> {
     pub(crate) fn from_getter(x: Getter<T>) -> Self {
         unsafe { transmute(x) }
     }
-    fn as_getter(&mut self) -> &mut Getter<T> { // DO NOT EXPOSE
+    fn as_getter(&mut self) -> &mut Getter<T> {
+        // DO NOT EXPOSE
         unsafe { transmute(self) }
     }
     pub fn get<S>(&mut self, coupon: Coupon<D, S>) -> (T, State<S>) {
@@ -71,7 +75,8 @@ impl<D: Decimal, T> Grouped<D, Putter<T>> {
     pub(crate) fn from_putter(x: Putter<T>) -> Self {
         unsafe { transmute(x) }
     }
-    fn as_putter(&mut self) -> &mut Putter<T> { // DO NOT EXPOSE
+    fn as_putter(&mut self) -> &mut Putter<T> {
+        // DO NOT EXPOSE
         unsafe { transmute(self) }
     }
     pub fn put<S>(&mut self, coupon: Coupon<D, S>, datum: T) -> (Option<T>, State<S>) {

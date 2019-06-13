@@ -3,6 +3,8 @@
 
 use itertools::izip;
 
+pub mod abstraction;
+
 pub mod reflection;
 use reflection::TypeInfo;
 
@@ -14,11 +16,18 @@ pub use definition::{ActionDef, ProtoDef, RuleDef};
 
 pub mod groups;
 
-
+use crate::{
+    bitset::BitSet,
+    helper::WithFirst,
+    tokens::{decimal::Decimal, Grouped},
+    LocId, ProtoHandle,
+};
+use hashbrown::{HashMap, HashSet};
+use parking_lot::{Mutex, MutexGuard};
 use std::{
-    convert::TryInto,
     any::TypeId,
     cell::UnsafeCell,
+    convert::TryInto,
     marker::PhantomData,
     mem::{transmute, ManuallyDrop, MaybeUninit},
     ops::Range,
@@ -29,14 +38,6 @@ use std::{
     },
     time::Duration,
 };
-use crate::{
-    ProtoHandle, LocId,
-    tokens::{Grouped, decimal::Decimal},
-    bitset::BitSet,
-    helper::WithFirst,
-};
-use hashbrown::{HashMap, HashSet};
-use parking_lot::{Mutex, MutexGuard};
 use std_semaphore::Semaphore;
 
 /// A coordination point that getters interact with to acquire a datum.
@@ -271,18 +272,23 @@ impl ProtoW {
                             r,
                             w: &mut self.active,
                         });
-                        Self::notify_state_waiters(&self.active.ready, &mut self.awaiting_states, r);
+                        Self::notify_state_waiters(
+                            &self.active.ready,
+                            &mut self.awaiting_states,
+                            r,
+                        );
                         self.commitment = None;
                         self.exhaust_rules(r);
                     }
                 }
-            },
+            }
             None => self.exhaust_rules(r),
         }
     }
 
     fn exhaust_rules(&mut self, r: &ProtoR) {
-        'repeat: loop { // keep looping until 0 rules can fire
+        'repeat: loop {
+            // keep looping until 0 rules can fire
             for (rule_id, rule) in self.rules.iter().enumerate() {
                 let bits_ready = is_ready(&self.memory_bits, &self.active.ready, rule);
                 if bits_ready && rule.guard_pred.eval(r) {
@@ -497,8 +503,8 @@ pub struct ProtoAll {
 /// ID has not yet been constructed for this proto.
 #[derive(Debug, Copy, Clone)]
 pub struct PortInfo {
-    role: PortRole,
-    type_id: TypeId,
+    pub role: PortRole,
+    pub type_id: TypeId,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -1089,7 +1095,7 @@ mod tests {
             ProtoDef {
                 type_info: type_info_map![T0],
                 port_info: port_info![(T0, Putter), (T0, Getter)],
-                mem_types: type_ids![T0, T0, T0], // 2..=4
+                mem_types: type_ids![T0, T0, T0],
                 rule_defs: vec![
                     new_rule_def![True; 0=>2],
                     new_rule_def![True; 2=>3],
@@ -1138,18 +1144,17 @@ mod tests {
         5
     }
     //// ABOVE LINE: what user sees. BELOW LINE: what API must generate
-    use crate::tokens::{Grouped, decimal::*};
+    use crate::proto::groups::{GroupAddError, PortGroup};
+    use crate::tokens::{decimal::*, Grouped};
     use crate::ProtoHandle;
-    use crate::proto::groups::{PortGroup, GroupAddError};
 
-    type Interface<T> = (Grouped<E0, Putter<T>>, Grouped<E0, Getter<T>>); 
-    fn api_begin<F,R,T: 'static>(handle: &ProtoHandle, func: F) -> Result<R, GroupAddError>
-    where F: FnOnce(Interface<T>)->R {
+    type Interface<T> = (Grouped<E0, Putter<T>>, Grouped<E0, Getter<T>>);
+    fn api_begin<F, R, T: 'static>(handle: &ProtoHandle, func: F) -> Result<R, GroupAddError>
+    where
+        F: FnOnce(Interface<T>) -> R,
+    {
         let mut group = PortGroup::new();
-        let ports = (
-            group.add_putter(handle, 0)?,
-            group.add_getter(handle, 1)?,
-        );
+        let ports = (group.add_putter(handle, 0)?, group.add_getter(handle, 1)?);
         Ok(func(ports))
-    } 
+    }
 }
