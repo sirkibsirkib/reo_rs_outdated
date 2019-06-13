@@ -1,101 +1,183 @@
-use super::*;
 
-#[derive(Debug, Copy, Clone)]
-pub enum PortGroupError {
-    EmptyGroup,
-    MemId(LocId),
-    SynchronousWithRule(RuleId),
-}
-#[derive(Default)]
-pub struct PortGroupBuilder {
-    core: Option<(LocId, Arc<ProtoAll>)>,
-    members: BitSet,
-}
+use super::*;
+use ClaimResult as Cr;
+use GroupAddError as Gae;
 
 pub struct PortGroup {
-    p: Arc<ProtoAll>,
-    leader: LocId,
-    disambiguation: HashMap<RuleId, LocId>,
+    maybe_proto: Option<Arc<ProtoAll>>,
+    members: BitSet,
+    member_info: HashMap<LocId, PortInfo>,
+    members_indexed: Vec<LocId>,
+}
+
+/// Compiles down to 2 pointer-follows and a sete
+fn proto_handle_eq(a: &ProtoHandle, b: &ProtoHandle) -> bool {
+    let cst = |x: &ProtoHandle| {
+        let x: &ProtoAll = &x;
+        x as *const ProtoAll
+    };
+    std::ptr::eq(cst(a), cst(b))
+}
+
+pub enum PortGroupError {
+    PortAlreadyClaimed(LocId),
 }
 impl PortGroup {
-    /// block until the protocol is in this state
-    pub unsafe fn await_state(&self, state_pred: BitSet) {
-        // TODO check the given state pred is OK? maybe unnecessary since function is internal
-        {
-            let w = self.p.w.lock();
-            if w.active.ready.is_superset(&state_pred) {
-                return; // already in the desired state
-            }
-        } // release lock
-        let space = self.p.r.get_space(self.leader);
-        match space {
-            Some(Space::PoPu(po_pu_space)) => po_pu_space.dropbox.recv_nothing(),
-            Some(Space::PoGe(po_ge_space)) => po_ge_space.dropbox.recv_nothing(),
-            _ => panic!("BAD ID"),
-        }
-        // I received a notification that the state is ready!
-    }
-    pub unsafe fn new(p: &Arc<ProtoAll>, id_set: &BitSet) -> Result<PortGroup, PortGroupError> {
-        use PortGroupError::*;
-        let mut w = p.w.lock();
-        // 1. check all loc_ids correspond with ports (not memory cells)
-        for id in id_set.iter_sparse() {
-            if p.r.loc_is_mem(id) {
-                return Err(MemId(id));
-            }
-        }
-        // 1. check that NO rule contains multiple ports in the set
-        for (rule_id, rule) in w.rules.iter().enumerate() {
-            if rule.guard_ready.iter_and(id_set).count() > 1 {
-                return Err(SynchronousWithRule(rule_id));
-            }
-        }
-        match id_set.iter_sparse().next() {
-            Some(leader) => {
-                let mut disambiguation = HashMap::new();
-                // 2. change occurrences of any port IDs in the set to leader
-                for (rule_id, rule) in w.rules.iter_mut().enumerate() {
-                    if let Some(specific_port) = rule.guard_ready.iter_and(id_set).next() {
-                        disambiguation.insert(rule_id, specific_port);
-                        rule.guard_ready.set_to(specific_port, false);
-                        rule.guard_ready.set_to(leader, true);
-                    }
-                }
-                Ok(PortGroup {
-                    p: p.clone(),
-                    leader,
-                    disambiguation,
-                })
-            }
-            None => Err(EmptyGroup),
+    pub fn new() -> Self {
+        Self {
+            maybe_proto: None,
+            members: Default::default(),
+            member_info: Default::default(),
+            members_indexed: Default::default(),
         }
     }
-    pub fn ready_wait_determine_commit(&self) -> LocId {
-        let space = self.p.r.get_space(self.leader);
-        {
-            let mut w = self.p.w.lock();
-            w.ready_tentative.set_to(self.leader, true);
-            w.active.ready.set_to(self.leader, true);
-        }
-        let rule_id = match space {
-            Some(Space::PoPu(po_pu_space)) => po_pu_space.dropbox.recv(),
-            Some(Space::PoGe(po_ge_space)) => po_ge_space.dropbox.recv(),
-            _ => panic!("BAD ID"),
+    pub fn add_putter<D: Decimal, T>(
+        &mut self,
+        handle: &ProtoHandle,
+        id: LocId,
+    ) -> Result<Grouped<D, Putter<T>>, GroupAddError> {
+        let m = match handle.claim::<T>(id) {
+            Cr::GotGetter(_) => return Err(Gae::GotGetterExpectedPutter),
+            Cr::GotPutter(p) => p,
+            Cr::NotUnclaimed => return Err(Gae::NotUnclaimed),
+            Cr::TypeMismatch => return Err(Gae::TypeMismatch),
         };
-        *self.disambiguation.get(&rule_id).expect("SHOULD BE OK")
+        let p = self.maybe_proto.get_or_insert_with(|| handle.clone());
+        if !proto_handle_eq(p, &m.c.p) {
+            return Err(Gae::DifferentProtoInstance);
+        }
+        Ok(Grouped::from_putter(m))
+    }
+    pub fn add_getter<D: Decimal, T>(
+        &mut self,
+        handle: &ProtoHandle,
+        id: LocId,
+    ) -> Result<Grouped<D, Getter<T>>, GroupAddError> {
+        let m = match handle.claim::<T>(id) {
+            Cr::GotGetter(g) => g,
+            Cr::GotPutter(_) => return Err(Gae::GotPutterExpectedGetter),
+            Cr::NotUnclaimed => return Err(Gae::NotUnclaimed),
+            Cr::TypeMismatch => return Err(Gae::TypeMismatch),
+        };
+        let p = self.maybe_proto.get_or_insert_with(|| handle.clone());
+        if !proto_handle_eq(p, &m.c.p) {
+            return Err(Gae::DifferentProtoInstance);
+        }
+        Ok(Grouped::from_getter(m))
+    }
+    pub fn deliberate(&mut self) -> (LocId, LockedProto) {
+        // step 1: prepare for callback (does not require lock)
+        let mut sel = crossbeam::channel::Select::new();
+        let proto: &ProtoHandle = self.maybe_proto.as_ref().expect("NO PROTO??");
+        for (expected_index, &id) in self.members_indexed.iter().enumerate() {
+            // register this id's MsgDropbox as part of the selection
+            let r = match proto.r.get_space(id) {
+                Some(Space::PoPu(space)) => &space.dropbox.r,
+                Some(Space::PoGe(space)) => &space.dropbox.r,
+                _ => unreachable!(),
+            };
+            let index = sel.recv(r);
+            assert_eq!(index, expected_index);
+        }
+
+        // step 2: lock proto and batch-flag readiness and tentativeness
+        let mut w = proto.w.lock();
+        let ProtoW {
+            ready_tentative,
+            active,
+            ..
+        } = &mut w as &mut ProtoW;
+        for (tenta, ready, &members) in izip!(
+            ready_tentative.data.iter_mut(),
+            active.ready.data.iter_mut(),
+            self.members.data.iter()
+        ) {
+            assert_eq!(*ready & members, 0); // NO overlap beforehand
+            *ready |= members;
+            *tenta |= members;
+        }
+        drop(w);
+
+        // step 3: await callback
+        let oper = sel.select(); // BLOCKS!
+        let id: LocId = *self
+            .members_indexed
+            .get(oper.index())
+            .expect("UNEXPECTED INDEX");
+
+        // step 4: protocol is committed. UNSET readiness and tentativeness again.
+        let mut w = proto.w.lock();
+        let ProtoW {
+            ready_tentative,
+            active,
+            ..
+        } = &mut w as &mut ProtoW;
+        for (tenta, ready, &members) in izip!(
+            ready_tentative.data.iter_mut(),
+            active.ready.data.iter_mut(),
+            self.members.data.iter()
+        ) {
+            assert_eq!(*ready & members, members); // COMPLETE overlap beforehand
+            *ready &= !members;
+            *tenta &= !members;
+        }
+        ready_tentative.set_to(id, true); // THIS port will discover their tentative flag is set.
+
+        // step 5: return which port was committed AND
+        let locked_proto = LockedProto {
+            w,
+            members: &self.members,
+        };
+        (id, locked_proto)
     }
 }
 impl Drop for PortGroup {
-    // TODO ensure you can't change leaders or something whacky
     fn drop(&mut self) {
-        let mut w = self.p.w.lock();
-        for (rule_id, rule) in w.rules.iter_mut().enumerate() {
-            if let Some(&specific_port) = self.disambiguation.get(&rule_id) {
-                if self.leader != specific_port {
-                    rule.guard_ready.set_to(self.leader, false);
-                    rule.guard_ready.set_to(specific_port, true);
-                }
+        if let Some(ref proto) = self.maybe_proto {
+            // UNCLAIM the contained ports
+            let mut w = proto.w.lock();
+            for (&id, &info) in self.member_info.iter() {
+                w.unclaimed_ports.insert(id, info);
             }
+        } else {
+            assert!(self.members_indexed.is_empty());
         }
     }
+}
+
+pub struct LockedProto<'a> {
+    w: MutexGuard<'a, ProtoW>,
+    members: &'a BitSet,
+}
+impl LockedProto<'_> {
+    pub fn get_memory_bits(&self) -> &BitSet {
+        &self.w.memory_bits
+    }
+}
+impl Drop for LockedProto<'_> {
+    fn drop(&mut self) {
+        let ProtoW {
+            ready_tentative,
+            active,
+            ..
+        } = &mut self.w as &mut ProtoW;
+        for (tenta, ready, &members) in izip!(
+            ready_tentative.data.iter_mut(),
+            active.ready.data.iter_mut(),
+            self.members.data.iter()
+        ) {
+            *tenta |= members;
+            *ready |= members;
+        }
+    }
+}
+
+
+#[derive(Debug, Copy, Clone)]
+pub enum GroupAddError {
+    DifferentProtoInstance,
+    GotGetterExpectedPutter,
+    GotPutterExpectedGetter,
+    NotUnclaimed,
+    TypeMismatch,
 }

@@ -13,13 +13,10 @@ pub mod definition;
 pub use definition::{ActionDef, ProtoDef, RuleDef};
 
 pub mod groups;
-pub mod groups2;
 
-use crate::{bitset::BitSet, helper::WithFirst, LocId, RuleId};
-use hashbrown::{HashMap, HashSet};
-use parking_lot::Mutex;
-use std::convert::TryInto;
+
 use std::{
+    convert::TryInto,
     any::TypeId,
     cell::UnsafeCell,
     marker::PhantomData,
@@ -32,6 +29,14 @@ use std::{
     },
     time::Duration,
 };
+use crate::{
+    ProtoHandle, LocId,
+    tokens::{Grouped, decimal::Decimal},
+    bitset::BitSet,
+    helper::WithFirst,
+};
+use hashbrown::{HashMap, HashSet};
+use parking_lot::{Mutex, MutexGuard};
 use std_semaphore::Semaphore;
 
 /// A coordination point that getters interact with to acquire a datum.
@@ -253,26 +258,39 @@ impl ProtoW {
         println!("ENTER WITH ID {}", my_id);
         self.active.ready.set_to(my_id, true);
         (r, self as &ProtoW).debug_print();
-        if self.commitment.is_some() {
-            // some rule is waiting for completion
-            return;
+        match &mut self.commitment {
+            Some(commitment) => {
+                let i_was_tentative = !self.ready_tentative.set_to(my_id, false);
+                if i_was_tentative {
+                    commitment.awaiting -= 1;
+                    if commitment.awaiting == 0 {
+                        // I was the last!
+                        let rule = &self.rules[commitment.rule_id];
+                        subtract_readiness(&mut self.active.ready, rule);
+                        rule.fire(Firer {
+                            r,
+                            w: &mut self.active,
+                        });
+                        Self::notify_state_waiters(&self.active.ready, &mut self.awaiting_states, r);
+                        self.commitment = None;
+                        self.exhaust_rules(r);
+                    }
+                }
+            },
+            None => self.exhaust_rules(r),
         }
-        let mut num_tenatives = 0;
-        'outer: loop {
-            'inner: for (rule_id, rule) in self.rules.iter().enumerate() {
+    }
+
+    fn exhaust_rules(&mut self, r: &ProtoR) {
+        'repeat: loop { // keep looping until 0 rules can fire
+            for (rule_id, rule) in self.rules.iter().enumerate() {
                 let bits_ready = is_ready(&self.memory_bits, &self.active.ready, rule);
                 if bits_ready && rule.guard_pred.eval(r) {
                     println!("FIRING {}: {:?}", rule_id, rule);
                     println!("FIRING BEFORE:");
                     (r, self as &ProtoW).debug_print();
 
-                    assign_memory_bits(&mut self.memory_bits, rule);
-                    subtract_readiness(&mut self.active.ready, rule);
-
-                    println!("FIRING AFTER:");
-                    (r, self as &ProtoW).debug_print();
-                    println!("----------");
-
+                    let mut num_tenatives = 0;
                     for id in self.active.ready.iter_and(&self.ready_tentative) {
                         num_tenatives += 1;
                         match r.get_space(id) {
@@ -281,44 +299,34 @@ impl ProtoW {
                             _ => panic!("bad tentative!"),
                         }
                     }
+                    // assign bits BEFORE the action happens. necessary for the tentative ports
+                    assign_memory_bits(&mut self.memory_bits, rule);
+
+                    println!("FIRING AFTER:");
+                    (r, self as &ProtoW).debug_print();
+                    println!("----------");
+
                     // tenative ports! must wait for them to resolve
                     if num_tenatives > 0 {
                         self.commitment = Some(Commitment {
                             rule_id,
                             awaiting: num_tenatives,
                         });
-                        // println!("committed to rid {}", rule_id);
-                        break 'inner;
+                        return;
                     }
-                    // no tenatives! proceed
+                    subtract_readiness(&mut self.active.ready, rule);
                     rule.fire(Firer {
                         r,
                         w: &mut self.active,
                     });
                     Self::notify_state_waiters(&self.active.ready, &mut self.awaiting_states, r);
-                    continue 'outer;
+                    continue 'repeat;
                 }
             }
-            println!("EXITING id={}", my_id);
+            // only get here if NO rule fired
+            println!("EXITING");
             return;
         }
-    }
-    /// Variant of "enter" function used when port-groups call back after fulfilling
-    /// their part of a rule-commitment.
-    fn enter_committed(&mut self, r: &ProtoR, tent_id: LocId, expecting_rule: usize) {
-        let comm: &mut Commitment = self.commitment.as_mut().expect("BUT IT MUST BE");
-        debug_assert_eq!(comm.rule_id, expecting_rule);
-        self.ready_tentative.set_to(tent_id, false);
-        comm.awaiting -= 1;
-        if comm.awaiting > 0 {
-            return; // someone else will finish up
-        }
-        let rule = &self.rules[comm.rule_id];
-        self.commitment = None;
-        rule.fire(Firer {
-            r,
-            w: &mut self.active,
-        });
     }
 }
 
@@ -1122,18 +1130,18 @@ mod tests {
     #[test]
     fn fifo_3_group() {
         let handle = Fifo3::<i8>::instantiate();
-        api_begin(&handle, my_func).expect("O NO");
-        println!("DONE");
+        let out = api_begin(&handle, my_func).expect("O NO");
+        println!("DONE {}", out);
     }
-    fn my_func(ports: Interface<i8>) {
+    fn my_func(ports: Interface<i8>) -> u128 {
         let _ = ports;
+        5
     }
-    ////
-    use crate::tokens::Grouped;
-    use crate::tokens::decimal::*;
+    //// ABOVE LINE: what user sees. BELOW LINE: what API must generate
+    use crate::tokens::{Grouped, decimal::*};
     use crate::ProtoHandle;
-    use crate::proto::groups2::PortGroup;
-    use crate::proto::groups2::GroupAddError;
+    use crate::proto::groups::{PortGroup, GroupAddError};
+
     type Interface<T> = (Grouped<E0, Putter<T>>, Grouped<E0, Getter<T>>); 
     fn api_begin<F,R,T: 'static>(handle: &ProtoHandle, func: F) -> Result<R, GroupAddError>
     where F: FnOnce(Interface<T>)->R {

@@ -3,7 +3,7 @@ use crate::proto::PortCommon;
 use crate::proto::{Getter, Putter};
 use crate::LocId;
 use std::marker::PhantomData;
-use std::{fmt, mem};
+use std::{fmt, mem::{self, transmute}};
 
 // for types that have NO SIZE and thus can be created without context
 pub unsafe trait Token: Sized {
@@ -47,31 +47,41 @@ pub mod decimal {
 }
 use decimal::*;
 
-/// Safe<_, Putter<T>> and Putter<T> have the same in-memory representation
-/// Likewise with Getter. Note that dropping Safe<_, Putter<T>> will NOT
-/// un-claim the port, as Putter<T> does, as Safe<> corresponds to some PortGroup
+/// Grouped<_, Putter<T>> and Putter<T> have the same in-memory representation
+/// Likewise with Getter. Note that dropping Grouped<_, Putter<T>> will NOT
+/// un-claim the port, as Putter<T> does, as Grouped<> corresponds to some PortGroup
 pub struct Grouped<D: Decimal, T> {
-    c: PortCommon,
+    _c: PortCommon,
     phantom: PhantomData<(D, T)>,
 }
 
 impl<D: Decimal, T> Grouped<D, Getter<T>> {
+    pub(crate) fn from_getter(x: Getter<T>) -> Self {
+        unsafe { transmute(x) }
+    }
+    fn as_getter(&mut self) -> &mut Getter<T> { // DO NOT EXPOSE
+        unsafe { transmute(self) }
+    }
     pub fn get<S>(&mut self, coupon: Coupon<D, S>) -> (T, State<S>) {
-        let me: &mut Getter<T> = unsafe { std::mem::transmute(self) };
         let _ = coupon;
-        (me.get(), unsafe { State::fresh() })
+        (self.as_getter().get(), unsafe { State::fresh() })
     }
 }
 impl<D: Decimal, T> Grouped<D, Putter<T>> {
+    pub(crate) fn from_putter(x: Putter<T>) -> Self {
+        unsafe { transmute(x) }
+    }
+    fn as_putter(&mut self) -> &mut Putter<T> { // DO NOT EXPOSE
+        unsafe { transmute(self) }
+    }
     pub fn put<S>(&mut self, coupon: Coupon<D, S>, datum: T) -> (Option<T>, State<S>) {
-        let me: &mut Putter<T> = unsafe { std::mem::transmute(self) };
         let _ = coupon;
-        (me.put(datum), unsafe { State::fresh() })
+        (self.as_putter().put(datum), unsafe { State::fresh() })
     }
 }
 
-/// A token structure which can be consumed in a Safe<Putter<D, _>>::put
-/// or Safe<Getter<D, _>>::get invocation, being consumed in the process,
+/// A token structure which can be consumed in a Grouped<Putter<D, _>>::put
+/// or Grouped<Getter<D, _>>::get invocation, being consumed in the process,
 /// yielding a new state token, State<S>.
 pub struct Coupon<D: Decimal, S> {
     phantom: PhantomData<(D, S)>,
