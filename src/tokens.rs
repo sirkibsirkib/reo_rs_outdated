@@ -1,3 +1,4 @@
+use crate::proto::PortCommon;
 use crate::bitset::BitSet;
 use crate::proto::{Getter, Putter};
 use crate::LocId;
@@ -46,46 +47,41 @@ pub mod decimal {
 }
 use decimal::*;
 
-pub struct Safe<D: Decimal, T> {
-    original_id: LocId,
-    inner: T,
-    phantom: PhantomData<D>,
+/// Safe<_, Putter<T>> and Putter<T> have the same in-memory representation
+/// Likewise with Getter. Note that dropping Safe<_, Putter<T>> will NOT
+/// un-claim the port, as Putter<T> does, as Safe<> corresponds to some PortGroup
+pub struct Grouped<D: Decimal, T> {
+    c: PortCommon,
+    phantom: PhantomData<(D,T)>,
 }
 
 impl<T: 'static> Getter<T> {
-    pub unsafe fn safe_wrap<D: Decimal>(mut self, leader: LocId) -> Safe<D, Self> {
-        let original_id = self.id;
-        self.id = leader;
-        Safe {
-            inner: self,
-            phantom: PhantomData::default(),
-            original_id,
+    pub(crate) fn safe_wrap<D: Decimal>(mut self) -> Grouped<D, Self> {
+        unsafe {
+            std::mem::transmute(self)
         }
     }
 }
 impl<T: 'static> Putter<T> {
-    pub unsafe fn safe_wrap<D: Decimal>(mut self, leader: LocId) -> Safe<D, Self> {
-        let original_id = self.id;
-        self.id = leader;
-        Safe {
-            inner: self,
-            phantom: PhantomData::default(),
-            original_id,
+    pub(crate) fn safe_wrap<D: Decimal>(mut self) -> Grouped<D, Self> {
+        unsafe {
+            std::mem::transmute(self)
         }
     }
 }
 
-impl<D: Decimal, T> Safe<D, Getter<T>> {
+impl<D: Decimal, T> Grouped<D, Getter<T>> {
     pub fn get<S>(&mut self, coupon: Coupon<D, S>) -> (T, State<S>) {
+        let me: &mut Getter<T> = unsafe {std::mem::transmute(self)};
         let _ = coupon;
-        (self.inner.get(), unsafe { State::fresh() })
+        (me.get(), unsafe { State::fresh() })
     }
 }
-impl<D: Decimal, T> Safe<D, Putter<T>> {
-    pub fn put<S>(&mut self, coupon: Coupon<D, S>, datum: T) -> State<S> {
+impl<D: Decimal, T> Grouped<D, Putter<T>> {
+    pub fn put<S>(&mut self, coupon: Coupon<D, S>, datum: T) -> (Option<T>, State<S>) {
+        let me: &mut Putter<T> = unsafe {std::mem::transmute(self)};
         let _ = coupon;
-        self.inner.put(datum);
-        unsafe { State::fresh() }
+        (me.put(datum), unsafe { State::fresh() })
     }
 }
 

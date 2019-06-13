@@ -566,11 +566,16 @@ enum Action {
     },
 }
 
+
+pub(crate) struct PortCommon {
+    p: Arc<ProtoAll>,
+    id: LocId,    
+}
+
 /// User-facing port-object with the role of "Getter" of type T.
 pub struct Getter<T: 'static> {
-    p: Arc<ProtoAll>,
+    c: PortCommon,
     phantom: PhantomData<T>,
-    pub(crate) id: LocId,
 }
 unsafe impl<T: 'static> Send for Getter<T> {}
 unsafe impl<T: 'static> Sync for Getter<T> {}
@@ -579,17 +584,17 @@ impl<T: 'static> Getter<T> {
 
     /// combination of `get_signal` and `get_timeout`
     pub fn get_signal_timeout(&mut self, timeout: Duration) -> bool {
-        let po_ge = self.p.r.get_po_ge(self.id).expect(Self::BAD_ID);
+        let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
         po_ge.set_want_data(false);
-        self.p.w.lock().enter(&self.p.r, self.id);
-        po_ge.await_msg_timeout(&self.p, timeout, self.id).is_some()
+        self.c.p.w.lock().enter(&self.c.p.r, self.c.id);
+        po_ge.await_msg_timeout(&self.c.p, timeout, self.c.id).is_some()
     }
     /// like `get`, but doesn't acquire any data. Useful for participation
     /// in synchrony when the data isn't useful.
     pub fn get_signal(&mut self) {
-        let po_ge = self.p.r.get_po_ge(self.id).expect(Self::BAD_ID);
+        let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
         po_ge.set_want_data(false);
-        self.p.w.lock().enter(&self.p.r, self.id);
+        self.c.p.w.lock().enter(&self.c.p.r, self.c.id);
         po_ge.dropbox.recv_nothing()
     }
     /// like `get` but attempts to return with `None` if the provided duration
@@ -598,35 +603,35 @@ impl<T: 'static> Getter<T> {
     /// if the protocol initiates a data movement and other peers delay completion
     /// of the firing.
     pub fn get_timeout(&mut self, timeout: Duration) -> Option<T> {
-        let po_ge = self.p.r.get_po_ge(self.id).expect(Self::BAD_ID);
+        let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
         po_ge.set_want_data(true);
-        self.p.w.lock().enter(&self.p.r, self.id);
+        self.c.p.w.lock().enter(&self.c.p.r, self.c.id);
         let mut datum: MaybeUninit<T> = MaybeUninit::uninit();
         let out_ptr = unsafe { transmute(datum.as_mut_ptr()) };
         unsafe {
-            let msg = po_ge.await_msg_timeout(&self.p, timeout, self.id)?;
-            po_ge.participate_with_msg(&self.p, msg, out_ptr);
+            let msg = po_ge.await_msg_timeout(&self.c.p, timeout, self.c.id)?;
+            po_ge.participate_with_msg(&self.c.p, msg, out_ptr);
             Some(datum.assume_init())
         }
     }
     /// participates in a synchronous firing, acquiring data from some
     /// putter-peer in accordance with the protocol's definition
     pub fn get(&mut self) -> T {
-        let po_ge = self.p.r.get_po_ge(self.id).expect(Self::BAD_ID);
+        let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
         po_ge.set_want_data(true);
-        self.p.w.lock().enter(&self.p.r, self.id);
+        self.c.p.w.lock().enter(&self.c.p.r, self.c.id);
         let mut datum: MaybeUninit<T> = MaybeUninit::uninit();
         let out_ptr = unsafe { transmute(datum.as_mut_ptr()) };
         unsafe {
-            po_ge.participate_with_msg(&self.p, po_ge.dropbox.recv(), out_ptr);
+            po_ge.participate_with_msg(&self.c.p, po_ge.dropbox.recv(), out_ptr);
             datum.assume_init()
         }
     }
 }
 impl<T: 'static> Drop for Getter<T> {
     fn drop(&mut self) {
-        self.p.w.lock().unclaimed_ports.insert(
-            self.id,
+        self.c.p.w.lock().unclaimed_ports.insert(
+            self.c.id,
             PortInfo {
                 type_id: TypeId::of::<T>(),
                 role: PortRole::Getter,
@@ -645,9 +650,8 @@ pub enum PutTimeoutResult<T> {
 
 /// User-facing port-object with the role of "Putter" of type T.
 pub struct Putter<T: 'static> {
-    p: Arc<ProtoAll>,
+    c: PortCommon,
     phantom: PhantomData<T>,
-    pub(crate) id: LocId,
 }
 unsafe impl<T: 'static> Send for Putter<T> {}
 unsafe impl<T: 'static> Sync for Putter<T> {}
@@ -658,10 +662,10 @@ impl<T: 'static> Putter<T> {
     /// Combination of `put_timeout` and `put_lossy`.
     pub fn put_timeout_lossy(&mut self, datum: T, timeout: Duration) -> PutTimeoutResult<()> {
         use PutTimeoutResult::*;
-        let po_pu = self.p.r.get_po_pu(self.id).expect(Self::BAD_ID);
+        let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
         unsafe { po_pu.p.set_ptr(transmute(&datum)) };
-        self.p.w.lock().enter(&self.p.r, self.id);
-        let num_movers_msg = match po_pu.await_msg_timeout(&self.p, timeout, self.id) {
+        self.c.p.w.lock().enter(&self.c.p.r, self.c.id);
+        let num_movers_msg = match po_pu.await_msg_timeout(&self.c.p, timeout, self.c.id) {
             Some(msg) => msg,
             None => {
                 drop(datum);
@@ -686,13 +690,13 @@ impl<T: 'static> Putter<T> {
     /// movement and other peers delay completion of the firing.
     pub fn put_timeout(&mut self, datum: T, timeout: Duration) -> PutTimeoutResult<T> {
         use PutTimeoutResult::*;
-        let po_pu = self.p.r.get_po_pu(self.id).expect(Self::BAD_ID);
+        let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
         unsafe { po_pu.p.set_ptr(transmute(&datum)) };
-        self.p.w.lock().enter(&self.p.r, self.id);
+        self.c.p.w.lock().enter(&self.c.p.r, self.c.id);
         let num_movers_msg = match po_pu.dropbox.recv_timeout(timeout) {
             Some(msg) => msg,
             None => {
-                if self.p.w.lock().active.ready.set_to(self.id, false) {
+                if self.c.p.w.lock().active.ready.set_to(self.c.id, false) {
                     return Timeout(datum);
                 } else {
                     po_pu.dropbox.recv()
@@ -713,9 +717,9 @@ impl<T: 'static> Putter<T> {
     /// was observed by getters in a synchronous protocol rule, but not consumed
     /// by any getter.   
     pub fn put(&mut self, datum: T) -> Option<T> {
-        let po_pu = self.p.r.get_po_pu(self.id).expect(Self::BAD_ID);
+        let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
         unsafe { po_pu.p.set_ptr(transmute(&datum)) };
-        self.p.w.lock().enter(&self.p.r, self.id);
+        self.c.p.w.lock().enter(&self.c.p.r, self.c.id);
         let num_movers_msg = po_pu.dropbox.recv();
         match num_movers_msg {
             0 => Some(datum),
@@ -729,9 +733,9 @@ impl<T: 'static> Putter<T> {
     /// This function mirrors the API of that of `put`, returning `Some` if the
     /// value was not consumed, but instead drops the datum in place.
     pub fn put_lossy(&mut self, datum: T) -> Option<()> {
-        let po_pu = self.p.r.get_po_pu(self.id).expect(Self::BAD_ID);
+        let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
         unsafe { po_pu.p.set_ptr(transmute(&datum)) };
-        self.p.w.lock().enter(&self.p.r, self.id);
+        self.c.p.w.lock().enter(&self.c.p.r, self.c.id);
         let num_movers_msg = po_pu.dropbox.recv();
         match num_movers_msg {
             0 => {
@@ -748,8 +752,8 @@ impl<T: 'static> Putter<T> {
 }
 impl<T: 'static> Drop for Putter<T> {
     fn drop(&mut self) {
-        self.p.w.lock().unclaimed_ports.insert(
-            self.id,
+        self.c.p.w.lock().unclaimed_ports.insert(
+            self.c.id,
             PortInfo {
                 type_id: TypeId::of::<T>(),
                 role: PortRole::Putter,

@@ -107,16 +107,18 @@ impl HasUnclaimedPorts for Arc<ProtoAll> {
             if x.type_id == TypeId::of::<T>() {
                 let role = x.role;
                 let _ = w.unclaimed_ports.remove(&id);
+                let c = PortCommon {
+                    p: self.clone(),
+                    id,
+                };
                 match role {
                     PortRole::Putter => GotPutter(Putter {
-                        p: self.clone(),
-                        id,
-                        phantom: PhantomData::default(),
+                        c,
+                        phantom: Default::default(),
                     }),
                     PortRole::Getter => GotGetter(Getter {
-                        p: self.clone(),
-                        id,
-                        phantom: PhantomData::default(),
+                        c,
+                        phantom: Default::default(),
                     }),
                 }
             } else {
@@ -133,11 +135,11 @@ pub trait HasProto {
 }
 impl<T: 'static> HasProto for Putter<T> {
     fn get_proto(&self) -> &Arc<ProtoAll> {
-        &self.p
+        &self.c.p
     }
 }
 impl<T: 'static> HasProto for Getter<T> {
     fn get_proto(&self) -> &Arc<ProtoAll> {
-        &self.p
+        &self.c.p
     }
 }
