@@ -32,14 +32,11 @@ impl ProtoDef {
         let r = ProtoR {
             mem_data,
             spaces,
-            // me_pu,
-            // po_pu,
-            // po_ge,
+            rules,
         };
         let unclaimed_ports = self.port_info.iter().copied().enumerate().collect();
         let w = Mutex::new(ProtoW {
             memory_bits,
-            rules,
             active: ProtoActive {
                 ready,
                 free_mems,

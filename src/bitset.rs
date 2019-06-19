@@ -1,3 +1,4 @@
+use std::iter::FromIterator;
 use itertools::izip;
 use std::fmt;
 
@@ -71,19 +72,19 @@ impl<'a, 'b> Iterator for AndIter<'a, 'b> {
         }
     }
 }
-
-impl BitSet {
-    // INVARIANT: NO TRAILING ZERO CHUNKS
-    const BYTES_PER_CHUNK: usize = std::mem::size_of::<usize>();
-    const BITS_PER_CHUNK: usize = Self::BYTES_PER_CHUNK * 8;
-
-    pub fn from_set_iter<I: Iterator<Item = usize>>(it: I) -> Self {
+impl FromIterator<usize> for BitSet {
+    fn from_iter<I: IntoIterator<Item=usize>>(iter: I) -> Self {
         let mut me = BitSet::default();
-        for i in it {
+        for i in iter {
             me.set_to(i, true);
         }
         me
     }
+}
+impl BitSet {
+    // INVARIANT: NO TRAILING ZERO CHUNKS
+    const BYTES_PER_CHUNK: usize = std::mem::size_of::<usize>();
+    const BITS_PER_CHUNK: usize = Self::BYTES_PER_CHUNK * 8;
 
     pub fn from_chunks<I: Iterator<Item = usize>>(it: I) -> Self {
         let data = it.collect();

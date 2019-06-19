@@ -19,12 +19,12 @@ impl EndlessIter for Vec<usize> {
 /// 1. Definition of the `ProtoDef` which defines structure, behaviour etc.
 /// 2. Defines the interface which allows
 ///     for the convenient `instantiate_and_claim` function.
-pub trait Proto: Sized {
-    type Interface: Sized;
-    fn proto_def() -> ProtoDef;
-    fn instantiate() -> Arc<ProtoAll>;
-    fn instantiate_and_claim() -> Self::Interface;
-}
+// pub trait Proto: Sized {
+//     type Interface: Sized;
+//     fn proto_def() -> ProtoDef;
+//     fn instantiate() -> Arc<ProtoAll>;
+//     fn instantiate_and_claim() -> Self::Interface;
+// }
 
 pub(crate) trait HasMsgDropBox {
     fn get_dropbox(&self) -> &MsgDropbox;
@@ -142,4 +142,10 @@ impl<T: 'static> HasProto for Getter<T> {
     fn get_proto(&self) -> &Arc<ProtoAll> {
         &self.c.p
     }
+}
+
+
+pub trait Proto: Sized {
+    const TOPOLOGY: ProtoDef;
+    fn instantiate() -> Arc<ProtoAll>;  
 }

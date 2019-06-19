@@ -1,4 +1,4 @@
-use crate::{proto::definition::ProtoDef, LocId, RuleId};
+use crate::{proto::nu_def::ProtoDef, LocId, RuleId};
 use hashbrown::{HashMap, HashSet};
 use itertools::Itertools;
 use std::fmt;

@@ -5,7 +5,8 @@ use itertools::izip;
 
 pub mod abstraction;
 
-mod nu_def;
+pub mod nu_def;
+use nu_def::{ProtoDef, Formula};
 
 pub mod reflection;
 use reflection::TypeInfo;
@@ -13,8 +14,8 @@ use reflection::TypeInfo;
 pub mod traits;
 use traits::{HasMsgDropBox, HasUnclaimedPorts, MaybeClone, MaybeCopy, MaybePartialEq, Proto};
 
-pub mod definition;
-pub use definition::{ActionDef, ProtoDef, RuleDef};
+// pub mod definition;
+// pub use definition::{ActionDef, ProtoDef, RuleDef};
 
 pub mod groups;
 
@@ -232,7 +233,6 @@ impl<'a, 'b> DebugPrint for (&'a ProtoR, &'b ProtoW) {
 /// The portion of the protcol that is proected by the lock.
 struct ProtoW {
     memory_bits: BitSet,
-    rules: Vec<RunRule>,
     active: ProtoActive,
     commitment: Option<Commitment>,
     ready_tentative: BitSet,
@@ -268,7 +268,7 @@ impl ProtoW {
                     commitment.awaiting -= 1;
                     if commitment.awaiting == 0 {
                         // I was the last!
-                        let rule = &self.rules[commitment.rule_id];
+                        let rule = &r.rules[commitment.rule_id];
                         subtract_readiness(&mut self.active.ready, rule);
                         rule.fire(Firer {
                             r,
@@ -291,9 +291,9 @@ impl ProtoW {
     fn exhaust_rules(&mut self, r: &ProtoR) {
         'repeat: loop {
             // keep looping until 0 rules can fire
-            for (rule_id, rule) in self.rules.iter().enumerate() {
+            for (rule_id, rule) in r.rules.iter().enumerate() {
                 let bits_ready = is_ready(&self.memory_bits, &self.active.ready, rule);
-                if bits_ready && rule.guard_pred.eval(r) {
+                if bits_ready && unsafe { r.eval_formula(rule.guard_pred) } { // safe if Equal functions are sound
                     println!("FIRING {}: {:?}", rule_id, rule);
                     println!("FIRING BEFORE:");
                     (r, self as &ProtoW).debug_print();
@@ -402,10 +402,22 @@ pub struct ProtoR {
     /// here, it's just stored inside ProtoR to ensure it's freed at the right time.
     #[allow(dead_code)]
     mem_data: Vec<u8>,
-
+    rules: Vec<RunRule>,
     spaces: Vec<Space>,
 }
 impl ProtoR {
+    unsafe fn eval_formula(&self, guard: Formula) -> bool {
+        use nu_def::Formula::*;
+        let f = |formula: &Formula| self.eval_formula(*formula);
+        match guard {
+            True => true,
+            None(x) => !x.iter().any(f),
+            And(x) => !x.iter().all(f),
+            Or(x) => x.iter().any(f),
+            Eq(a, b) => unsafe { self.equal_put_data(a, b) },
+        }
+    }
+
     unsafe fn equal_put_data(&self, a: LocId, b: LocId) -> bool {
         let clos = |id| match self.get_space(id) {
             Some(Space::Memo(space)) => (&space.p.type_info, space.p.get_ptr()),
@@ -551,17 +563,18 @@ impl<T: 'static> TryInto<Getter<T>> for ClaimResult<T> {
 struct RunRule {
     guard_ready: BitSet,
     guard_full: BitSet,
-    guard_pred: GuardPred,
+    guard_pred: nu_def::Formula,
     assign_vals: BitSet,
     assign_mask: BitSet,
-    actions: Vec<Action>,
+    actions: Vec<RunAction>,
 }
 impl RunRule {
     fn fire(&self, mut f: Firer) {
         for a in self.actions.iter() {
+            use RunAction::*;
             match a {
-                Action::PortPut { putter, mg, pg } => f.port_to_locs(*putter, mg, pg),
-                Action::MemPut { putter, mg, pg } => f.mem_to_locs(*putter, mg, pg),
+                PortPut { putter, mg, pg } => f.port_to_locs(*putter, mg, pg),
+                MemPut { putter, mg, pg } => f.mem_to_locs(*putter, mg, pg),
             }
         }
     }
@@ -569,7 +582,7 @@ impl RunRule {
 
 /// Structure corresponing to one data-movement action (with 1 putter and N getters)
 #[derive(Debug)]
-enum Action {
+enum RunAction {
     PortPut {
         putter: LocId,
         mg: Vec<LocId>,
@@ -942,29 +955,16 @@ impl<'a> Firer<'a> {
     }
 }
 
-/// Recursively-defined predicate over putter-and-memory data
-// TODO check if we ever need to be able to define checks that reason about OTHER ports / memcells
-#[derive(Debug, Clone)]
-pub enum GuardPred {
-    True,
-    None(Vec<GuardPred>),
-    And(Vec<GuardPred>),
-    Or(Vec<GuardPred>),
-    Eq(LocId, LocId),
-}
-impl GuardPred {
-    fn eval(&self, r: &ProtoR) -> bool {
-        use GuardPred::*;
-        let clos = |x| Self::eval(x, r);
-        match self {
-            True => true,
-            None(x) => !x.iter().any(clos),
-            And(x) => !x.iter().all(clos),
-            Or(x) => x.iter().any(clos),
-            Eq(a, b) => unsafe { r.equal_put_data(*a, *b) },
-        }
-    }
-}
+// /// Recursively-defined predicate over putter-and-memory data
+// // TODO check if we ever need to be able to define checks that reason about OTHER ports / memcells
+// #[derive(Debug, Clone)]
+// pub enum GuardPred {
+//     True,
+//     None(Vec<GuardPred>),
+//     And(Vec<GuardPred>),
+//     Or(Vec<GuardPred>),
+//     Eq(LocId, LocId),
+// }
 
 /// Enumeration that encodes one of four flags.
 /// Not user-facing
@@ -1035,128 +1035,128 @@ impl DataGetCase {
 
 /////////////////// TESTS ////////////////////////
 
-mod tests {
-    struct Alternator<T0>(PhantomData<(T0,)>);
-    impl<T0: 'static> Proto for Alternator<T0> {
-        type Interface = (Putter<T0>, Putter<T0>, Getter<T0>);
-        fn proto_def() -> ProtoDef {
-            use GuardPred::*;
-            use PortRole::*;
-            ProtoDef {
-                type_info: type_info_map![T0],
-                port_info: port_info![(T0, Putter), (T0, Putter), (T0, Getter)],
-                mem_types: type_ids![T0],
-                rule_defs: vec![new_rule_def![True; 0=>2; 1=>3], new_rule_def![True; 3=>2]],
-            }
-        }
-        fn instantiate() -> Arc<ProtoAll> {
-            Arc::new(Self::proto_def().build().expect("I goofd!"))
-        }
-        fn instantiate_and_claim() -> Self::Interface {
-            let p = Self::instantiate();
-            putters_getters![p => 0, 1, 2]
-        }
-    }
+// mod tests {
+//     struct Alternator<T0>(PhantomData<(T0,)>);
+//     impl<T0: 'static> Proto for Alternator<T0> {
+//         type Interface = (Putter<T0>, Putter<T0>, Getter<T0>);
+//         fn proto_def() -> ProtoDef {
+//             use GuardPred::*;
+//             use PortRole::*;
+//             ProtoDef {
+//                 type_info: type_info_map![T0],
+//                 port_info: port_info![(T0, Putter), (T0, Putter), (T0, Getter)],
+//                 mem_types: type_ids![T0],
+//                 rule_defs: vec![new_rule_def![True; 0=>2; 1=>3], new_rule_def![True; 3=>2]],
+//             }
+//         }
+//         fn instantiate() -> Arc<ProtoAll> {
+//             Arc::new(Self::proto_def().build().expect("I goofd!"))
+//         }
+//         fn instantiate_and_claim() -> Self::Interface {
+//             let p = Self::instantiate();
+//             putters_getters![p => 0, 1, 2]
+//         }
+//     }
 
-    use super::*;
-    #[test]
-    fn alternator_run() {
-        let (mut p1, mut p2, mut g3) = Alternator::instantiate_and_claim();
-        crossbeam::scope(|s| {
-            s.spawn(move |_| {
-                for i in 0..5 {
-                    p1.put(i);
-                }
-            });
+//     use super::*;
+//     #[test]
+//     fn alternator_run() {
+//         let (mut p1, mut p2, mut g3) = Alternator::instantiate_and_claim();
+//         crossbeam::scope(|s| {
+//             s.spawn(move |_| {
+//                 for i in 0..5 {
+//                     p1.put(i);
+//                 }
+//             });
 
-            s.spawn(move |_| {
-                for i in 0..7 {
-                    let r = p2.put_timeout(i, Duration::from_millis(1900));
-                    println!("r={:?}", r);
-                }
-            });
+//             s.spawn(move |_| {
+//                 for i in 0..7 {
+//                     let r = p2.put_timeout(i, Duration::from_millis(1900));
+//                     println!("r={:?}", r);
+//                 }
+//             });
 
-            s.spawn(move |_| {
-                for _ in 0..5 {
-                    // g3.get_signal(); g3.get_signal();
+//             s.spawn(move |_| {
+//                 for _ in 0..5 {
+//                     // g3.get_signal(); g3.get_signal();
 
-                    println!("GOT {:?}, {:?}", g3.get(), g3.get_signal());
-                    milli_sleep!(100);
-                }
-            });
-        })
-        .expect("WENT BAD");
-    }
+//                     println!("GOT {:?}, {:?}", g3.get(), g3.get_signal());
+//                     milli_sleep!(100);
+//                 }
+//             });
+//         })
+//         .expect("WENT BAD");
+//     }
 
-    struct Fifo3<T0>(PhantomData<(T0,)>);
-    impl<T0: 'static> Proto for Fifo3<T0> {
-        type Interface = (Putter<T0>, Getter<T0>);
-        fn proto_def() -> ProtoDef {
-            use GuardPred::*;
-            use PortRole::*;
-            ProtoDef {
-                type_info: type_info_map![T0],
-                port_info: port_info![(T0, Putter), (T0, Getter)],
-                mem_types: type_ids![T0, T0, T0],
-                rule_defs: vec![
-                    new_rule_def![True; 0=>2],
-                    new_rule_def![True; 2=>3],
-                    new_rule_def![True; 3=>4],
-                    new_rule_def![True; 4=>1],
-                ],
-            }
-        }
-        fn instantiate() -> Arc<ProtoAll> {
-            Arc::new(Self::proto_def().build().expect("I goofd!"))
-        }
-        fn instantiate_and_claim() -> Self::Interface {
-            let p = Self::instantiate();
-            putters_getters![p => 0, 1]
-        }
-    }
+//     struct Fifo3<T0>(PhantomData<(T0,)>);
+//     impl<T0: 'static> Proto for Fifo3<T0> {
+//         type Interface = (Putter<T0>, Getter<T0>);
+//         fn proto_def() -> ProtoDef {
+//             use GuardPred::*;
+//             use PortRole::*;
+//             ProtoDef {
+//                 type_info: type_info_map![T0],
+//                 port_info: port_info![(T0, Putter), (T0, Getter)],
+//                 mem_types: type_ids![T0, T0, T0],
+//                 rule_defs: vec![
+//                     new_rule_def![True; 0=>2],
+//                     new_rule_def![True; 2=>3],
+//                     new_rule_def![True; 3=>4],
+//                     new_rule_def![True; 4=>1],
+//                 ],
+//             }
+//         }
+//         fn instantiate() -> Arc<ProtoAll> {
+//             Arc::new(Self::proto_def().build().expect("I goofd!"))
+//         }
+//         fn instantiate_and_claim() -> Self::Interface {
+//             let p = Self::instantiate();
+//             putters_getters![p => 0, 1]
+//         }
+//     }
 
-    #[test]
-    fn fifo_3_run() {
-        let (mut p1, mut g1) = Fifo3::instantiate_and_claim();
-        crossbeam::scope(|s| {
-            s.spawn(move |_| {
-                for i in 0..1 {
-                    p1.put(i);
-                }
-            });
+//     #[test]
+//     fn fifo_3_run() {
+//         let (mut p1, mut g1) = Fifo3::instantiate_and_claim();
+//         crossbeam::scope(|s| {
+//             s.spawn(move |_| {
+//                 for i in 0..1 {
+//                     p1.put(i);
+//                 }
+//             });
 
-            s.spawn(move |_| {
-                for _ in 0..1 {
-                    let r = g1.get();
-                    println!("OUT::::::::::: r={:?}", r);
-                }
-            });
-        })
-        .expect("WENT BAD");
-    }
+//             s.spawn(move |_| {
+//                 for _ in 0..1 {
+//                     let r = g1.get();
+//                     println!("OUT::::::::::: r={:?}", r);
+//                 }
+//             });
+//         })
+//         .expect("WENT BAD");
+//     }
 
-    #[test]
-    fn fifo_3_group() {
-        let handle = Fifo3::<i8>::instantiate();
-        let out = api_begin(&handle, my_func).expect("O NO");
-        println!("DONE {}", out);
-    }
-    fn my_func(ports: Interface<i8>) -> u128 {
-        let _ = ports;
-        5
-    }
-    //// ABOVE LINE: what user sees. BELOW LINE: what API must generate
-    use crate::proto::groups::{GroupAddError, PortGroup};
-    use crate::tokens::{decimal::*, Grouped};
-    use crate::ProtoHandle;
+//     #[test]
+//     fn fifo_3_group() {
+//         let handle = Fifo3::<i8>::instantiate();
+//         let out = api_begin(&handle, my_func).expect("O NO");
+//         println!("DONE {}", out);
+//     }
+//     fn my_func(ports: Interface<i8>) -> u128 {
+//         let _ = ports;
+//         5
+//     }
+//     //// ABOVE LINE: what user sees. BELOW LINE: what API must generate
+//     use crate::proto::groups::{GroupAddError, PortGroup};
+//     use crate::tokens::{decimal::*, Grouped};
+//     use crate::ProtoHandle;
 
-    type Interface<T> = (Grouped<E0, Putter<T>>, Grouped<E0, Getter<T>>);
-    fn api_begin<F, R, T: 'static>(handle: &ProtoHandle, func: F) -> Result<R, GroupAddError>
-    where
-        F: FnOnce(Interface<T>) -> R,
-    {
-        let mut group = PortGroup::new();
-        let ports = (group.add_putter(handle, 0)?, group.add_getter(handle, 1)?);
-        Ok(func(ports))
-    }
-}
+//     type Interface<T> = (Grouped<E0, Putter<T>>, Grouped<E0, Getter<T>>);
+//     fn api_begin<F, R, T: 'static>(handle: &ProtoHandle, func: F) -> Result<R, GroupAddError>
+//     where
+//         F: FnOnce(Interface<T>) -> R,
+//     {
+//         let mut group = PortGroup::new();
+//         let ports = (group.add_putter(handle, 0)?, group.add_getter(handle, 1)?);
+//         Ok(func(ports))
+//     }
+// }
