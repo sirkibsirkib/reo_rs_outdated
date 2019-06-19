@@ -1,29 +1,18 @@
-
-
-use std::marker::PhantomData;
-use std::sync::Arc;
 use crate::LocId;
 use hashbrown::HashMap;
 use std::any::TypeId;
+use std::marker::PhantomData;
+use std::sync::Arc;
 
-pub enum ProtoVerifyError {
-
-}
 
 #[derive(Debug, Copy, Clone)]
 pub struct ProtoDef {
     pub rules: &'static [RuleDef],
 }
-impl ProtoDef {
-    pub fn verify() -> Result<(), ProtoVerifyError> {
-        // TODO
-        Ok(())
-    }
-}
 
 #[derive(Debug, Copy, Clone)]
 pub struct RuleDef {
-    pub guard: Formula, 
+    pub guard: Formula,
     pub actions: &'static [ActionDef],
 }
 
@@ -43,7 +32,10 @@ pub enum Formula {
     Eq(LocId, LocId),
 }
 
-
+#[derive(Debug)]
+pub enum ProtoVerifyError {
+    // TODO
+}
 type Filled = bool;
 struct ProtoBuilder<P: Proto> {
     phantom: PhantomData<P>,
@@ -52,7 +44,7 @@ struct ProtoBuilder<P: Proto> {
     contents: HashMap<*mut u8, (Filled, TypeId)>,
 }
 impl<P: Proto> ProtoBuilder<P> {
-    fn new(proto_def: ProtoDef) -> Self {
+    pub fn new(proto_def: ProtoDef) -> Self {
         Self {
             phantom: PhantomData::default(),
             proto_def,
@@ -60,11 +52,20 @@ impl<P: Proto> ProtoBuilder<P> {
             contents: HashMap::default(),
         }
     }
-    fn finish(self) -> Result<ProtoAll<P>, ()> {
+    pub fn init_memory<T: 'static>(&mut self, t: T) {
+        // TODO may do error
+        let _ = t;
+    }
+    pub fn finish(self) -> Result<ProtoAll<P>, ProtoVerifyError> {
+        self.verify()?;
         Ok(ProtoAll {
             p: Default::default(),
             mem_bytes: self.mem_bytes,
         })
+    }
+    fn verify(&self) -> Result<(), ProtoVerifyError> {
+        // TODO
+        Ok(())
     }
 }
 
@@ -80,15 +81,20 @@ trait Proto: Sized {
 
 struct Fifo3;
 impl Proto for Fifo3 {
-    const PROTO_DEF: ProtoDef = ProtoDef{ rules: &[
-        RuleDef { guard: Formula::True,
-            actions: &[
-                ActionDef { putter:0, getters: &[1,2] },
-            ]
-        }
-    ]};
+
+    const PROTO_DEF: ProtoDef = ProtoDef {
+        rules: &[RuleDef {
+            guard: Formula::True,
+            actions: &[ActionDef {
+                putter: 0,
+                getters: &[1, 2],
+            }],
+        }],
+    };
+
+
     fn instantiate() -> Arc<ProtoAll<Self>> {
         let mem = ProtoBuilder::new(Self::PROTO_DEF);
         Arc::new(mem.finish().expect("Bad Reo-generated code"))
     }
-} 
+}

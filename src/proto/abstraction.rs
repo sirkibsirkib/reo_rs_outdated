@@ -1,5 +1,3 @@
-
-
 use crate::LocId;
 
 #[derive(Debug, Clone, Copy)]
@@ -26,13 +24,10 @@ pub enum Pred<'a> {
     Eq(LocId, LocId),
 }
 
-
-pub const PROTO: Proto<'static> = Proto(&[
-    Rule {
-    	pred: Pred::True,
-        actions: &[
-            Action {putter: 0, getters: &[0,1,2]},
-        ]
-    },
-]);
-
+pub const PROTO: Proto<'static> = Proto(&[Rule {
+    pred: Pred::True,
+    actions: &[Action {
+        putter: 0,
+        getters: &[0, 1, 2],
+    }],
+}]);
