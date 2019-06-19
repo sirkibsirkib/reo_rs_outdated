@@ -5,6 +5,8 @@ use itertools::izip;
 
 pub mod abstraction;
 
+mod nu_def;
+
 pub mod reflection;
 use reflection::TypeInfo;
 
