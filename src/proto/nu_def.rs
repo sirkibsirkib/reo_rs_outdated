@@ -1,3 +1,4 @@
+use crate::proto::traits::Proto;
 use crate::proto::{PortInfo, PortRole};
 use crate::proto::{RunRule, RunAction};
 use crate::proto::{ProtoAll, ProtoActive, ProtoW, ProtoR, Space};
@@ -10,30 +11,29 @@ use parking_lot::Mutex;
 use crate::bitset::BitSet;
 
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub struct ProtoDef {
-    pub rules: &'static [RuleDef],
+    pub rules: Vec<RuleDef>,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub struct RuleDef {
     pub guard: Formula,
-    pub actions: &'static [ActionDef],
+    pub actions: Vec<ActionDef>,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub struct ActionDef {
     pub putter: usize,
-    pub getters: &'static [usize],
+    pub getters: Vec<LocId>,
 }
 
-type Formulae = &'static [Formula];
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub enum Formula {
     True,
-    And(Formulae),
-    Or(Formulae),
-    None(Formulae),
+    And(Vec<Formula>),
+    Or(Vec<Formula>),
+    None(Vec<Formula>),
     Eq(LocId, LocId),
 }
 
@@ -47,12 +47,12 @@ type Filled = bool;
 
 // TODO ProtoBuilder and ProtoAll are dummy-parameterized
 struct ProtoBuilder {
-    proto_def: ProtoDef,
+    proto_def: &'static ProtoDef,
     mem_data: Vec<u8>,
     contents: HashMap<LocId, (*mut u8, Filled, TypeId)>,
 }
 impl ProtoBuilder {
-    pub fn new(proto_def: ProtoDef) -> Self {
+    pub fn new(proto_def: &'static ProtoDef) -> Self {
         Self {
             proto_def,
             mem_data: vec![],
@@ -64,11 +64,13 @@ impl ProtoBuilder {
         let _ = t;
     }
     pub fn finish(self) -> Result<ProtoAll, ProtoBuildErr> {
-        let spaces: Vec<Space> = vec![];
+        // 
+
+        let spaces: Vec<Space> = vec![]; // todo
         let loc_kinds = HashMap::<LocId, LocKind>::default();
         let loc_types = HashMap::<LocId, TypeId>::default();
         let memory_bits = self.contents.iter()
-            .filter(|(id, (_, filled, _))| *filled)
+            .filter(|(_, (_, filled, _))| *filled)
             .map(|(id, _)| *id)
             .collect();
         let rules = self.build_rules(&loc_kinds)?;
@@ -77,7 +79,6 @@ impl ProtoBuilder {
             .filter(|(_,v)| v.is_mem())
             .map(|(k,_)| *k)
             .collect();
-
         let unclaimed_ports = loc_kinds.iter()
             .filter_map(|(id,t)| if t.is_port() {
                 let info = PortInfo {
@@ -94,8 +95,10 @@ impl ProtoBuilder {
             .collect();
         let free_mems: HashMap<TypeId, Vec<*mut u8>> = {
             let mut free_mems = HashMap::new();
-            for (k, v) in loc_kinds.iter() {
-
+            for (k, _) in loc_kinds.iter() {
+                let t = *loc_types.get(k).expect("WAH");
+                free_mems.entry(t).or_insert_with(|| vec![])
+                .push(self.contents.get(k).unwrap().0)
             }
             free_mems
         };  
@@ -240,27 +243,26 @@ impl LocKind {
     }
 }
 
-trait Proto: Sized {
-    const PROTO_DEF: ProtoDef;
-    fn instantiate() -> Arc<ProtoAll>;
+// trait Proto: Sized {
+//     const PROTO_DEF: ProtoDef;
+//     fn instantiate() -> Arc<ProtoAll>;
+// }
+
+
+
+lazy_static::lazy_static! {
+    static ref FIFO_DEF: ProtoDef = ProtoDef {
+        rules: vec![]
+    };
 }
 
 struct Fifo3;
 impl Proto for Fifo3 {
-
-    const PROTO_DEF: ProtoDef = ProtoDef {
-        rules: &[RuleDef {
-            guard: Formula::True,
-            actions: &[ActionDef {
-                putter: 0,
-                getters: &[1, 2],
-            }],
-        }],
-    };
-
-
+    fn definition() -> &'static ProtoDef {
+        &FIFO_DEF
+    }
     fn instantiate() -> Arc<ProtoAll> {
-        let mem = ProtoBuilder::new(Self::PROTO_DEF);
+        let mem = ProtoBuilder::new(Self::definition());
         Arc::new(mem.finish().expect("Bad Reo-generated code"))
     }
 }

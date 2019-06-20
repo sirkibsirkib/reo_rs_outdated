@@ -293,7 +293,7 @@ impl ProtoW {
             // keep looping until 0 rules can fire
             for (rule_id, rule) in r.rules.iter().enumerate() {
                 let bits_ready = is_ready(&self.memory_bits, &self.active.ready, rule);
-                if bits_ready && unsafe { r.eval_formula(rule.guard_pred) } { // safe if Equal functions are sound
+                if bits_ready && unsafe { r.eval_formula(&rule.guard_pred) } { // safe if Equal functions are sound
                     println!("FIRING {}: {:?}", rule_id, rule);
                     println!("FIRING BEFORE:");
                     (r, self as &ProtoW).debug_print();
@@ -406,15 +406,15 @@ pub struct ProtoR {
     spaces: Vec<Space>,
 }
 impl ProtoR {
-    unsafe fn eval_formula(&self, guard: Formula) -> bool {
+    unsafe fn eval_formula(&self, guard: &Formula) -> bool {
         use nu_def::Formula::*;
-        let f = |formula: &Formula| self.eval_formula(*formula);
+        let f = |formula: &Formula| self.eval_formula(formula);
         match guard {
             True => true,
             None(x) => !x.iter().any(f),
             And(x) => !x.iter().all(f),
             Or(x) => x.iter().any(f),
-            Eq(a, b) => unsafe { self.equal_put_data(a, b) },
+            Eq(a, b) => unsafe { self.equal_put_data(*a, *b) },
         }
     }
 

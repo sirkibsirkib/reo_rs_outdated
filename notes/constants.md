@@ -21,6 +21,10 @@ in either case:
 
 //FromStr is conventional for parsing. is in the prelude. has associated Err type.
 
+## Let's do:
+1. ProtoBuilder wants inputs of type T
+2. MyProto will have T: FromStr and then produce a type T
+advantages: best of both worlds
 
 -----------------------
 # Open Questions:
