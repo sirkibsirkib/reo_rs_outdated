@@ -3,10 +3,9 @@
 
 use itertools::izip;
 
-pub mod abstraction;
 
-pub mod nu_def;
-use nu_def::{Formula, ProtoDef};
+pub mod definition;
+use definition::{Formula, ProtoDef};
 
 pub mod reflection;
 use reflection::TypeInfo;
@@ -408,7 +407,7 @@ pub struct ProtoR {
 }
 impl ProtoR {
     unsafe fn eval_formula(&self, guard: &Formula) -> bool {
-        use nu_def::Formula::*;
+        use definition::Formula::*;
         let f = |formula: &Formula| self.eval_formula(formula);
         match guard {
             True => true,
@@ -564,7 +563,7 @@ impl<T: 'static> TryInto<Getter<T>> for ClaimResult<T> {
 struct RunRule {
     guard_ready: BitSet,
     guard_full: BitSet,
-    guard_pred: nu_def::Formula,
+    guard_pred: Formula,
     assign_vals: BitSet,
     assign_mask: BitSet,
     actions: Vec<RunAction>,
