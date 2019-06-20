@@ -335,7 +335,7 @@ impl LocKind {
 // }
 
 macro_rules! rule {
-    ( $formula:expr; $( $putter:tt => $( $getter:tt  ),* );*) => {{
+    ( $formula:expr ; $( $putter:tt => $( $getter:tt  ),* );*) => {{
         RuleDef {
             guard: $formula,
             actions: vec![
@@ -348,7 +348,7 @@ macro_rules! rule {
                         ),*
                     ],
                 }
-                );*
+                ),*
             ],
         }
     }};
@@ -357,7 +357,7 @@ macro_rules! rule {
 lazy_static::lazy_static! {
     static ref FIFO_DEF: ProtoDef = ProtoDef {
         rules: vec![
-            rule![Formula::True; 0 => 1],
+            rule![Formula::True; 0=>1,3,4 ; 6=>2,3],
         ]
     };
 }
