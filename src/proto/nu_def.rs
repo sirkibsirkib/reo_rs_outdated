@@ -334,18 +334,30 @@ impl LocKind {
 //     fn instantiate() -> Arc<ProtoAll>;
 // }
 
+macro_rules! rule {
+    ( $formula:expr; $( $putter:tt => $( $getter:tt  ),* );*) => {{
+        RuleDef {
+            guard: $formula,
+            actions: vec![
+                $(
+                ActionDef {
+                    putter: $putter,
+                    getters: vec![
+                        $(
+                            $getter
+                        ),*
+                    ],
+                }
+                );*
+            ],
+        }
+    }};
+}
+
 lazy_static::lazy_static! {
     static ref FIFO_DEF: ProtoDef = ProtoDef {
         rules: vec![
-            RuleDef {
-                guard: Formula::True,
-                actions: vec![
-                    ActionDef {
-                        putter: 0,
-                        getters: vec![1],
-                    }
-                ],
-            }
+            rule![Formula::True; 0 => 1],
         ]
     };
 }
