@@ -1,15 +1,15 @@
+use crate::proto::reflection::TypeInfo;
 use crate::proto::traits::Proto;
-use crate::proto::{PortInfo, PortRole};
-use crate::proto::{RunRule, RunAction};
-use crate::proto::{ProtoAll, ProtoActive, ProtoW, ProtoR, Space};
+use crate::proto::{MemoSpace, PoGeSpace, PoPuSpace, PortInfo, PortRole};
+use crate::proto::{ProtoActive, ProtoAll, ProtoR, ProtoW, Space};
+use crate::proto::{RunAction, RunRule};
 use crate::LocId;
-use hashbrown::{HashMap};
+use hashbrown::HashMap;
 use std::any::TypeId;
 
-use std::sync::Arc;
-use parking_lot::Mutex;
 use crate::bitset::BitSet;
-
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct ProtoDef {
@@ -39,17 +39,38 @@ pub enum Formula {
 
 #[derive(Debug, Copy, Clone)]
 pub enum ProtoBuildErr {
+    UnknownType { loc_id: LocId },
     SynchronousFiring { loc_id: LocId },
     LocCannotGet { loc_id: LocId },
     LocCannotPut { loc_id: LocId },
 }
 type Filled = bool;
 
+// #[derive(derive_new::new)]
+// struct MemCell<T> {
+//     x: Option<T>,
+// }
+// impl<T: 'static> AnonMemCell for MemCell<T> {
+//     fn type_id(&self) -> TypeId {
+//         TypeId::of::<T>()
+//     }
+
+//     fn is_filled(&self) -> bool {
+//         self.x.is_some()
+//     }
+// }
+
+// trait AnonMemCell {
+//     fn type_id(&self) -> TypeId;
+//     fn is_filled(&self) -> bool;
+// }
+
 // TODO ProtoBuilder and ProtoAll are dummy-parameterized
+type IsInit = bool;
 struct ProtoBuilder {
     proto_def: &'static ProtoDef,
     mem_data: Vec<u8>,
-    contents: HashMap<LocId, (*mut u8, Filled, TypeId)>,
+    contents: HashMap<LocId, (*mut u8, IsInit)>,
 }
 impl ProtoBuilder {
     pub fn new(proto_def: &'static ProtoDef) -> Self {
@@ -59,49 +80,98 @@ impl ProtoBuilder {
             contents: HashMap::default(),
         }
     }
-    pub fn init_memory<T: 'static>(&mut self, t: T) {
-        // TODO may do error
-        let _ = t;
+    pub fn uninit_memory<T: 'static>(&mut self, id: LocId) {
+        assert!(!self.contents.contains_key(&id));
+        let t: T = unsafe {
+            std::mem::MaybeUninit::uninit().assume_init()
+        };
+        let b = Box::new(t);
+        let b: *mut u8 = unsafe {
+            std::mem::transmute(b)
+        };
+        self.contents.insert(id, (b, false));
     }
-    pub fn finish(self) -> Result<ProtoAll, ProtoBuildErr> {
-        // 
+    pub fn init_memory<T: 'static>(&mut self, id: LocId, t: T) {
+        assert!(!self.contents.contains_key(&id));
+        let b = Box::new(t);
+        let b: *mut u8 = unsafe {
+            std::mem::transmute(b)
+        };
+        self.contents.insert(id, (b, true));
+    }
+    pub fn finish(mut self, loc_info: &HashMap<LocId, LocInfo>) -> Result<ProtoAll, ProtoBuildErr> {
+        /* here we construct a proto according to the specification.
+        Failure may be a result of:
+        1. The type for a used LocId is not derivable.
+        2. A LocId is associated with a type which is not provided in the TypeInfo map.
+        */
 
-        let spaces: Vec<Space> = vec![]; // todo
-        let loc_kinds = HashMap::<LocId, LocKind>::default();
-        let loc_types = HashMap::<LocId, TypeId>::default();
-        let memory_bits = self.contents.iter()
-            .filter(|(_, (_, filled, _))| *filled)
-            .map(|(id, _)| *id)
-            .collect();
-        let rules = self.build_rules(&loc_kinds)?;
-        let ready = loc_kinds
-            .iter()
-            .filter(|(_,v)| v.is_mem())
-            .map(|(k,_)| *k)
-            .collect();
-        let unclaimed_ports = loc_kinds.iter()
-            .filter_map(|(id,t)| if t.is_port() {
-                let info = PortInfo {
-                    role: match t.is_putter() {
-                        true => PortRole::Putter,
-                        false => PortRole::Getter,
-                    },
-                    type_id: *loc_types.get(id).expect("LocID has unbounded type!"),
-                };
-                Some((*id, info))
+        // TODO safe unwinding
+
+        let memory_bits = self.contents.iter().filter_map(|(&k,v)| {
+            if v.1 {
+                Some(k)
             } else {
                 None
+            }
+        }).collect();
+        let free_mems = {
+            let mut m = HashMap::default();
+            for (id, (ptr, is_free)) in self.contents.iter() {
+                if *is_free {
+                    let type_id = loc_info.get(id).unwrap().type_info.type_id;
+                    m.entry(type_id).or_insert_with(|| vec![]).push(*ptr);
+                }
+            }
+            m
+        };
+        let ready  = loc_info.iter().filter_map(|(&k, v)| {
+            if v.kind.is_mem() {
+                Some(k)
+            } else {
+                None
+            }
+        }).collect();
+        let unclaimed_ports = loc_info.iter().filter_map(|(&k, v)| {
+            let role = match v.kind {
+                LocKind::PortPutter => PortRole::Putter,
+                LocKind::PortGetter => PortRole::Getter,
+                LocKind::Memory => return None,
+            };
+            let info = PortInfo {
+                role,
+                type_id: v.type_info.type_id
+            };
+            Some((k, info))
+        }).collect();
+        let type_id_2_info: HashMap<_, _> = loc_info
+            .values()
+            .map(|loc_info| (loc_info.type_info.type_id, loc_info.type_info.clone()))
+            .collect();
+        let spaces = loc_info
+            .iter()
+            .map(|(id, loc_info)| match loc_info.kind {
+                LocKind::PortPutter => Space::PoPu(PoPuSpace::new(
+                    type_id_2_info
+                        .get(&loc_info.type_info.type_id)
+                        .unwrap()
+                        .clone(),
+                )),
+                LocKind::PortGetter => Space::PoGe(PoGeSpace::new()),
+                LocKind::Memory => Space::Memo({
+                    let ptr: *mut u8 = self.contents.remove(id).unwrap().0;
+                    let info = type_id_2_info
+                        .get(&loc_info.type_info.type_id)
+                        .unwrap()
+                        .clone();
+                    MemoSpace::new(ptr, info)
+                }),
             })
             .collect();
-        let free_mems: HashMap<TypeId, Vec<*mut u8>> = {
-            let mut free_mems = HashMap::new();
-            for (k, _) in loc_kinds.iter() {
-                let t = *loc_types.get(k).expect("WAH");
-                free_mems.entry(t).or_insert_with(|| vec![])
-                .push(self.contents.get(k).unwrap().0)
-            }
-            free_mems
-        };  
+
+        let rules = self.build_rules(&loc_info)?;
+
+        println!("{:?}", (&rules, &memory_bits, &ready));
         let r = ProtoR {
             mem_data: self.mem_data,
             spaces,
@@ -122,7 +192,10 @@ impl ProtoBuilder {
         Ok(ProtoAll { w, r })
     }
 
-    fn build_rules(&self, loc_kinds: &HashMap<LocId, LocKind>) -> Result<Vec<RunRule>, ProtoBuildErr> {
+    fn build_rules(
+        &self,
+        loc_info: &HashMap<LocId, LocInfo>,
+    ) -> Result<Vec<RunRule>, ProtoBuildErr> {
         use ProtoBuildErr::*;
         let mut rules = vec![];
         for (_rule_id, rule_def) in self.proto_def.rules.iter().enumerate() {
@@ -137,7 +210,7 @@ impl ProtoBuilder {
                 let mut pg = vec![];
 
                 let p = action_def.putter;
-                let p_type = loc_kinds.get(&p).unwrap();
+                let p_type = loc_info.get(&p).unwrap().kind;
                 if !p_type.is_putter() {
                     return Err(LocCannotPut { loc_id: p });
                 }
@@ -158,8 +231,7 @@ impl ProtoBuilder {
 
                 use itertools::Itertools;
                 for &g in action_def.getters.iter().unique() {
-
-                    let g_type = loc_kinds.get(&g).unwrap();
+                    let g_type = loc_info.get(&g).unwrap().kind;
                     if !g_type.is_getter() {
                         return Err(LocCannotGet { loc_id: g });
                     }
@@ -192,7 +264,7 @@ impl ProtoBuilder {
                     true => RunAction::MemPut { putter: p, mg, pg },
                 });
             }
-            let c = loc_kinds.keys().copied().max().unwrap_or(0);
+            let c = loc_info.keys().copied().max().unwrap_or(0);
             guard_ready.pad_trailing_zeroes_to_capacity(c);
             guard_full.pad_trailing_zeroes_to_capacity(c);
             assign_vals.pad_trailing_zeroes_to_capacity(c);
@@ -207,6 +279,20 @@ impl ProtoBuilder {
             });
         }
         Ok(rules)
+    }
+}
+
+#[derive(Debug)]
+pub struct LocInfo {
+    kind: LocKind,
+    type_info: Arc<TypeInfo>,
+}
+impl LocInfo {
+    fn new<T: 'static>(kind: LocKind) -> Self {
+        Self {
+            kind,
+            type_info: Arc::new(TypeInfo::new::<T>())
+        }
     }
 }
 
@@ -248,13 +334,23 @@ impl LocKind {
 //     fn instantiate() -> Arc<ProtoAll>;
 // }
 
-
-
 lazy_static::lazy_static! {
     static ref FIFO_DEF: ProtoDef = ProtoDef {
-        rules: vec![]
+        rules: vec![
+            RuleDef {
+                guard: Formula::True,
+                actions: vec![
+                    ActionDef {
+                        putter: 0,
+                        getters: vec![1],
+                    }
+                ],
+            }
+        ]
     };
 }
+
+
 
 struct Fifo3;
 impl Proto for Fifo3 {
@@ -263,6 +359,16 @@ impl Proto for Fifo3 {
     }
     fn instantiate() -> Arc<ProtoAll> {
         let mem = ProtoBuilder::new(Self::definition());
-        Arc::new(mem.finish().expect("Bad Reo-generated code"))
+        use LocKind::*;
+        let loc_info = map!{
+            0 => LocInfo::new::<u32>(PortPutter),
+            1 => LocInfo::new::<u32>(PortGetter),
+        };
+        Arc::new(mem.finish(&loc_info).expect("Bad Reo-generated code"))
     }
+}
+
+#[test]
+fn toottle() {
+    let x = Fifo3::instantiate();
 }

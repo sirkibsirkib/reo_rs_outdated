@@ -6,7 +6,7 @@ use itertools::izip;
 pub mod abstraction;
 
 pub mod nu_def;
-use nu_def::{ProtoDef, Formula};
+use nu_def::{Formula, ProtoDef};
 
 pub mod reflection;
 use reflection::TypeInfo;
@@ -293,7 +293,8 @@ impl ProtoW {
             // keep looping until 0 rules can fire
             for (rule_id, rule) in r.rules.iter().enumerate() {
                 let bits_ready = is_ready(&self.memory_bits, &self.active.ready, rule);
-                if bits_ready && unsafe { r.eval_formula(&rule.guard_pred) } { // safe if Equal functions are sound
+                if bits_ready && unsafe { r.eval_formula(&rule.guard_pred) } {
+                    // safe if Equal functions are sound
                     println!("FIRING {}: {:?}", rule_id, rule);
                     println!("FIRING BEFORE:");
                     (r, self as &ProtoW).debug_print();
@@ -954,17 +955,6 @@ impl<'a> Firer<'a> {
         });
     }
 }
-
-// /// Recursively-defined predicate over putter-and-memory data
-// // TODO check if we ever need to be able to define checks that reason about OTHER ports / memcells
-// #[derive(Debug, Clone)]
-// pub enum GuardPred {
-//     True,
-//     None(Vec<GuardPred>),
-//     And(Vec<GuardPred>),
-//     Or(Vec<GuardPred>),
-//     Eq(LocId, LocId),
-// }
 
 /// Enumeration that encodes one of four flags.
 /// Not user-facing

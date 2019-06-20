@@ -1,6 +1,6 @@
-use std::iter::FromIterator;
 use itertools::izip;
 use std::fmt;
+use std::iter::FromIterator;
 
 #[derive(Default, Clone)]
 pub struct BitSet {
@@ -73,7 +73,7 @@ impl<'a, 'b> Iterator for AndIter<'a, 'b> {
     }
 }
 impl FromIterator<usize> for BitSet {
-    fn from_iter<I: IntoIterator<Item=usize>>(iter: I) -> Self {
+    fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
         let mut me = BitSet::default();
         for i in iter {
             me.set_to(i, true);

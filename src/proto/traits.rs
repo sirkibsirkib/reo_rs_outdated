@@ -144,8 +144,7 @@ impl<T: 'static> HasProto for Getter<T> {
     }
 }
 
-
 pub trait Proto: Sized {
     fn definition() -> &'static ProtoDef;
-    fn instantiate() -> Arc<ProtoAll>;  
+    fn instantiate() -> Arc<ProtoAll>;
 }
