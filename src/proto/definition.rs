@@ -63,9 +63,6 @@ impl ProtoBuilder {
         1. The type for a used LocId is not derivable.
         2. A LocId is associated with a type which is not provided in the TypeInfo map.
         */
-
-        // TODO safe unwinding
-
         let memory_bits = self
             .mem_defs
             .iter()
@@ -94,6 +91,7 @@ impl ProtoBuilder {
             .values()
             .map(|loc_info| (loc_info.type_info.type_id, loc_info.type_info.clone()))
             .collect();
+
         let spaces = loc_info
             .iter()
             .map(|(id, loc_info)| match loc_info.kind {
@@ -118,6 +116,8 @@ impl ProtoBuilder {
                 }),
             })
             .collect();
+
+        println!("OK");
 
         let rules = self.build_rules(&loc_info)?;
 
@@ -156,7 +156,7 @@ impl ProtoBuilder {
                 let mut pg = vec![];
 
                 let p = action_def.putter;
-                let p_type = loc_info.get(&p).unwrap().kind;
+                let p_type = loc_info.get(&p).ok_or(UnknownType{loc_id:p})?.kind;
                 if !p_type.is_putter() {
                     return Err(LocCannotPut { loc_id: p });
                 }
@@ -177,7 +177,7 @@ impl ProtoBuilder {
 
                 use itertools::Itertools;
                 for &g in action_def.getters.iter().unique() {
-                    let g_type = loc_info.get(&g).unwrap().kind;
+                    let g_type = loc_info.get(&g).ok_or(UnknownType{loc_id:g})?.kind;
                     if !g_type.is_getter() {
                         return Err(LocCannotGet { loc_id: g });
                     }
@@ -298,7 +298,7 @@ macro_rules! rule {
 lazy_static::lazy_static! {
     static ref FIFO_DEF: ProtoDef = ProtoDef {
         rules: vec![
-            rule![Formula::True; 0=>1,3,4 ; 6=>2,3],
+            rule![Formula::True; 0=>1],
         ]
     };
 }
@@ -315,11 +315,11 @@ impl Proto for Fifo3 {
             0 => LocInfo::new::<u32>(PortPutter),
             1 => LocInfo::new::<u32>(PortGetter),
         };
-        Arc::new(mem.finish(&loc_info).unwrap())
+        Arc::new(mem.finish(&loc_info).expect("Bad finish"))
     }
 }
 
 #[test]
-fn toottle() {
+fn instantiate_fifo3() {
     let x = Fifo3::instantiate();
 }
