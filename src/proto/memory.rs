@@ -31,19 +31,62 @@ impl Hash for LayoutHashable {
     }
 }
 
-#[derive(Debug, derive_new::new)]
-struct Storage {
-    #[new(default)]
+#[derive(Debug, Default)]
+pub struct Storage {
     free: HashMap<LayoutHashable, Vec<StorePtr>>,
-
-    #[new(default)]
     owned: HashMap<StorePtr, TypeId>,
-
-    type_info: Arc<HashMap<TypeId, Arc<TypeInfo>>>,
+    type_info: HashMap<TypeId, Arc<TypeInfo>>,
 }
 impl Storage {
-    pub unsafe fn insert(&mut self, src: StackPtr, type_info: &TypeInfo) -> StorePtr {
-    	println!("inserting.. looking for a free space...");
+	#[inline]
+	pub fn move_value_in<T: 'static>(&mut self, mut value: T) -> StorePtr {
+		let info = Arc::new(TypeInfo::new::<T>());
+        let stored_ptr = unsafe { // SAFE. info type matches ptr type
+            let stack_ptr: *mut u8 = std::mem::transmute(&mut value as *mut T);
+            self.move_in(stack_ptr, &info)
+        };
+        std::mem::forget(value);
+        stored_ptr
+	}
+    pub unsafe fn move_in(&mut self, src: StackPtr, type_info: &Arc<TypeInfo>) -> StorePtr {
+    	let dest = self.inner_alloc(type_info);
+        type_info.move_fn_execute(src, dest);
+        dest
+    }
+    pub unsafe fn clone_in(&mut self, src: StackPtr, type_info: &Arc<TypeInfo>) -> StorePtr {
+    	let dest = self.inner_alloc(type_info);
+    	type_info.clone_fn.execute(src, dest);
+        dest
+    }
+    pub unsafe fn move_out(&mut self, src: StorePtr, dest: StackPtr, layout: &Layout) {
+        std::ptr::copy(src, dest, layout.size());
+        self.inner_free(src, &LayoutHashable(*layout));
+    }
+    pub unsafe fn drop_inside(&mut self, ptr: StorePtr, info: &Arc<TypeInfo>) {
+        info.drop_fn.execute(ptr);
+        self.inner_free(ptr, &LayoutHashable(info.layout));
+    }
+    /// Deallocates emptied allocations
+    pub fn shrink_to_fit(&mut self) {
+        for (layout_hashable, vec) in self.free.drain() {
+            for ptr in vec {
+            	println!("dropping (empty) alloc at {:p}", ptr);
+                unsafe { alloc::dealloc(ptr, layout_hashable.0) }
+            }
+        }
+    }
+    ///////////////////
+    unsafe fn inner_free(&mut self, ptr: StorePtr, lh: &LayoutHashable) {
+        self.owned.remove(&ptr).expect("not owned?");
+        self.free
+            .get_mut(&lh)
+            .expect("not prepared for this len")
+            .push(ptr);
+    }
+    unsafe fn inner_alloc(&mut self, type_info: &Arc<TypeInfo>) -> StorePtr {
+    	println!("move_ining.. looking for a free space...");
+    	// preserve the invariant
+    	self.type_info.entry(type_info.type_id).or_insert_with(|| type_info.clone());
         let dest = self
             .free
             .entry(LayoutHashable(type_info.layout))
@@ -53,40 +96,10 @@ impl Storage {
                 println!("allocating with layout {:?}", &type_info.layout);
                 alloc::alloc(type_info.layout)
             });
-
         if let Some(_) = self.owned.insert(dest, type_info.type_id) {
-            panic!("insert allocated something already owned??")
+            panic!("move_in allocated something already owned??")
         }
-
-        std::ptr::copy_nonoverlapping(src, dest, type_info.layout.size());
-        println!("OK INSERTED {:p}", dest);
         dest
-    }
-    pub unsafe fn move_out<T>(&mut self, src: StorePtr, dest: StackPtr) {
-        let layout = Layout::new::<T>();
-        std::ptr::copy_nonoverlapping(src, dest, layout.size());
-        self.free(src, &LayoutHashable(layout));
-    }
-    pub unsafe fn drop_inside(&mut self, ptr: StorePtr, info: &TypeInfo) {
-        info.drop_fn.execute(ptr);
-        self.free(ptr, &LayoutHashable(info.layout));
-    }
-    unsafe fn free(&mut self, ptr: StorePtr, lh: &LayoutHashable) {
-        self.owned.remove(&ptr).expect("not owned?");
-        self.free
-            .get_mut(&lh)
-            .expect("not prepared for this len")
-            .push(ptr);
-    }
-
-    /// Deallocates emptied allocations
-    pub fn shrink_to_fit(&mut self) {
-        for (layout_hashable, vec) in self.free.drain() {
-            for ptr in vec {
-            	println!("dropping (empty) alloc at {:p}", ptr);
-                unsafe { alloc::dealloc(ptr, layout_hashable.0) }
-            }
-        }
     }
 }
 impl Drop for Storage {
@@ -118,22 +131,21 @@ impl Drop for Foo {
 
 #[test]
 fn memtest() {
-    let info_map = Arc::new(type_info_map![Foo]);
-    let mut storage = Storage::new(info_map);
+    let mut storage = Storage::default();
 
     let mut a: MaybeUninit<Foo> = MaybeUninit::new(Foo { x: [1,2,3] });
     let mut b: MaybeUninit<Foo> = MaybeUninit::uninit();
 	println!("A=[1,2,3], B=?, []");
-    let info = TypeInfo::new::<Foo>();
+    let info = Arc::new(TypeInfo::new::<Foo>());
 
     unsafe {
     	let ra = std::mem::transmute(a.as_mut_ptr());
     	let rb = std::mem::transmute(b.as_mut_ptr());
 
-    	let rc = storage.insert(ra, &info);
+    	let rc = storage.move_in(ra, &info);
 		println!("A=[1,2,3], B=?, [C=[1,2,3]]");
 
-    	storage.move_out::<Foo>(rc, rb);
+    	storage.move_out(rc, rb, &info.layout);
 		println!("A=[1,2,3], B=[1,2,3], []");
 
 		println!("PRINTING: A:{:?}, B:{:?}", a.assume_init(), b.assume_init());

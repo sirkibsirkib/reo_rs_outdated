@@ -90,6 +90,10 @@ pub struct TypeInfo {
     pub(crate) layout: Layout,
 }
 impl TypeInfo {
+    #[inline]
+    pub unsafe fn move_fn_execute(&self, src: *mut u8, dest: *mut u8) {
+        std::ptr::copy(src, dest, self.layout.size());
+    }
     pub fn get_tid(&self) -> TypeId {
         self.type_id
     }

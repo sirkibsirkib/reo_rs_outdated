@@ -1,15 +1,5 @@
-use crate::proto::reflection::TypeInfo;
-use crate::proto::traits::Proto;
-use crate::proto::{MemoSpace, PoGeSpace, PoPuSpace, PortInfo, PortRole};
-use crate::proto::{ProtoActive, ProtoAll, ProtoR, ProtoW, Space};
-use crate::proto::{RunAction, RunRule};
-use crate::LocId;
-use hashbrown::HashMap;
-use std::any::TypeId;
 
-use crate::bitset::BitSet;
-use parking_lot::Mutex;
-use std::sync::Arc;
+use super::*;
 
 #[derive(Debug, Clone)]
 pub struct ProtoDef {
@@ -48,47 +38,25 @@ pub enum ProtoBuildErr {
 type IsInit = bool;
 struct ProtoBuilder {
     proto_def: &'static ProtoDef,
-    mem_data: Vec<u8>,
-    contents: HashMap<LocId, (*mut u8, IsInit, TypeInfo)>,
+    mem_storage: Storage,
+    mem_defs: HashMap<LocId, Option<*mut u8>>, 
 }
 impl ProtoBuilder {
     pub fn new(proto_def: &'static ProtoDef) -> Self {
         Self {
             proto_def,
-            mem_data: vec![],
-            contents: HashMap::default(),
+            mem_storage: Default::default(),
+            mem_defs: Default::default(),
         }
     }
-    unsafe fn write_into_buffer<T: 'static>(&mut self, t: T) -> *mut u8 {
-        let align = std::mem::align_of::<T>();
-        let len = self.mem_data.len();
-        let mut ptr: *mut u8 = self.mem_data.as_mut_ptr().offset(len as isize);
-        // find pointer to end of (current) buffer
-        let remainder = ptr as usize % align;
-        if remainder > 0 {
-            // grow and shift end to make alignment of type T happy
-            let shift = align - remainder;
-            self.mem_data.resize(len + shift, 0);
-            ptr = ptr.offset(shift as isize);
-            assert_eq!(0, ptr as usize % align);
-        }
-        // make space for the new datum
-        self.mem_data
-            .resize(self.mem_data.len() + std::mem::size_of::<T>(), 0);
-        let typed_ptr: &mut T = std::mem::transmute(ptr);
-        let swapped = std::mem::replace(typed_ptr, t);
-        std::mem::forget(swapped);
-        ptr
+    unsafe fn define_init_memory<T: 'static>(&mut self, id: LocId, t: T) {
+        let ptr = self.mem_storage.move_value_in(t);
+        let was = self.mem_defs.insert(id, Some(ptr));
+        assert!(was.is_none());
     }
     pub fn uninit_memory<T: 'static>(&mut self, id: LocId) {
-        assert!(!self.contents.contains_key(&id));
-        let t: T = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
-        let ptr = unsafe { self.write_into_buffer(t) };
-        self.contents.insert(id, (ptr, false, TypeInfo::new::<T>()));
-    }
-    pub fn init_memory<T: 'static>(&mut self, id: LocId, t: T) {
-        let ptr = unsafe { self.write_into_buffer(t) };
-        self.contents.insert(id, (ptr, true, TypeInfo::new::<T>()));
+        let was = self.mem_defs.insert(id, None);
+        assert!(was.is_none());
     }
     pub fn finish(self, loc_info: &HashMap<LocId, LocInfo>) -> Result<ProtoAll, ProtoBuildErr> {
         /* here we construct a proto according to the specification.
@@ -100,20 +68,10 @@ impl ProtoBuilder {
         // TODO safe unwinding
 
         let memory_bits = self
-            .contents
+            .mem_defs
             .iter()
-            .filter_map(|(&k, v)| if v.1 { Some(k) } else { None })
+            .filter_map(|(&k, v)| if v.is_some() { Some(k) } else { None })
             .collect();
-        let free_mems = {
-            let mut m = HashMap::default();
-            for (id, (ptr, is_free, _info)) in self.contents.iter() {
-                if *is_free {
-                    let type_id = loc_info.get(id).unwrap().type_info.type_id;
-                    m.entry(type_id).or_insert_with(|| vec![]).push(*ptr);
-                }
-            }
-            m
-        };
         let ready = loc_info
             .iter()
             .filter_map(|(&k, v)| if v.kind.is_mem() { Some(k) } else { None })
@@ -148,7 +106,7 @@ impl ProtoBuilder {
                 )),
                 LocKind::PortGetter => Space::PoGe(PoGeSpace::new()),
                 LocKind::Memory => Space::Memo({
-                    let ptr: *mut u8 = self.contents.get(id).unwrap().0;
+                    let ptr = self.mem_defs.get(id).unwrap().unwrap_or(std::ptr::null_mut());
                     let info = type_id_2_info
                         .get(&loc_info.type_info.type_id)
                         .unwrap()
@@ -162,7 +120,6 @@ impl ProtoBuilder {
 
         println!("{:?}", (&rules, &memory_bits, &ready));
         let r = ProtoR {
-            mem_data: self.mem_data,
             spaces,
             rules,
         };
@@ -170,7 +127,7 @@ impl ProtoBuilder {
             memory_bits,
             active: ProtoActive {
                 ready,
-                free_mems,
+                storage: self.mem_storage,
                 mem_refs: HashMap::default(),
             },
             commitment: None,
@@ -270,24 +227,6 @@ impl ProtoBuilder {
         Ok(rules)
     }
 }
-
-// TODO cleanup!
-// impl Drop for ProtoBuilder {
-//     fn drop(&mut self) {
-//         for (_k, (ptr, is_init, type_info)) in self.contents.iter() {
-//             let ptr: *mut u8 = *ptr;
-//             unsafe {
-//                 if *is_init {
-//                     // 1. drop the contents
-//                     type_info.drop_fn.execute(ptr);
-//                 }
-//                 // 2. drop the box itself
-//                 let b: Box<()> = std::mem::transmute(ptr);
-//                 drop(b);
-//             }
-//         }
-//     }
-// }
 
 #[derive(Debug)]
 pub struct LocInfo {

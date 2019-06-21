@@ -1,6 +1,7 @@
 ////////// DEBUG DEBUG
 // #![allow(dead_code)]
 
+use crate::proto::memory::Storage;
 use itertools::izip;
 
 pub mod definition;
@@ -24,7 +25,7 @@ use crate::{
     tokens::{decimal::Decimal, Grouped},
     LocId, ProtoHandle,
 };
-use hashbrown::{HashMap, HashSet};
+use hashbrown::{HashMap};
 use parking_lot::{Mutex, MutexGuard};
 use std::{
     alloc::Layout,
@@ -33,7 +34,6 @@ use std::{
     convert::TryInto,
     marker::PhantomData,
     mem::{transmute, ManuallyDrop, MaybeUninit},
-    ops::Range,
     ptr::NonNull,
     sync::{
         atomic::{AtomicPtr, AtomicUsize, Ordering},
@@ -60,47 +60,120 @@ impl PutterSpace {
             type_info,
         }
     }
+    pub fn overwrite_null_ptr(&self, ptr: *mut u8) {
+        let was = self.ptr.swap(ptr, Ordering::SeqCst);
+        assert!(was.is_null());
+    }
+    pub fn remove_ptr(&self) -> *mut u8 {
+        self.ptr.swap(std::ptr::null_mut(), Ordering::SeqCst)
+    }
     pub fn set_ptr(&self, ptr: *mut u8) {
         self.ptr.store(ptr, Ordering::SeqCst);
     }
     pub fn get_ptr(&self) -> *mut u8 {
         self.ptr.load(Ordering::SeqCst)
     }
-    unsafe fn get_datum_from<D>(&self, case: DataGetCase, out_ptr: *mut u8, finish_fn: D)
-    where
-        D: Fn(bool),
-    {
-        let src = self.get_ptr();
-        if self.type_info.is_copy {
+}
+
+
+trait DataSource<'a> {
+    type MoveMcguffin: Sized;
+    fn my_space(&self) -> &PutterSpace;
+    fn execute_move(&self, mm: Self::MoveMcguffin, out_ptr: *mut u8);
+    fn execute_clone(&self, out_ptr: *mut u8);
+    fn send_done_signal(&self, someone_moved: bool);
+
+    fn acquire_data<F: Fn()->Self::MoveMcguffin>(&self, out_ptr: *mut u8, case: DataGetCase, mm_getter: F) {
+        let space = self.my_space();
+        let src = space.get_ptr();
+        if space.type_info.is_copy {
             // MOVE HAPPENS HERE
-            src.copy_to(out_ptr, self.type_info.layout.size());
-            let was = self.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
+            self.execute_move(mm_getter(), out_ptr);
+            unsafe {
+                src.copy_to(out_ptr, space.type_info.layout.size())
+            };
+            let was = space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
             if was == case.last_countdown() {
-                finish_fn(false);
+                self.send_done_signal(true);
             }
         } else {
             if case.i_move() {
                 if case.mover_must_wait() {
-                    self.mover_sema.acquire();
+                    space.mover_sema.acquire();
                 }
                 // MOVE HAPPENS HERE
-                src.copy_to(out_ptr, self.type_info.layout.size());
-                finish_fn(false);
+                self.execute_move(mm_getter(), out_ptr);
+                self.send_done_signal(true);
             } else {
                 // CLONE HAPPENS HERE
-                self.type_info.clone_fn.execute(src, out_ptr);
-                let was = self.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
+                unsafe {
+                    space.type_info.clone_fn.execute(src, out_ptr)
+                };
+                let was = space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
                 if was == case.last_countdown() {
                     if case.someone_moves() {
-                        self.mover_sema.release();
+                        space.mover_sema.release();
                     } else {
-                        finish_fn(true);
+                        self.send_done_signal(false);
                     }
                 }
             }
         }
     }
 }
+
+impl<'a> DataSource<'a> for PoPuSpace {
+    type MoveMcguffin = ();
+    fn my_space(&self) -> &PutterSpace {
+        &self.p
+    }
+    fn execute_move(&self, _: Self::MoveMcguffin, out_ptr: *mut u8) {
+        let src: *mut u8 = self.p.remove_ptr();
+        unsafe {
+            self.p.type_info.move_fn_execute(src, out_ptr)
+        };
+    }
+    fn execute_clone(&self, out_ptr: *mut u8) {
+        let src: *mut u8 = self.p.get_ptr();
+        unsafe {
+            self.p.type_info.clone_fn.execute(src, out_ptr)
+        };
+    }
+    fn send_done_signal(&self, someone_moved: bool) {
+        self.dropbox.send(if someone_moved { 1 } else { 0 });
+    }
+}
+
+impl<'a> DataSource<'a> for MemoSpace {
+    type MoveMcguffin = MutexGuard<'a, ProtoW>;
+    fn my_space(&self) -> &PutterSpace {
+        &self.p
+    }
+    fn execute_move(&self, mut w: Self::MoveMcguffin, out_ptr: *mut u8) {
+        let src: *mut u8 = self.p.get_ptr();
+        let refs: &mut usize = w.active.mem_refs.get_mut(&src).expect("no memrefs?");
+        assert!(*refs >= 1);
+        *refs -= 1;
+        if *refs == 0 {
+            w.active.mem_refs.remove(&src);
+            unsafe {
+                w.active.storage.move_out(src, out_ptr, &self.p.type_info.layout)
+            }
+        } else {
+            panic!("Tried to MOVE out a memcell with 2+ aliases")
+        }
+    }
+    fn execute_clone(&self, out_ptr: *mut u8) {
+        let src: *mut u8 = self.p.get_ptr();
+        unsafe {
+            self.p.type_info.clone_fn.execute(src, out_ptr)
+        };
+    }
+    fn send_done_signal(&self, _someone_moved: bool) {
+        // nothing to do here
+    }
+}
+
 
 /// Memory variant of PutterSpace. Contains no additional data but has unique
 /// behavior: simulating "Drop" for a ptr that may be shared with other memory cells.
@@ -112,25 +185,6 @@ impl MemoSpace {
         Self {
             p: PutterSpace::new(ptr, type_info),
         }
-    }
-    fn make_empty(&self, my_id: LocId, w: &mut ProtoActive, do_drop: bool) {
-        let ptr = self.p.get_ptr();
-        let src_refs = w.mem_refs.get_mut(&ptr).expect("WAS DANGLING");
-        let tid = &self.p.type_info.get_tid();
-        *src_refs -= 1;
-        if *src_refs == 0 {
-            // this memcell held the last reference to this stored memory
-            w.mem_refs.remove(&ptr).expect("hhh");
-            if do_drop {
-                // the value is being dropped
-                unsafe { self.p.type_info.drop_fn.execute(ptr) }
-            } else {
-                // the value has been moved out by the caller
-            }
-            w.free_mems.get_mut(tid).expect("??").push(ptr);
-        }
-        // println!("MEMCELL BECAME EMPTY. SET");
-        w.ready.set_to(my_id, true); // GETTER ready
     }
 }
 
@@ -171,25 +225,10 @@ impl PoGeSpace {
     unsafe fn participate_with_msg(&self, a: &ProtoAll, msg: usize, out_ptr: *mut u8) {
         let (case, putter_id) = DataGetCase::parse_msg(msg);
         match a.r.get_space(putter_id) {
-            Some(Space::Memo(space)) => {
-                let finish_fn = |do_drop| {
-                    let mut w = a.w.lock();
-                    space.make_empty(putter_id, &mut w.active, do_drop);
-                    let ProtoW {
-                        ref active,
-                        ref mut awaiting_states,
-                        ..
-                    } = &mut w as &mut ProtoW;
-                    ProtoW::notify_state_waiters(&active.ready, awaiting_states, &a.r);
-                };
-                space.p.get_datum_from(case, out_ptr, finish_fn);
-            }
-            Some(Space::PoPu(space)) => {
-                let finish_fn = |do_drop| {
-                    space.dropbox.send(if do_drop { 0 } else { 1 });
-                };
-                space.p.get_datum_from(case, out_ptr, finish_fn);
-            }
+            Some(Space::Memo(space)) => space.acquire_data(out_ptr, case, || {
+                a.w.lock()
+            }),
+            Some(Space::PoPu(space)) => space.acquire_data(out_ptr, case, || ()),
             _ => panic!("Bad putter ID!!"),
         }
     }
@@ -200,7 +239,8 @@ impl PoGeSpace {
 /// 2. mutably accessed when firing rules
 struct ProtoActive {
     ready: BitSet,
-    free_mems: HashMap<TypeId, Vec<*mut u8>>,
+    storage: Storage,
+    // free_mems: HashMap<TypeId, Vec<*mut u8>>,
     mem_refs: HashMap<*mut u8, usize>,
 }
 
@@ -399,10 +439,6 @@ enum Space {
 
 /// Part of the protocol NOT protected by the lock
 pub struct ProtoR {
-    /// This buffer stores the ACTUAL memory data. The contents are never accessed
-    /// here, it's just stored inside ProtoR to ensure it's freed at the right time.
-    #[allow(dead_code)]
-    mem_data: Vec<u8>,
     rules: Vec<RunRule>,
     spaces: Vec<Space>,
 }
@@ -415,7 +451,7 @@ impl ProtoR {
             None(x) => !x.iter().any(f),
             And(x) => !x.iter().all(f),
             Or(x) => x.iter().any(f),
-            Eq(a, b) => unsafe { self.equal_put_data(*a, *b) },
+            Eq(a, b) => self.equal_put_data(*a, *b),
         }
     }
 
@@ -504,7 +540,7 @@ impl MsgDropbox {
     }
     fn recv_nothing(&self) {
         let got = self.recv();
-        debug_assert_eq!(got, Self::NOTHING_MSG);
+        assert_eq!(got, Self::NOTHING_MSG);
     }
 }
 
@@ -812,10 +848,22 @@ impl<'a> Firer<'a> {
         count
     }
 
+    fn empty_memcell(&mut self, space: &MemoSpace) {
+        let ptr = space.p.remove_ptr();
+        let refs: &mut usize = self.w.mem_refs.get_mut(&ptr).expect("NO REFS HERE?");
+        assert!(*refs >= 1);
+        *refs -= 1;
+        if *refs == 0 {
+            unsafe {
+                self.w.storage.drop_inside(ptr, &space.p.type_info)
+            };
+        }
+    }
+
     /// A fire action that
     pub fn mem_to_nowhere(&mut self, me_pu: LocId) {
-        let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
-        memo_space.make_empty(me_pu, self.w, true);
+        let memo_space = self.r.get_me_pu(me_pu).expect("NOT MEM?");
+        self.empty_memcell(memo_space)
     }
 
     fn instruct_data_getters<F>(
@@ -869,10 +917,10 @@ impl<'a> Firer<'a> {
 
         // 1. port getters have move-priority
         let data_getters_count = self.release_sig_getters_count_getters(po_ge);
-        let Firer { r, w } = self;
+        let Firer { r, .. } = self;
         Self::instruct_data_getters(r, po_ge, data_getters_count, me_pu, &memo_space.p, || {
             // cleanup function. invoked when there are 0 data-getters
-            memo_space.make_empty(me_pu, w, true);
+            self.empty_memcell(memo_space)
         });
     }
 
@@ -886,7 +934,7 @@ impl<'a> Firer<'a> {
         // ASSUMES destinations have dangling pointers TODO checks
         for g in me_ge.iter().cloned() {
             let me_ge_space = self.r.get_me_pu(g).expect("gggg");
-            debug_assert_eq!(*tid, me_ge_space.p.type_info.type_id);
+            assert_eq!(*tid, me_ge_space.p.type_info.type_id);
             me_ge_space.p.set_ptr(src);
             self.w.ready.set_to(g, true); // PUTTER is ready
         }
@@ -907,45 +955,32 @@ impl<'a> Firer<'a> {
         // 2. populate memory cells if necessary
         let mut me_ge_iter = me_ge.iter().cloned();
         if let Some(first_me_ge) = me_ge_iter.next() {
-            // println!("::port_to_mem_and_ports| first_me_ge={:?}", first_me_ge);
             let first_me_ge_space = self.r.get_me_pu(first_me_ge).expect("wfew");
             self.w.ready.set_to(first_me_ge, true); // GETTER is ready
-            let tid = &first_me_ge_space.p.type_info.type_id;
-            let info = &first_me_ge_space.p.type_info;
-            // 3. acquire a fresh ptr for this memcell
-            // ASSUMES this memcell has a dangling ptr. TODO use Option<NonNull<_>> later for checking
-            let fresh_ptr = self
-                .w
-                .free_mems
-                .get_mut(tid)
-                .expect("HFEH")
-                .pop()
-                .expect("NO FREE PTRS, FAM");
-            let mut ptr_refs = 1;
-            first_me_ge_space.p.set_ptr(fresh_ptr);
-            let src = po_pu_space.p.get_ptr();
-            let dest = first_me_ge_space.p.get_ptr();
-            if data_getters_count > 0 {
-                // mem clone!
-                unsafe { info.clone_fn.execute(src, dest) }
-            } else {
-                // mem move!
-                unsafe { std::ptr::copy(src, dest, info.layout.size()) };
-            }
-            // 4. copy pointers to other memory cells (if any)
-            // ASSUMES all destinations have dangling pointers
-            for g in me_ge_iter {
-                // println!("::port_to_mem_and_ports| mem_g={:?}", g);
-                let me_ge_space = self.r.get_me_pu(g).expect("gggg");
-                debug_assert_eq!(*tid, me_ge_space.p.type_info.type_id);
+            let type_info = &first_me_ge_space.p.type_info;
+            let tid = type_info.type_id;
 
-                // 5. dec refs for existing ptr. free if refs are now 0
-                me_ge_space.p.set_ptr(fresh_ptr);
+            // 3. move data into memcell
+            let src = po_pu_space.p.get_ptr();
+            let dest = unsafe {
+                match data_getters_count {
+                    0 => self.w.storage.move_in(src, type_info),
+                    _ => self.w.storage.clone_in(src, type_info),
+                }
+            };
+            let mut refcounts = 1;
+
+            // 4. copy pointers to other memory cells (if any)
+            for g in me_ge_iter {
+                let me_ge_space = self.r.get_me_pu(g).expect("gggg");
+                assert_eq!(tid, me_ge_space.p.type_info.type_id);
+
+                me_ge_space.p.overwrite_null_ptr(dest);
                 self.w.ready.set_to(g, true); // GETTER is ready
-                ptr_refs += 1;
+                refcounts += 1;
             }
-            // println!("::port_to_mem_and_ports| ptr_refs={}", ptr_refs);
-            self.w.mem_refs.insert(fresh_ptr, ptr_refs);
+            let was = self.w.mem_refs.insert(dest, refcounts);
+            assert!(was.is_none());
         }
         let Firer { r, .. } = self;
         Self::instruct_data_getters(r, po_ge, data_getters_count, po_pu, &po_pu_space.p, || {
