@@ -1,3 +1,6 @@
+
+use crate::proto::definition::LocInfo;
+
 use super::*;
 
 pub trait EndlessIter {
@@ -133,7 +136,11 @@ impl<T: 'static> HasProto for Getter<T> {
 
 pub trait Proto: Sized {
     fn definition() -> &'static ProtoDef;
-    fn instantiate() -> Arc<ProtoAll>;
+    fn loc_info() -> &'static HashMap<LocId, LocInfo>;
+    fn instantiate() -> Arc<ProtoAll> {
+        let mem = ProtoBuilder::new(Self::definition());
+        Arc::new(mem.finish(Self::loc_info()).expect("Bad finish"))
+    }
 }
 
 pub(crate) trait DataSource<'a> {

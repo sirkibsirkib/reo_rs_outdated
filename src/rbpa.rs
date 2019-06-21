@@ -1,4 +1,4 @@
-use crate::{proto::nu_def::ProtoDef, LocId, RuleId};
+use crate::{proto::definition::ProtoDef, LocId, RuleId};
 use hashbrown::{HashMap, HashSet};
 use itertools::Itertools;
 use std::fmt;
@@ -8,7 +8,7 @@ pub type StatePred = HashMap<LocId, bool>;
 impl ProtoDef {
     pub fn new_rbpa(&self, port_set: &HashSet<LocId>) -> Result<Rbpa, RbpaBuildErr> {
         let mut rules = vec![];
-        let port_ids = 0..self.port_info.len();
+        // let port_ids = 0..self.port_info.len();
         for (rule_id, rule_def) in self.rule_defs.iter().enumerate() {
             use RbpaBuildErr::*;
             let mut guard = HashMap::default();

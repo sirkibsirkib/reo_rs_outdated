@@ -3,7 +3,7 @@ use itertools::izip;
 
 pub mod definition;
 mod memory;
-use definition::{Formula, ProtoDef};
+use definition::{Formula, ProtoDef, ProtoBuilder};
 
 pub mod reflection;
 use reflection::TypeInfo;
@@ -30,7 +30,6 @@ use std::{
     convert::TryInto,
     marker::PhantomData,
     mem::{transmute, ManuallyDrop, MaybeUninit},
-    ptr::NonNull,
     sync::{
         atomic::{AtomicPtr, AtomicUsize, Ordering},
         Arc,

@@ -4,7 +4,7 @@ use super::*;
 // which will cause explicit panic if execute() is invoked.
 // UNSAFE if the type pointed to does not match the type used to instantiate the ptr.
 #[derive(Debug, Copy, Clone)]
-pub(crate) struct CloneFn(Option<NonNull<fn(*mut u8, *mut u8)>>);
+pub(crate) struct CloneFn(Option<fn(*mut u8, *mut u8)>);
 impl CloneFn {
     fn new<T>() -> Self {
         let clos: fn(*mut u8, *mut u8) = |src, dest| unsafe {
@@ -12,9 +12,7 @@ impl CloneFn {
             let dest: &mut T = transmute(dest);
             *dest = datum;
         };
-        let opt_nn = NonNull::new(unsafe { transmute(clos) });
-        debug_assert!(opt_nn.is_some());
-        CloneFn(opt_nn)
+        CloneFn(Some(clos))
     }
     /// safe ONLY IF:
     ///  - src is &T to initialized memory
@@ -23,7 +21,7 @@ impl CloneFn {
     #[inline]
     pub unsafe fn execute(self, src: *mut u8, dst: *mut u8) {
         if let Some(x) = self.0 {
-            (*x.as_ptr())(src, dst);
+            (x)(src, dst);
         } else {
             panic!("proto attempted to clone an unclonable type!");
         }

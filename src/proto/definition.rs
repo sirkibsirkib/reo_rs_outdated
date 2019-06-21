@@ -34,8 +34,7 @@ pub enum ProtoBuildErr {
     LocCannotPut { loc_id: LocId },
 }
 
-type IsInit = bool;
-struct ProtoBuilder {
+pub struct ProtoBuilder {
     proto_def: &'static ProtoDef,
     mem_storage: Storage,
     mem_defs: HashMap<LocId, Option<*mut u8>>,
@@ -243,7 +242,7 @@ impl LocInfo {
 }
 
 #[derive(Debug, Copy, Clone)]
-enum LocKind {
+pub enum LocKind {
     PortPutter,
     PortGetter,
     Memory,
@@ -295,31 +294,34 @@ macro_rules! rule {
     }};
 }
 
-lazy_static::lazy_static! {
-    static ref FIFO_DEF: ProtoDef = ProtoDef {
-        rules: vec![
-            rule![Formula::True; 0=>1],
-        ]
-    };
-}
-
-struct Fifo3;
-impl Proto for Fifo3 {
+struct IdkProto;
+impl Proto for IdkProto {
     fn definition() -> &'static ProtoDef {
-        &FIFO_DEF
+        lazy_static::lazy_static! {
+            static ref LAZY: ProtoDef = ProtoDef {
+                rules: vec![
+                    rule![Formula::True; 0=>1],
+                    rule![Formula::True; 0=>1],
+                ]
+            };
+        }
+        &LAZY
     }
-    fn instantiate() -> Arc<ProtoAll> {
-        let mem = ProtoBuilder::new(Self::definition());
-        use LocKind::*;
-        let loc_info = map! {
-            0 => LocInfo::new::<u32>(PortPutter),
-            1 => LocInfo::new::<u32>(PortGetter),
-        };
-        Arc::new(mem.finish(&loc_info).expect("Bad finish"))
+    fn loc_info() -> &'static HashMap<LocId, LocInfo> {
+        lazy_static::lazy_static! {
+            static ref LAZY: HashMap<LocId, LocInfo> = {
+                use LocKind::*;
+                map! {
+                    0 => LocInfo::new::<u32>(PortPutter),
+                    1 => LocInfo::new::<u32>(PortGetter),
+                }
+            };
+        }
+        &LAZY
     }
 }
 
 #[test]
 fn instantiate_fifo3() {
-    let x = Fifo3::instantiate();
+    let _x = IdkProto::instantiate();
 }
