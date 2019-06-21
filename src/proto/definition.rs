@@ -39,6 +39,10 @@ pub struct ProtoBuilder {
     mem_storage: Storage,
     mem_defs: HashMap<LocId, Option<*mut u8>>,
 }
+
+
+
+
 impl ProtoBuilder {
     pub fn new(proto_def: &'static ProtoDef) -> Self {
         Self {
@@ -294,34 +298,35 @@ macro_rules! rule {
     }};
 }
 
-struct IdkProto;
-impl Proto for IdkProto {
-    fn definition() -> &'static ProtoDef {
-        lazy_static::lazy_static! {
-            static ref LAZY: ProtoDef = ProtoDef {
-                rules: vec![
-                    rule![Formula::True; 0=>1],
-                    rule![Formula::True; 0=>1],
-                ]
-            };
-        }
-        &LAZY
-    }
-    fn loc_info() -> &'static HashMap<LocId, LocInfo> {
-        lazy_static::lazy_static! {
-            static ref LAZY: HashMap<LocId, LocInfo> = {
-                use LocKind::*;
-                map! {
-                    0 => LocInfo::new::<u32>(PortPutter),
-                    1 => LocInfo::new::<u32>(PortGetter),
-                }
-            };
-        }
-        &LAZY
-    }
-}
 
-#[test]
-fn instantiate_fifo3() {
-    let _x = IdkProto::instantiate();
-}
+// struct IdkProto;
+// impl Proto for IdkProto {
+//     fn definition() -> &'static ProtoDef {
+//         lazy_static::lazy_static! {
+//             static ref LAZY: ProtoDef = ProtoDef {
+//                 rules: vec![
+//                     rule![Formula::True; 0=>1],
+//                     rule![Formula::True; 0=>1],
+//                 ]
+//             };
+//         }
+//         &LAZY
+//     }
+//     fn loc_info() -> &'static HashMap<LocId, LocInfo> {
+//         lazy_static::lazy_static! {
+//             static ref LAZY: HashMap<LocId, LocInfo> = {
+//                 use LocKind::*;
+//                 map! {
+//                     0 => LocInfo::new::<u32>(PortPutter),
+//                     1 => LocInfo::new::<u32>(PortGetter),
+//                 }
+//             };
+//         }
+//         &LAZY
+//     }
+// }
+
+// #[test]
+// fn instantiate_fifo3() {
+//     let _x = IdkProto::instantiate();
+// }

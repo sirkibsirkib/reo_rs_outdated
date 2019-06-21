@@ -134,11 +134,72 @@ impl<T: 'static> HasProto for Getter<T> {
     }
 }
 
+
+
+/* Separate concerns:
+1. rule structure
+2. which memcells start initialized
+3. LocId => LocKind
+-------------------
+4. LocId => TypeInfo
+5. for all memcells initialized, what are their init values?
+
+Rbpa needs to know 1,2,3
+Proto needs all
+1,2,3 are the same regardless of type instantiation
+
+OK so here's the API:
+1. fn get_structure() -> &'static ProtoDef; // optimization. caller needs it intact
+2. fn mem_starts_initialized(id: LocId) -> bool;
+3. fn mem_kind(id: LocId) -> LocKind;
+4. dn get_type_info()
+
+
+*/
+
+#[derive(Debug, Copy, Clone)]
+pub enum LocKindExt {
+    PortPutter,
+    PortGetter,
+    MemInitialized,
+    MemUninitialized,
+}
+pub struct TypelessProtoDef {
+    pub structure: ProtoDef,
+    pub loc_kind_ext: HashMap<LocId, LocKindExt>,
+}
+pub struct MemFillPromise<'a> {
+    type_id_expected: TypeId,
+    builder: &'a mut ProtoBuilder,
+}
+#[derive(Debug, Copy, Clone)]
+pub struct WrongMemFillType {
+    pub expected_type: TypeId,
+}
+pub struct MemFillPromiseFulfilled {
+    _secret: (),
+}
+
 pub trait Proto: Sized {
-    fn definition() -> &'static ProtoDef;
-    fn loc_info() -> &'static HashMap<LocId, LocInfo>;
+    fn typeless_proto_def() -> &'static TypelessProtoDef;
+    fn fill_memory(loc_id: LocId, promise: MemFillPromise) -> MemFillPromiseFulfilled;
+    fn loc_kind_ext(loc_id: LocId) -> LocKindExt;
+    fn loc_type(loc_id: LocId) -> &'static TypeInfo;
+
     fn instantiate() -> Arc<ProtoAll> {
-        let mem = ProtoBuilder::new(Self::definition());
+        let def = Self::typeless_proto_def();
+
+        // TODO change the API for protobuilder
+        let mut builder = ProtoBuilder::new();
+        for (&id, kind_ext) in def.loc_kind_ext.iter() {
+            if let LocKindExt::MemInitialized = kind_ext {
+                let mut promise = MemFillPromise {
+                    type_id_expected: Self::loc_type(id).type_id,
+                    builder: &mut builder,
+                };
+                let _promise_fulfilled = Self::fill_memory(id, promise);
+            }
+        }
         Arc::new(mem.finish(Self::loc_info()).expect("Bad finish"))
     }
 }
