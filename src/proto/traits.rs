@@ -1,4 +1,3 @@
-
 use crate::proto::definition::LocInfo;
 
 use super::*;
@@ -134,8 +133,6 @@ impl<T: 'static> HasProto for Getter<T> {
     }
 }
 
-
-
 /* Separate concerns:
 1. rule structure
 2. which memcells start initialized
@@ -157,6 +154,17 @@ OK so here's the API:
 
 */
 
+pub struct MemFillPromise<'a> {
+    type_id_expected: TypeId,
+    builder: &'a mut ProtoBuilder,
+}
+#[derive(Debug, Copy, Clone)]
+pub struct WrongMemFillType {
+    pub expected_type: TypeId,
+}
+pub struct MemFillPromiseFulfilled {
+    _secret: (),
+}
 pub trait Proto: Sized {
     fn typeless_proto_def() -> &'static TypelessProtoDef;
     fn fill_memory(loc_id: LocId, promise: MemFillPromise) -> MemFillPromiseFulfilled;
@@ -179,7 +187,7 @@ pub trait Proto: Sized {
     fn instantiate() -> Arc<ProtoAll> {
         match Self::try_instantiate() {
             Ok(x) => x,
-            Err(e) => panic!("Instantiate failed! {:?}")
+            Err(e) => panic!("Instantiate failed! {:?}"),
         }
     }
 }

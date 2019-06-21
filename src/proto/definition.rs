@@ -36,9 +36,8 @@ pub enum ProtoBuildErr {
 
 pub struct ProtoBuilder {
     mem_storage: Storage,
-    mem_defs: HashMap<LocId, Option<*mut u8>>,
+    init_mems: HashMap<LocId, *mut u8>,
 }
-
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum LocKindExt {
@@ -50,6 +49,20 @@ pub enum LocKindExt {
 impl LocKindExt {
     fn is_port(self) -> bool {
         !self.is_mem()
+    }
+    fn can_put(self) -> bool {
+        use LocKindExt::*;
+        match self {
+            PortGetter => false,
+            _ => true,
+        }
+    }
+    fn can_get(self) -> bool {
+        use LocKindExt::*;
+        match self {
+            PortPutter => false,
+            _ => true,
+        }
     }
     fn is_mem(self) -> bool {
         use LocKindExt::*;
@@ -64,125 +77,100 @@ pub struct TypelessProtoDef {
     pub structure: ProtoDef,
     pub loc_kind_ext: HashMap<LocId, LocKindExt>,
 }
-pub struct MemFillPromise<'a> {
-    type_id_expected: TypeId,
-    builder: &'a mut ProtoBuilder,
-}
-#[derive(Debug, Copy, Clone)]
-pub struct WrongMemFillType {
-    pub expected_type: TypeId,
-}
-pub struct MemFillPromiseFulfilled {
-    _secret: (),
-}
-
-
 
 impl ProtoBuilder {
     pub fn new() -> Self {
         Self {
             mem_storage: Default::default(),
-            mem_defs: Default::default(),
+            init_mems: Default::default(),
         }
     }
     unsafe fn define_init_memory<T: 'static>(&mut self, id: LocId, t: T) {
         let ptr = self.mem_storage.move_value_in(t);
-        let was = self.mem_defs.insert(id, Some(ptr));
-        assert!(was.is_none());
-    }
-    pub fn uninit_memory<T: 'static>(&mut self, id: LocId) {
-        let was = self.mem_defs.insert(id, None);
+        let was = self.init_mems.insert(id, ptr);
         assert!(was.is_none());
     }
     pub fn finish<P: Proto>(self) -> Result<ProtoAll, ProtoBuildErr> {
         let typeless_proto_def = P::typeless_proto_def();
-
-        let memory_bits = typeless_proto_def
+        let memory_bits: BitSet = typeless_proto_def
             .loc_kind_ext
             .iter()
-            .filter(|(_, &v)| v == LocKindExt::MemInitialized)
-            .map(|(&k,_)| k)
+            .filter(|(_, &loc_kind_ext)| loc_kind_ext == LocKindExt::MemInitialized)
+            .map(|(&id, _)| id)
             .collect();
 
-        let ready = typeless_proto_def
+        let ready: BitSet = typeless_proto_def
             .loc_kind_ext
             .iter()
-            .filter(|(_,v)| v.is_mem())
-            .map(|(&k,_)| k)
+            .filter(|(_, loc_kind_ext)| loc_kind_ext.is_mem())
+            .map(|(&id, _)| id)
             .collect();
 
+        let (id_2_type_id, type_id_2_info) = {
+            let mut id_2_type_id: HashMap<LocId, TypeId> = Default::default();
+            let mut type_id_2_info: HashMap<TypeId, Arc<TypeInfo>> = Default::default();
+            for id in typeless_proto_def.loc_kind_ext.keys().copied() {
+                let type_info = P::loc_type(id);
+                let type_id = type_info.type_id;
+                id_2_type_id.entry(id).or_insert(type_id);
+                type_id_2_info
+                    .entry(type_id)
+                    .or_insert_with(|| Arc::new(*type_info));
+            }
+            (id_2_type_id, type_id_2_info)
+        };
 
-        let mut type_infos = HashMap {
-            
-        }
+        let id_2_info = |id: &LocId| {
+            let type_id = id_2_type_id.get(id).unwrap();
+            type_id_2_info.get(type_id).unwrap()
+        };
 
         let unclaimed_ports = typeless_proto_def
             .loc_kind_ext
             .iter()
-            .filter(|(_,v)| v.is_port())
-            .map(|(&k,_)| {
-
+            .filter_map(|(&id, loc_kind_ext)| {
+                let role = match loc_kind_ext {
+                    LocKindExt::PortPutter => PortRole::Putter,
+                    LocKindExt::PortGetter => PortRole::Getter,
+                    _ => return None,
+                };
+                let info = PortInfo {
+                    role,
+                    type_id: *id_2_type_id.get(&id).unwrap(),
+                };
+                Some((id, info))
             })
             .collect();
 
-    // fn fill_memory(loc_id: LocId, promise: MemFillPromise) -> MemFillPromiseFulfilled;
-    // fn loc_kind_ext(loc_id: LocId) -> LocKindExt;
-    // fn loc_type(loc_id: LocId) -> &'static TypeInfo;
+        // fn fill_memory(loc_id: LocId, promise: MemFillPromise) -> MemFillPromiseFulfilled;
+        // fn loc_kind_ext(loc_id: LocId) -> LocKindExt;
+        // fn loc_type(loc_id: LocId) -> &'static TypeInfo;
 
         /* here we construct a proto according to the specification.
         Failure may be a result of:
         1. The type for a used LocId is not derivable.
         2. A LocId is associated with a type which is not provided in the TypeInfo map.
         */
-
-        let unclaimed_ports = loc_info
+        let spaces = typeless_proto_def
+            .loc_kind_ext
             .iter()
-            .filter_map(|(&k, v)| {
-                let role = match v.kind {
-                    LocKind::PortPutter => PortRole::Putter,
-                    LocKind::PortGetter => PortRole::Getter,
-                    LocKind::Memory => return None,
-                };
-                let info = PortInfo {
-                    role,
-                    type_id: v.type_info.type_id,
-                };
-                Some((k, info))
-            })
-            .collect();
-        let type_id_2_info: HashMap<_, _> = loc_info
-            .values()
-            .map(|loc_info| (loc_info.type_info.type_id, loc_info.type_info.clone()))
-            .collect();
-
-        let spaces = loc_info
-            .iter()
-            .map(|(id, loc_info)| match loc_info.kind {
-                LocKind::PortPutter => Space::PoPu(PoPuSpace::new(
-                    type_id_2_info
-                        .get(&loc_info.type_info.type_id)
-                        .unwrap()
-                        .clone(),
-                )),
-                LocKind::PortGetter => Space::PoGe(PoGeSpace::new()),
-                LocKind::Memory => Space::Memo({
-                    let ptr = self
-                        .mem_defs
-                        .get(id)
-                        .unwrap()
-                        .unwrap_or(std::ptr::null_mut());
-                    let info = type_id_2_info
-                        .get(&loc_info.type_info.type_id)
-                        .unwrap()
-                        .clone();
-                    MemoSpace::new(ptr, info)
+            .map(|(id, loc_kind_ext)| match loc_kind_ext {
+                LocKindExt::PortPutter => Space::PoPu(PoPuSpace::new({ id_2_info(id).clone() })),
+                LocKindExt::PortGetter => Space::PoGe(PoGeSpace::new()),
+                LocKindExt::MemInitialized => Space::Memo({
+                    let ptr: *mut u8 = *self.init_mems.get(id).unwrap();
+                    let type_info = id_2_info(id).clone();
+                    MemoSpace::new(ptr, type_info)
+                }),
+                LocKindExt::MemUninitialized => Space::Memo({
+                    let ptr: *mut u8 = std::ptr::null_mut();
+                    let type_info = id_2_info(id).clone();
+                    MemoSpace::new(ptr, type_info)
                 }),
             })
             .collect();
 
-        println!("OK");
-
-        let rules = self.build_rules(&loc_info)?;
+        let rules = Self::build_rules::<P>()?;
 
         println!("{:?}", (&rules, &memory_bits, &ready));
         let r = ProtoR { spaces, rules };
@@ -201,13 +189,11 @@ impl ProtoBuilder {
         Ok(ProtoAll { w, r })
     }
 
-    fn build_rules(
-        &self,
-        loc_info: &HashMap<LocId, LocInfo>,
-    ) -> Result<Vec<RunRule>, ProtoBuildErr> {
+    fn build_rules<P: Proto>() -> Result<Vec<RunRule>, ProtoBuildErr> {
+        let typeless_proto_def = P::typeless_proto_def();
         use ProtoBuildErr::*;
         let mut rules = vec![];
-        for (_rule_id, rule_def) in self.proto_def.rules.iter().enumerate() {
+        for (_rule_id, rule_def) in typeless_proto_def.structure.rules.iter().enumerate() {
             let mut guard_ready = BitSet::default();
             let mut guard_full = BitSet::default();
             let mut actions = vec![];
@@ -219,8 +205,11 @@ impl ProtoBuilder {
                 let mut pg = vec![];
 
                 let p = action_def.putter;
-                let p_type = loc_info.get(&p).ok_or(UnknownType{loc_id:p})?.kind;
-                if !p_type.is_putter() {
+                let p_type = typeless_proto_def
+                    .loc_kind_ext
+                    .get(&p)
+                    .ok_or(UnknownType { loc_id: p })?;
+                if !p_type.can_put() {
                     return Err(LocCannotPut { loc_id: p });
                 }
                 let mem_putter = p_type.is_mem();
@@ -240,8 +229,11 @@ impl ProtoBuilder {
 
                 use itertools::Itertools;
                 for &g in action_def.getters.iter().unique() {
-                    let g_type = loc_info.get(&g).ok_or(UnknownType{loc_id:g})?.kind;
-                    if !g_type.is_getter() {
+                    let g_type = typeless_proto_def
+                        .loc_kind_ext
+                        .get(&g)
+                        .ok_or(UnknownType { loc_id: g })?;
+                    if !g_type.can_get() {
                         return Err(LocCannotGet { loc_id: g });
                     }
                     let mem_getter = g_type.is_mem();
@@ -273,7 +265,12 @@ impl ProtoBuilder {
                     true => RunAction::MemPut { putter: p, mg, pg },
                 });
             }
-            let c = loc_info.keys().copied().max().unwrap_or(0);
+            let c = typeless_proto_def
+                .loc_kind_ext
+                .keys()
+                .copied()
+                .max()
+                .unwrap_or(0);
             guard_ready.pad_trailing_zeroes_to_capacity(c);
             guard_full.pad_trailing_zeroes_to_capacity(c);
             assign_vals.pad_trailing_zeroes_to_capacity(c);
@@ -357,7 +354,6 @@ macro_rules! rule {
         }
     }};
 }
-
 
 // struct IdkProto;
 // impl Proto for IdkProto {

@@ -3,15 +3,15 @@ use itertools::izip;
 
 pub mod definition;
 mod memory;
-use definition::{Formula, ProtoBuilder, ProtoBuildErr, TypelessProtoDef,
-    MemFillPromiseFulfilled, MemFillPromise, LocKindExt};
+use definition::{Formula, LocKindExt, ProtoBuildErr, ProtoBuilder, TypelessProtoDef};
 
 pub mod reflection;
 use reflection::TypeInfo;
 
 pub mod traits;
 use traits::{
-    DataSource, HasMsgDropBox, HasUnclaimedPorts, MaybeClone, MaybeCopy, MaybePartialEq, Proto,
+    DataSource, HasMsgDropBox, HasUnclaimedPorts, MaybeClone, MaybeCopy, MaybePartialEq,
+    MemFillPromise, MemFillPromiseFulfilled, Proto,
 };
 
 pub mod groups;
