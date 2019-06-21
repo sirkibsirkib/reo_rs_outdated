@@ -62,17 +62,6 @@ impl Storage {
 			type_info,
 		})
 	}
-	pub unsafe fn insert(&mut self, src: StackPtr, type_info: &TypeInfo) -> StorePtr {
-		println!("inserting");
-		let dest: StorePtr =
-			self.free.get_mut(&type_info.bytes)
-			.and_then(Vec::pop)
-			.unwrap_or_else(|| Self::alloc_in_buffer(&mut self.bytes, type_info));
-		let was = self.owned.insert(dest, type_info.type_id);
-		assert!(was.is_none());
-		std::ptr::copy_nonoverlapping(src, dest, type_info.bytes);
-		dest
-	}
 	fn alloc_in_buffer(bytes: &mut Vec<u8>, type_info: &TypeInfo) -> StorePtr {
 		println!("allocating in buffer..");
 		let mut ptr = unsafe { // we only rely on the vector being consistent
@@ -89,8 +78,19 @@ impl Storage {
 		};
 		assert!(bytes.capacity() >= new_size);
 		bytes.resize(new_size, 0u8);
-		println!("buffer is now {:?} bytes", bytes.len());
+		println!("buffer is now {:?} bytes. starts at mem {:p}", bytes.len(), bytes.as_mut_ptr());
 		ptr
+	}
+	pub unsafe fn insert(&mut self, src: StackPtr, type_info: &TypeInfo) -> StorePtr {
+		println!("inserting from {:p}", src);
+		let dest: StorePtr =
+			self.free.get_mut(&type_info.bytes)
+			.and_then(Vec::pop).expect("NO MORE SPACE");
+		let was = self.owned.insert(dest, type_info.type_id);
+		assert!(was.is_none());
+		std::ptr::copy_nonoverlapping(src, dest, type_info.bytes);
+		println!("OK INSERTED {:p}", dest);
+		dest
 	}
 	pub unsafe fn move_out<T>(&mut self, src: StorePtr, dest: StackPtr) {
 		let bytes = std::mem::size_of::<T>();
@@ -108,9 +108,11 @@ impl Storage {
 }
 impl Drop for Storage {
 	fn drop(&mut self) {
-		for (&ptr, tid) in self.owned.iter() {
-			println!("dropping {:p}", ptr);
-			let info = self.type_info.get(tid).expect("unknown type!");
+		println!("DROPPING");
+		for (ptr, tid) in self.owned.iter() {
+			// invariant: self.owned keys ALWAYS are mapped in type_info
+			let info = self.type_info.get(tid).unwrap();
+			let ptr: *mut u8 = *ptr;
 			unsafe { 
 				info.drop_fn.execute(ptr)
 			};
@@ -131,7 +133,7 @@ impl Drop for Foo {
 fn memtest() {
 	let info_map = Arc::new(type_info_map![Foo]);
 	let elements = vec![
-		(TypeId::of::<Foo>(), 1)
+		(TypeId::of::<Foo>(), 2)
 	];
 	let mut storage = Storage::new(elements, info_map).expect("BAD");
 	let src = deeper(&mut storage);
@@ -146,7 +148,6 @@ fn memtest() {
 		storage.move_out::<Foo>(src, dest)
 	};
 	let x = unsafe { x.assume_init() };
-	println!("x {:?}", x);
 }
 
 fn deeper(storage: &mut Storage) -> StorePtr {
@@ -154,6 +155,8 @@ fn deeper(storage: &mut Storage) -> StorePtr {
 	let ptr: *mut Foo = &mut y;
 	let ptr: *mut u8 = unsafe { std::mem::transmute(ptr) };
 	let src = unsafe {
+		// 2nd one
+		storage.insert(ptr, &TypeInfo::new::<Foo>());
 		storage.insert(ptr, &TypeInfo::new::<Foo>())
 	};
 	unsafe {

@@ -31,21 +31,19 @@ impl CloneFn {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub(crate) struct PartialEqFn(Option<NonNull<fn(*mut u8, *mut u8) -> bool>>);
+pub(crate) struct PartialEqFn(Option<fn(*mut u8, *mut u8) -> bool>);
 impl PartialEqFn {
     fn new<T>() -> Self {
         let clos: fn(*mut u8, *mut u8) -> bool = |a, b| unsafe {
             let a: &T = transmute(a);
             a.maybe_partial_eq(transmute(b))
         };
-        let opt_nn = NonNull::new(unsafe { transmute(clos) });
-        debug_assert!(opt_nn.is_some());
-        PartialEqFn(opt_nn)
+        PartialEqFn(Some(clos))
     }
     #[inline]
     pub unsafe fn execute(self, a: *mut u8, b: *mut u8) -> bool {
         if let Some(x) = self.0 {
-            (*x.as_ptr())(a, b)
+            (x)(a, b)
         } else {
             panic!("proto attempted to partial_eq a type for which its not defined!");
         }
@@ -56,7 +54,7 @@ impl PartialEqFn {
 // new() automatically handles types with trivial drop functions
 // UNSAFE if the type pointed to does not match the type used to instantiate the ptr.
 #[derive(Debug, Copy, Clone)]
-pub(crate) struct DropFn(Option<NonNull<fn(*mut u8)>>);
+pub(crate) struct DropFn(Option<fn(*mut u8)>);
 impl DropFn {
     fn new<T>() -> Self {
         if std::mem::needs_drop::<T>() {
@@ -64,7 +62,7 @@ impl DropFn {
                 let ptr: &mut ManuallyDrop<T> = transmute(ptr);
                 ManuallyDrop::drop(ptr);
             };
-            DropFn(NonNull::new(unsafe { transmute(clos) }))
+            DropFn(Some(clos))
         } else {
             DropFn(None)
         }
@@ -73,7 +71,7 @@ impl DropFn {
     #[inline]
     pub unsafe fn execute(self, on: *mut u8) {
         if let Some(x) = self.0 {
-            (*x.as_ptr())(on);
+            (x)(on);
         } else {
             // None variant represents a drop with no effect
         }
@@ -109,4 +107,29 @@ impl TypeInfo {
             is_copy: <T as MaybeCopy>::IS_COPY,
         }
     }
+}
+
+
+#[test]
+fn drops_ok() {
+
+    #[derive(Debug)]
+    struct Foo(u32);
+    impl Drop for Foo {
+        fn drop(&mut self) {
+            println!("dropped Foo({}) !", self.0);
+        }
+    }
+
+    let drop_fn = DropFn::new::<Foo>();
+
+    let foo = Foo(2);
+    let x1: *const Foo = &foo as *const Foo;
+    let x2: *mut u8 = unsafe {
+        transmute(x1)
+    };
+    println!("{:?}", (x1, x2));
+
+    unsafe { drop_fn.execute(x2) };
+    std::mem::forget(foo);
 }
