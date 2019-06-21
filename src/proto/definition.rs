@@ -1,4 +1,3 @@
-
 use super::*;
 
 #[derive(Debug, Clone)]
@@ -39,7 +38,7 @@ type IsInit = bool;
 struct ProtoBuilder {
     proto_def: &'static ProtoDef,
     mem_storage: Storage,
-    mem_defs: HashMap<LocId, Option<*mut u8>>, 
+    mem_defs: HashMap<LocId, Option<*mut u8>>,
 }
 impl ProtoBuilder {
     pub fn new(proto_def: &'static ProtoDef) -> Self {
@@ -106,7 +105,11 @@ impl ProtoBuilder {
                 )),
                 LocKind::PortGetter => Space::PoGe(PoGeSpace::new()),
                 LocKind::Memory => Space::Memo({
-                    let ptr = self.mem_defs.get(id).unwrap().unwrap_or(std::ptr::null_mut());
+                    let ptr = self
+                        .mem_defs
+                        .get(id)
+                        .unwrap()
+                        .unwrap_or(std::ptr::null_mut());
                     let info = type_id_2_info
                         .get(&loc_info.type_info.type_id)
                         .unwrap()
@@ -119,10 +122,7 @@ impl ProtoBuilder {
         let rules = self.build_rules(&loc_info)?;
 
         println!("{:?}", (&rules, &memory_bits, &ready));
-        let r = ProtoR {
-            spaces,
-            rules,
-        };
+        let r = ProtoR { spaces, rules };
         let w = Mutex::new(ProtoW {
             memory_bits,
             active: ProtoActive {

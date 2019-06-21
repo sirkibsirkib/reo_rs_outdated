@@ -1,6 +1,3 @@
-////////// DEBUG DEBUG
-// #![allow(dead_code)]
-
 use crate::proto::memory::Storage;
 use itertools::izip;
 
@@ -12,10 +9,9 @@ pub mod reflection;
 use reflection::TypeInfo;
 
 pub mod traits;
-use traits::{HasMsgDropBox, HasUnclaimedPorts, MaybeClone, MaybeCopy, MaybePartialEq, Proto};
-
-// pub mod definition;
-// pub use definition::{ActionDef, ProtoDef, RuleDef};
+use traits::{
+    DataSource, HasMsgDropBox, HasUnclaimedPorts, MaybeClone, MaybeCopy, MaybePartialEq, Proto,
+};
 
 pub mod groups;
 
@@ -25,7 +21,7 @@ use crate::{
     tokens::{decimal::Decimal, Grouped},
     LocId, ProtoHandle,
 };
-use hashbrown::{HashMap};
+use hashbrown::HashMap;
 use parking_lot::{Mutex, MutexGuard};
 use std::{
     alloc::Layout,
@@ -45,7 +41,7 @@ use std_semaphore::Semaphore;
 
 /// A coordination point that getters interact with to acquire a datum.
 /// Common to memory and port putters.
-struct PutterSpace {
+pub(crate) struct PutterSpace {
     ptr: AtomicPtr<u8>,
     cloner_countdown: AtomicUsize,
     mover_sema: Semaphore,
@@ -74,106 +70,6 @@ impl PutterSpace {
         self.ptr.load(Ordering::SeqCst)
     }
 }
-
-
-trait DataSource<'a> {
-    type MoveMcguffin: Sized;
-    fn my_space(&self) -> &PutterSpace;
-    fn execute_move(&self, mm: Self::MoveMcguffin, out_ptr: *mut u8);
-    fn execute_clone(&self, out_ptr: *mut u8);
-    fn send_done_signal(&self, someone_moved: bool);
-
-    fn acquire_data<F: Fn()->Self::MoveMcguffin>(&self, out_ptr: *mut u8, case: DataGetCase, mm_getter: F) {
-        let space = self.my_space();
-        let src = space.get_ptr();
-        if space.type_info.is_copy {
-            // MOVE HAPPENS HERE
-            self.execute_move(mm_getter(), out_ptr);
-            unsafe {
-                src.copy_to(out_ptr, space.type_info.layout.size())
-            };
-            let was = space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
-            if was == case.last_countdown() {
-                self.send_done_signal(true);
-            }
-        } else {
-            if case.i_move() {
-                if case.mover_must_wait() {
-                    space.mover_sema.acquire();
-                }
-                // MOVE HAPPENS HERE
-                self.execute_move(mm_getter(), out_ptr);
-                self.send_done_signal(true);
-            } else {
-                // CLONE HAPPENS HERE
-                unsafe {
-                    space.type_info.clone_fn.execute(src, out_ptr)
-                };
-                let was = space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
-                if was == case.last_countdown() {
-                    if case.someone_moves() {
-                        space.mover_sema.release();
-                    } else {
-                        self.send_done_signal(false);
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl<'a> DataSource<'a> for PoPuSpace {
-    type MoveMcguffin = ();
-    fn my_space(&self) -> &PutterSpace {
-        &self.p
-    }
-    fn execute_move(&self, _: Self::MoveMcguffin, out_ptr: *mut u8) {
-        let src: *mut u8 = self.p.remove_ptr();
-        unsafe {
-            self.p.type_info.move_fn_execute(src, out_ptr)
-        };
-    }
-    fn execute_clone(&self, out_ptr: *mut u8) {
-        let src: *mut u8 = self.p.get_ptr();
-        unsafe {
-            self.p.type_info.clone_fn.execute(src, out_ptr)
-        };
-    }
-    fn send_done_signal(&self, someone_moved: bool) {
-        self.dropbox.send(if someone_moved { 1 } else { 0 });
-    }
-}
-
-impl<'a> DataSource<'a> for MemoSpace {
-    type MoveMcguffin = MutexGuard<'a, ProtoW>;
-    fn my_space(&self) -> &PutterSpace {
-        &self.p
-    }
-    fn execute_move(&self, mut w: Self::MoveMcguffin, out_ptr: *mut u8) {
-        let src: *mut u8 = self.p.get_ptr();
-        let refs: &mut usize = w.active.mem_refs.get_mut(&src).expect("no memrefs?");
-        assert!(*refs >= 1);
-        *refs -= 1;
-        if *refs == 0 {
-            w.active.mem_refs.remove(&src);
-            unsafe {
-                w.active.storage.move_out(src, out_ptr, &self.p.type_info.layout)
-            }
-        } else {
-            panic!("Tried to MOVE out a memcell with 2+ aliases")
-        }
-    }
-    fn execute_clone(&self, out_ptr: *mut u8) {
-        let src: *mut u8 = self.p.get_ptr();
-        unsafe {
-            self.p.type_info.clone_fn.execute(src, out_ptr)
-        };
-    }
-    fn send_done_signal(&self, _someone_moved: bool) {
-        // nothing to do here
-    }
-}
-
 
 /// Memory variant of PutterSpace. Contains no additional data but has unique
 /// behavior: simulating "Drop" for a ptr that may be shared with other memory cells.
@@ -225,9 +121,7 @@ impl PoGeSpace {
     unsafe fn participate_with_msg(&self, a: &ProtoAll, msg: usize, out_ptr: *mut u8) {
         let (case, putter_id) = DataGetCase::parse_msg(msg);
         match a.r.get_space(putter_id) {
-            Some(Space::Memo(space)) => space.acquire_data(out_ptr, case, || {
-                a.w.lock()
-            }),
+            Some(Space::Memo(space)) => space.acquire_data(out_ptr, case, || a.w.lock()),
             Some(Space::PoPu(space)) => space.acquire_data(out_ptr, case, || ()),
             _ => panic!("Bad putter ID!!"),
         }
@@ -854,9 +748,7 @@ impl<'a> Firer<'a> {
         assert!(*refs >= 1);
         *refs -= 1;
         if *refs == 0 {
-            unsafe {
-                self.w.storage.drop_inside(ptr, &space.p.type_info)
-            };
+            unsafe { self.w.storage.drop_inside(ptr, &space.p.type_info) };
         }
     }
 

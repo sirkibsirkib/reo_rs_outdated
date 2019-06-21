@@ -38,24 +38,25 @@ pub struct Storage {
     type_info: HashMap<TypeId, Arc<TypeInfo>>,
 }
 impl Storage {
-	#[inline]
-	pub fn move_value_in<T: 'static>(&mut self, mut value: T) -> StorePtr {
-		let info = Arc::new(TypeInfo::new::<T>());
-        let stored_ptr = unsafe { // SAFE. info type matches ptr type
+    #[inline]
+    pub fn move_value_in<T: 'static>(&mut self, mut value: T) -> StorePtr {
+        let info = Arc::new(TypeInfo::new::<T>());
+        let stored_ptr = unsafe {
+            // SAFE. info type matches ptr type
             let stack_ptr: *mut u8 = std::mem::transmute(&mut value as *mut T);
             self.move_in(stack_ptr, &info)
         };
         std::mem::forget(value);
         stored_ptr
-	}
+    }
     pub unsafe fn move_in(&mut self, src: StackPtr, type_info: &Arc<TypeInfo>) -> StorePtr {
-    	let dest = self.inner_alloc(type_info);
+        let dest = self.inner_alloc(type_info);
         type_info.move_fn_execute(src, dest);
         dest
     }
     pub unsafe fn clone_in(&mut self, src: StackPtr, type_info: &Arc<TypeInfo>) -> StorePtr {
-    	let dest = self.inner_alloc(type_info);
-    	type_info.clone_fn.execute(src, dest);
+        let dest = self.inner_alloc(type_info);
+        type_info.clone_fn.execute(src, dest);
         dest
     }
     pub unsafe fn move_out(&mut self, src: StorePtr, dest: StackPtr, layout: &Layout) {
@@ -70,7 +71,7 @@ impl Storage {
     pub fn shrink_to_fit(&mut self) {
         for (layout_hashable, vec) in self.free.drain() {
             for ptr in vec {
-            	println!("dropping (empty) alloc at {:p}", ptr);
+                println!("dropping (empty) alloc at {:p}", ptr);
                 unsafe { alloc::dealloc(ptr, layout_hashable.0) }
             }
         }
@@ -84,9 +85,11 @@ impl Storage {
             .push(ptr);
     }
     unsafe fn inner_alloc(&mut self, type_info: &Arc<TypeInfo>) -> StorePtr {
-    	println!("move_ining.. looking for a free space...");
-    	// preserve the invariant
-    	self.type_info.entry(type_info.type_id).or_insert_with(|| type_info.clone());
+        println!("move_ining.. looking for a free space...");
+        // preserve the invariant
+        self.type_info
+            .entry(type_info.type_id)
+            .or_insert_with(|| type_info.clone());
         let dest = self
             .free
             .entry(LayoutHashable(type_info.layout))
@@ -133,21 +136,21 @@ impl Drop for Foo {
 fn memtest() {
     let mut storage = Storage::default();
 
-    let mut a: MaybeUninit<Foo> = MaybeUninit::new(Foo { x: [1,2,3] });
+    let mut a: MaybeUninit<Foo> = MaybeUninit::new(Foo { x: [1, 2, 3] });
     let mut b: MaybeUninit<Foo> = MaybeUninit::uninit();
-	println!("A=[1,2,3], B=?, []");
+    println!("A=[1,2,3], B=?, []");
     let info = Arc::new(TypeInfo::new::<Foo>());
 
     unsafe {
-    	let ra = std::mem::transmute(a.as_mut_ptr());
-    	let rb = std::mem::transmute(b.as_mut_ptr());
+        let ra = std::mem::transmute(a.as_mut_ptr());
+        let rb = std::mem::transmute(b.as_mut_ptr());
 
-    	let rc = storage.move_in(ra, &info);
-		println!("A=[1,2,3], B=?, [C=[1,2,3]]");
+        let rc = storage.move_in(ra, &info);
+        println!("A=[1,2,3], B=?, [C=[1,2,3]]");
 
-    	storage.move_out(rc, rb, &info.layout);
-		println!("A=[1,2,3], B=[1,2,3], []");
+        storage.move_out(rc, rb, &info.layout);
+        println!("A=[1,2,3], B=[1,2,3], []");
 
-		println!("PRINTING: A:{:?}, B:{:?}", a.assume_init(), b.assume_init());
+        println!("PRINTING: A:{:?}, B:{:?}", a.assume_init(), b.assume_init());
     };
 }
