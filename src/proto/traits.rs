@@ -157,39 +157,13 @@ OK so here's the API:
 
 */
 
-#[derive(Debug, Copy, Clone)]
-pub enum LocKindExt {
-    PortPutter,
-    PortGetter,
-    MemInitialized,
-    MemUninitialized,
-}
-pub struct TypelessProtoDef {
-    pub structure: ProtoDef,
-    pub loc_kind_ext: HashMap<LocId, LocKindExt>,
-}
-pub struct MemFillPromise<'a> {
-    type_id_expected: TypeId,
-    builder: &'a mut ProtoBuilder,
-}
-#[derive(Debug, Copy, Clone)]
-pub struct WrongMemFillType {
-    pub expected_type: TypeId,
-}
-pub struct MemFillPromiseFulfilled {
-    _secret: (),
-}
-
 pub trait Proto: Sized {
     fn typeless_proto_def() -> &'static TypelessProtoDef;
     fn fill_memory(loc_id: LocId, promise: MemFillPromise) -> MemFillPromiseFulfilled;
     fn loc_kind_ext(loc_id: LocId) -> LocKindExt;
     fn loc_type(loc_id: LocId) -> &'static TypeInfo;
-
-    fn instantiate() -> Arc<ProtoAll> {
+    fn try_instantiate() -> Result<Arc<ProtoAll>, ProtoBuildErr> {
         let def = Self::typeless_proto_def();
-
-        // TODO change the API for protobuilder
         let mut builder = ProtoBuilder::new();
         for (&id, kind_ext) in def.loc_kind_ext.iter() {
             if let LocKindExt::MemInitialized = kind_ext {
@@ -200,7 +174,13 @@ pub trait Proto: Sized {
                 let _promise_fulfilled = Self::fill_memory(id, promise);
             }
         }
-        Arc::new(mem.finish(Self::loc_info()).expect("Bad finish"))
+        Ok(Arc::new(builder.finish::<Self>()?))
+    }
+    fn instantiate() -> Arc<ProtoAll> {
+        match Self::try_instantiate() {
+            Ok(x) => x,
+            Err(e) => panic!("Instantiate failed! {:?}")
+        }
     }
 }
 

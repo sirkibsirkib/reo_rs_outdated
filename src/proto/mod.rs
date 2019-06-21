@@ -3,7 +3,8 @@ use itertools::izip;
 
 pub mod definition;
 mod memory;
-use definition::{Formula, ProtoDef, ProtoBuilder};
+use definition::{Formula, ProtoBuilder, ProtoBuildErr, TypelessProtoDef,
+    MemFillPromiseFulfilled, MemFillPromise, LocKindExt};
 
 pub mod reflection;
 use reflection::TypeInfo;

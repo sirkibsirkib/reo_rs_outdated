@@ -35,18 +35,52 @@ pub enum ProtoBuildErr {
 }
 
 pub struct ProtoBuilder {
-    proto_def: &'static ProtoDef,
     mem_storage: Storage,
     mem_defs: HashMap<LocId, Option<*mut u8>>,
 }
 
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum LocKindExt {
+    PortPutter,
+    PortGetter,
+    MemInitialized,
+    MemUninitialized,
+}
+impl LocKindExt {
+    fn is_port(self) -> bool {
+        !self.is_mem()
+    }
+    fn is_mem(self) -> bool {
+        use LocKindExt::*;
+        match self {
+            PortPutter | PortGetter => false,
+            MemInitialized | MemUninitialized => true,
+        }
+    }
+}
+
+pub struct TypelessProtoDef {
+    pub structure: ProtoDef,
+    pub loc_kind_ext: HashMap<LocId, LocKindExt>,
+}
+pub struct MemFillPromise<'a> {
+    type_id_expected: TypeId,
+    builder: &'a mut ProtoBuilder,
+}
+#[derive(Debug, Copy, Clone)]
+pub struct WrongMemFillType {
+    pub expected_type: TypeId,
+}
+pub struct MemFillPromiseFulfilled {
+    _secret: (),
+}
+
 
 
 impl ProtoBuilder {
-    pub fn new(proto_def: &'static ProtoDef) -> Self {
+    pub fn new() -> Self {
         Self {
-            proto_def,
             mem_storage: Default::default(),
             mem_defs: Default::default(),
         }
@@ -60,21 +94,47 @@ impl ProtoBuilder {
         let was = self.mem_defs.insert(id, None);
         assert!(was.is_none());
     }
-    pub fn finish(self, loc_info: &HashMap<LocId, LocInfo>) -> Result<ProtoAll, ProtoBuildErr> {
+    pub fn finish<P: Proto>(self) -> Result<ProtoAll, ProtoBuildErr> {
+        let typeless_proto_def = P::typeless_proto_def();
+
+        let memory_bits = typeless_proto_def
+            .loc_kind_ext
+            .iter()
+            .filter(|(_, &v)| v == LocKindExt::MemInitialized)
+            .map(|(&k,_)| k)
+            .collect();
+
+        let ready = typeless_proto_def
+            .loc_kind_ext
+            .iter()
+            .filter(|(_,v)| v.is_mem())
+            .map(|(&k,_)| k)
+            .collect();
+
+
+        let mut type_infos = HashMap {
+            
+        }
+
+        let unclaimed_ports = typeless_proto_def
+            .loc_kind_ext
+            .iter()
+            .filter(|(_,v)| v.is_port())
+            .map(|(&k,_)| {
+
+            })
+            .collect();
+
+    // fn fill_memory(loc_id: LocId, promise: MemFillPromise) -> MemFillPromiseFulfilled;
+    // fn loc_kind_ext(loc_id: LocId) -> LocKindExt;
+    // fn loc_type(loc_id: LocId) -> &'static TypeInfo;
+
         /* here we construct a proto according to the specification.
         Failure may be a result of:
         1. The type for a used LocId is not derivable.
         2. A LocId is associated with a type which is not provided in the TypeInfo map.
         */
-        let memory_bits = self
-            .mem_defs
-            .iter()
-            .filter_map(|(&k, v)| if v.is_some() { Some(k) } else { None })
-            .collect();
-        let ready = loc_info
-            .iter()
-            .filter_map(|(&k, v)| if v.kind.is_mem() { Some(k) } else { None })
-            .collect();
+
         let unclaimed_ports = loc_info
             .iter()
             .filter_map(|(&k, v)| {
