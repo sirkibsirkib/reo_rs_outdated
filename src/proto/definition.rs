@@ -73,7 +73,8 @@ impl ProtoBuilder {
             assert_eq!(0, ptr as usize % align);
         }
         // make space for the new datum
-        self.mem_data.resize(self.mem_data.len() + std::mem::size_of::<T>(), 0);
+        self.mem_data
+            .resize(self.mem_data.len() + std::mem::size_of::<T>(), 0);
         let typed_ptr: &mut T = std::mem::transmute(ptr);
         let swapped = std::mem::replace(typed_ptr, t);
         std::mem::forget(swapped);
@@ -81,9 +82,7 @@ impl ProtoBuilder {
     }
     pub fn uninit_memory<T: 'static>(&mut self, id: LocId) {
         assert!(!self.contents.contains_key(&id));
-        let t: T = unsafe {
-            std::mem::MaybeUninit::uninit().assume_init()
-        };
+        let t: T = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
         let ptr = unsafe { self.write_into_buffer(t) };
         self.contents.insert(id, (ptr, false, TypeInfo::new::<T>()));
     }
@@ -100,13 +99,11 @@ impl ProtoBuilder {
 
         // TODO safe unwinding
 
-        let memory_bits = self.contents.iter().filter_map(|(&k,v)| {
-            if v.1 {
-                Some(k)
-            } else {
-                None
-            }
-        }).collect();
+        let memory_bits = self
+            .contents
+            .iter()
+            .filter_map(|(&k, v)| if v.1 { Some(k) } else { None })
+            .collect();
         let free_mems = {
             let mut m = HashMap::default();
             for (id, (ptr, is_free, _info)) in self.contents.iter() {
@@ -117,25 +114,25 @@ impl ProtoBuilder {
             }
             m
         };
-        let ready  = loc_info.iter().filter_map(|(&k, v)| {
-            if v.kind.is_mem() {
-                Some(k)
-            } else {
-                None
-            }
-        }).collect();
-        let unclaimed_ports = loc_info.iter().filter_map(|(&k, v)| {
-            let role = match v.kind {
-                LocKind::PortPutter => PortRole::Putter,
-                LocKind::PortGetter => PortRole::Getter,
-                LocKind::Memory => return None,
-            };
-            let info = PortInfo {
-                role,
-                type_id: v.type_info.type_id
-            };
-            Some((k, info))
-        }).collect();
+        let ready = loc_info
+            .iter()
+            .filter_map(|(&k, v)| if v.kind.is_mem() { Some(k) } else { None })
+            .collect();
+        let unclaimed_ports = loc_info
+            .iter()
+            .filter_map(|(&k, v)| {
+                let role = match v.kind {
+                    LocKind::PortPutter => PortRole::Putter,
+                    LocKind::PortGetter => PortRole::Getter,
+                    LocKind::Memory => return None,
+                };
+                let info = PortInfo {
+                    role,
+                    type_id: v.type_info.type_id,
+                };
+                Some((k, info))
+            })
+            .collect();
         let type_id_2_info: HashMap<_, _> = loc_info
             .values()
             .map(|loc_info| (loc_info.type_info.type_id, loc_info.type_info.clone()))
@@ -162,8 +159,6 @@ impl ProtoBuilder {
             .collect();
 
         let rules = self.build_rules(&loc_info)?;
-
-
 
         println!("{:?}", (&rules, &memory_bits, &ready));
         let r = ProtoR {
@@ -276,7 +271,6 @@ impl ProtoBuilder {
     }
 }
 
-
 // TODO cleanup!
 // impl Drop for ProtoBuilder {
 //     fn drop(&mut self) {
@@ -295,7 +289,6 @@ impl ProtoBuilder {
 //     }
 // }
 
-
 #[derive(Debug)]
 pub struct LocInfo {
     kind: LocKind,
@@ -305,7 +298,7 @@ impl LocInfo {
     fn new<T: 'static>(kind: LocKind) -> Self {
         Self {
             kind,
-            type_info: Arc::new(TypeInfo::new::<T>())
+            type_info: Arc::new(TypeInfo::new::<T>()),
         }
     }
 }
@@ -371,8 +364,6 @@ lazy_static::lazy_static! {
     };
 }
 
-
-
 struct Fifo3;
 impl Proto for Fifo3 {
     fn definition() -> &'static ProtoDef {
@@ -381,7 +372,7 @@ impl Proto for Fifo3 {
     fn instantiate() -> Arc<ProtoAll> {
         let mem = ProtoBuilder::new(Self::definition());
         use LocKind::*;
-        let loc_info = map!{
+        let loc_info = map! {
             0 => LocInfo::new::<u32>(PortPutter),
             1 => LocInfo::new::<u32>(PortGetter),
         };

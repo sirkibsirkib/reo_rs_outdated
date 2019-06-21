@@ -87,8 +87,7 @@ pub struct TypeInfo {
     pub(crate) clone_fn: CloneFn,
     pub(crate) partial_eq_fn: PartialEqFn,
     pub(crate) is_copy: bool,
-    pub(crate) bytes: usize,
-    pub(crate) align: usize,
+    pub(crate) layout: Layout,
 }
 impl TypeInfo {
     pub fn get_tid(&self) -> TypeId {
@@ -98,21 +97,18 @@ impl TypeInfo {
         // always true: clone_fn.is_none() || !is_copy
         // holds because Copy trait is mutually exclusive with Drop trait.
         Self {
-            bytes: std::mem::size_of::<T>(),
             type_id: TypeId::of::<T>(),
             drop_fn: DropFn::new::<T>(),
             clone_fn: CloneFn::new::<T>(),
             partial_eq_fn: PartialEqFn::new::<T>(),
-            align: std::mem::align_of::<T>(),
+            layout: Layout::new::<T>(),
             is_copy: <T as MaybeCopy>::IS_COPY,
         }
     }
 }
 
-
 #[test]
 fn drops_ok() {
-
     #[derive(Debug)]
     struct Foo(u32);
     impl Drop for Foo {
@@ -125,9 +121,7 @@ fn drops_ok() {
 
     let foo = Foo(2);
     let x1: *const Foo = &foo as *const Foo;
-    let x2: *mut u8 = unsafe {
-        transmute(x1)
-    };
+    let x2: *mut u8 = unsafe { transmute(x1) };
     println!("{:?}", (x1, x2));
 
     unsafe { drop_fn.execute(x2) };

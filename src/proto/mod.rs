@@ -3,8 +3,8 @@
 
 use itertools::izip;
 
-mod memory;
 pub mod definition;
+mod memory;
 use definition::{Formula, ProtoDef};
 
 pub mod reflection;
@@ -27,6 +27,7 @@ use crate::{
 use hashbrown::{HashMap, HashSet};
 use parking_lot::{Mutex, MutexGuard};
 use std::{
+    alloc::Layout,
     any::TypeId,
     cell::UnsafeCell,
     convert::TryInto,
@@ -72,7 +73,7 @@ impl PutterSpace {
         let src = self.get_ptr();
         if self.type_info.is_copy {
             // MOVE HAPPENS HERE
-            src.copy_to(out_ptr, self.type_info.bytes);
+            src.copy_to(out_ptr, self.type_info.layout.size());
             let was = self.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
             if was == case.last_countdown() {
                 finish_fn(false);
@@ -83,7 +84,7 @@ impl PutterSpace {
                     self.mover_sema.acquire();
                 }
                 // MOVE HAPPENS HERE
-                src.copy_to(out_ptr, self.type_info.bytes);
+                src.copy_to(out_ptr, self.type_info.layout.size());
                 finish_fn(false);
             } else {
                 // CLONE HAPPENS HERE
@@ -929,7 +930,7 @@ impl<'a> Firer<'a> {
                 unsafe { info.clone_fn.execute(src, dest) }
             } else {
                 // mem move!
-                unsafe { std::ptr::copy(src, dest, info.bytes) };
+                unsafe { std::ptr::copy(src, dest, info.layout.size()) };
             }
             // 4. copy pointers to other memory cells (if any)
             // ASSUMES all destinations have dangling pointers
