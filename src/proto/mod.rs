@@ -3,7 +3,7 @@
 
 use itertools::izip;
 
-
+mod memory;
 pub mod definition;
 use definition::{Formula, ProtoDef};
 
