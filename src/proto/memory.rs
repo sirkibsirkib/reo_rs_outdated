@@ -26,10 +26,10 @@ struct Storage {
 	bytes: Vec<u8>, // fixed length
 	free: HashMap<DataLen, Vec<StorePtr>>,
 	owned: HashMap<StorePtr, TypeId>,
-	type_info: Arc<HashMap<TypeId, TypeInfo>>,
+	type_info: Arc<HashMap<TypeId, Arc<TypeInfo>>>,
 }
 impl Storage {
-	pub fn new(sizes: Vec<(TypeId, usize)>, type_info: Arc<HashMap<TypeId, TypeInfo>>) -> Result<Self, TypeId> {
+	pub fn new(sizes: Vec<(TypeId, usize)>, type_info: Arc<HashMap<TypeId, Arc<TypeInfo>>>) -> Result<Self, TypeId> {
 		let mut cap = 0;
 		for (type_id, count) in sizes.iter().copied() {
 			if let Some(type_info) = type_info.get(&type_id) {
@@ -93,19 +93,23 @@ impl Storage {
 		ptr
 	}
 	pub unsafe fn move_out<T>(&mut self, src: StorePtr, dest: StackPtr) {
-		std::ptr::copy_nonoverlapping(src, dest, std::mem::size_of::<T>());
+		let bytes = std::mem::size_of::<T>();
+		std::ptr::copy_nonoverlapping(src, dest, bytes);
+		self.free(src, bytes);
 	}
 	pub unsafe fn drop_inside(&mut self, ptr: StorePtr, info: &TypeInfo) {
 		info.drop_fn.execute(ptr);
 		self.free(ptr, info.bytes);
 	}
-	fn free(&mut self, ptr: StorePtr, bytes: DataLen) {
+	unsafe fn free(&mut self, ptr: StorePtr, bytes: DataLen) {
+		self.owned.remove(&ptr).expect("not owned?");
 		self.free.get_mut(&bytes).expect("not prepared for this len").push(ptr);
 	}
 }
 impl Drop for Storage {
 	fn drop(&mut self) {
 		for (&ptr, tid) in self.owned.iter() {
+			println!("dropping {:p}", ptr);
 			let info = self.type_info.get(tid).expect("unknown type!");
 			unsafe { 
 				info.drop_fn.execute(ptr)
@@ -115,36 +119,45 @@ impl Drop for Storage {
 }
 
 
+#[derive(Debug)]
+struct Foo { x: [usize;3] }
+impl Drop for Foo {
+	fn drop(&mut self) {
+		println!("dropping foo {:?}", self.x);
+	}
+}
+
 #[test]
 fn memtest() {
-	let info_map = Arc::new(map!{
-		TypeId::of::<usize>() => TypeInfo::new::<usize>()
-	});
+	let info_map = Arc::new(type_info_map![Foo]);
 	let elements = vec![
-		(TypeId::of::<usize>(), 1)
+		(TypeId::of::<Foo>(), 1)
 	];
 	let mut storage = Storage::new(elements, info_map).expect("BAD");
 	let src = deeper(&mut storage);
 
 
-	let mut x: MaybeUninit<usize> = MaybeUninit::uninit();
+	let mut x: MaybeUninit<Foo> = MaybeUninit::uninit();
 	let dest: *mut u8 = unsafe {
 		std::mem::transmute(x.as_mut_ptr())	
 	};
 
 	unsafe {
-		storage.move_out::<usize>(src, dest)
+		storage.move_out::<Foo>(src, dest)
 	};
 	let x = unsafe { x.assume_init() };
 	println!("x {:?}", x);
 }
 
 fn deeper(storage: &mut Storage) -> StorePtr {
-	let mut y: usize = 5;
-	let ptr: *mut usize = &mut y;
+	let mut y: Foo = Foo { x: [0,1,2] };
+	let ptr: *mut Foo = &mut y;
 	let ptr: *mut u8 = unsafe { std::mem::transmute(ptr) };
 	let src = unsafe {
-		storage.insert(ptr, &TypeInfo::new::<usize>())
+		storage.insert(ptr, &TypeInfo::new::<Foo>())
 	};
+	unsafe {
+		std::mem::forget(y);
+	}
 	src
 }
