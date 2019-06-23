@@ -375,11 +375,16 @@ impl Proto for IdkProto {
         }
         &LAZY
     }
-    fn fill_memory(_: LocId, _: MemFillPromise) -> MemFillPromiseFulfilled {
-        unimplemented!()
+    fn fill_memory(loc_id: LocId, _p: MemFillPromise) -> MemFillPromiseFulfilled {
+        match loc_id {
+            _ => unreachable!(),
+        }
     }
     fn loc_type(loc_id: LocId) -> TypeInfo {
-        TypeInfo::new::<u32>()
+        match loc_id {
+            0 | 1 => TypeInfo::new::<u32>(),
+            _ => unreachable!(),
+        }
     }
 }
 
