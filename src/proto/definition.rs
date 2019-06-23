@@ -115,7 +115,7 @@ impl ProtoBuilder {
                 id_2_type_id.entry(id).or_insert(type_id);
                 type_id_2_info
                     .entry(type_id)
-                    .or_insert_with(|| Arc::new(*type_info));
+                    .or_insert_with(|| Arc::new(type_info));
             }
             (id_2_type_id, type_id_2_info)
         };
@@ -355,34 +355,36 @@ macro_rules! rule {
     }};
 }
 
-// struct IdkProto;
-// impl Proto for IdkProto {
-//     fn definition() -> &'static ProtoDef {
-//         lazy_static::lazy_static! {
-//             static ref LAZY: ProtoDef = ProtoDef {
-//                 rules: vec![
-//                     rule![Formula::True; 0=>1],
-//                     rule![Formula::True; 0=>1],
-//                 ]
-//             };
-//         }
-//         &LAZY
-//     }
-//     fn loc_info() -> &'static HashMap<LocId, LocInfo> {
-//         lazy_static::lazy_static! {
-//             static ref LAZY: HashMap<LocId, LocInfo> = {
-//                 use LocKind::*;
-//                 map! {
-//                     0 => LocInfo::new::<u32>(PortPutter),
-//                     1 => LocInfo::new::<u32>(PortGetter),
-//                 }
-//             };
-//         }
-//         &LAZY
-//     }
-// }
 
-// #[test]
-// fn instantiate_fifo3() {
-//     let _x = IdkProto::instantiate();
-// }
+struct IdkProto;
+impl Proto for IdkProto {
+    fn typeless_proto_def() -> &'static TypelessProtoDef {
+        lazy_static::lazy_static! {
+            static ref LAZY: TypelessProtoDef = TypelessProtoDef {
+                structure: ProtoDef{ 
+                    rules: vec![
+                        rule![Formula::True; 0=>1],
+                        rule![Formula::True; 0=>1],
+                    ]
+                },
+                loc_kind_ext: map! {
+                    0 => LocKindExt::PortPutter,
+                    1 => LocKindExt::PortGetter,
+                },
+            };
+        }
+        &LAZY
+    }
+    fn fill_memory(_: LocId, _: MemFillPromise) -> MemFillPromiseFulfilled {
+        unimplemented!()
+    }
+    fn loc_type(loc_id: LocId) -> TypeInfo {
+        TypeInfo::new::<u32>()
+    }
+}
+
+#[test]
+fn instantiate_fifo3() {
+    let _x = IdkProto::instantiate();
+    println!("DONE");
+}

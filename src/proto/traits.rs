@@ -168,14 +168,12 @@ pub struct MemFillPromiseFulfilled {
 pub trait Proto: Sized {
     fn typeless_proto_def() -> &'static TypelessProtoDef;
     fn fill_memory(loc_id: LocId, promise: MemFillPromise) -> MemFillPromiseFulfilled;
-    fn loc_kind_ext(loc_id: LocId) -> LocKindExt;
-    fn loc_type(loc_id: LocId) -> &'static TypeInfo;
+    fn loc_type(loc_id: LocId) -> TypeInfo;
     fn try_instantiate() -> Result<Arc<ProtoAll>, ProtoBuildErr> {
-        let def = Self::typeless_proto_def();
         let mut builder = ProtoBuilder::new();
-        for (&id, kind_ext) in def.loc_kind_ext.iter() {
+        for (&id, kind_ext) in Self::typeless_proto_def().loc_kind_ext.iter() {
             if let LocKindExt::MemInitialized = kind_ext {
-                let mut promise = MemFillPromise {
+                let promise = MemFillPromise {
                     type_id_expected: Self::loc_type(id).type_id,
                     builder: &mut builder,
                 };
@@ -187,7 +185,7 @@ pub trait Proto: Sized {
     fn instantiate() -> Arc<ProtoAll> {
         match Self::try_instantiate() {
             Ok(x) => x,
-            Err(e) => panic!("Instantiate failed! {:?}"),
+            Err(e) => panic!("Instantiate failed! {:?}", e),
         }
     }
 }
