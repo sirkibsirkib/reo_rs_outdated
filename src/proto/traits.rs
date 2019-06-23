@@ -1,5 +1,3 @@
-use crate::proto::definition::LocInfo;
-
 use super::*;
 
 pub trait EndlessIter {
@@ -156,7 +154,21 @@ OK so here's the API:
 
 pub struct MemFillPromise<'a> {
     type_id_expected: TypeId,
+    loc_id: LocId,
     builder: &'a mut ProtoBuilder,
+}
+impl<'a> MemFillPromise<'a> {
+
+    pub fn define_init_memory<T: 'static>(self, t: T) -> Result<MemFillPromiseFulfilled, WrongMemFillType> {
+        if TypeId::of::<T>() != self.type_id_expected {
+            Err(WrongMemFillType {
+                expected_type: self.type_id_expected
+            })
+        } else {
+            self.builder.define_init_memory(self.loc_id, t);
+            Ok(MemFillPromiseFulfilled { _secret: () })
+        }
+    }
 }
 #[derive(Debug, Copy, Clone)]
 pub struct WrongMemFillType {
@@ -171,13 +183,14 @@ pub trait Proto: Sized {
     fn loc_type(loc_id: LocId) -> TypeInfo;
     fn try_instantiate() -> Result<Arc<ProtoAll>, ProtoBuildErr> {
         let mut builder = ProtoBuilder::new();
-        for (&id, kind_ext) in Self::typeless_proto_def().loc_kind_ext.iter() {
+        for (&loc_id, kind_ext) in Self::typeless_proto_def().loc_kind_ext.iter() {
             if let LocKindExt::MemInitialized = kind_ext {
                 let promise = MemFillPromise {
-                    type_id_expected: Self::loc_type(id).type_id,
+                    loc_id,
+                    type_id_expected: Self::loc_type(loc_id).type_id,
                     builder: &mut builder,
                 };
-                let _promise_fulfilled = Self::fill_memory(id, promise);
+                let _promise_fulfilled = Self::fill_memory(loc_id, promise);
             }
         }
         Ok(Arc::new(builder.finish::<Self>()?))

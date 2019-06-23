@@ -85,7 +85,7 @@ impl ProtoBuilder {
             init_mems: Default::default(),
         }
     }
-    unsafe fn define_init_memory<T: 'static>(&mut self, id: LocId, t: T) {
+    pub fn define_init_memory<T: 'static>(&mut self, id: LocId, t: T) {
         let ptr = self.mem_storage.move_value_in(t);
         let was = self.init_mems.insert(id, ptr);
         assert!(was.is_none());
@@ -142,15 +142,6 @@ impl ProtoBuilder {
             })
             .collect();
 
-        // fn fill_memory(loc_id: LocId, promise: MemFillPromise) -> MemFillPromiseFulfilled;
-        // fn loc_kind_ext(loc_id: LocId) -> LocKindExt;
-        // fn loc_type(loc_id: LocId) -> &'static TypeInfo;
-
-        /* here we construct a proto according to the specification.
-        Failure may be a result of:
-        1. The type for a used LocId is not derivable.
-        2. A LocId is associated with a type which is not provided in the TypeInfo map.
-        */
         let spaces = typeless_proto_def
             .loc_kind_ext
             .iter()
@@ -288,53 +279,6 @@ impl ProtoBuilder {
     }
 }
 
-#[derive(Debug)]
-pub struct LocInfo {
-    kind: LocKind,
-    type_info: Arc<TypeInfo>,
-}
-impl LocInfo {
-    fn new<T: 'static>(kind: LocKind) -> Self {
-        Self {
-            kind,
-            type_info: Arc::new(TypeInfo::new::<T>()),
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub enum LocKind {
-    PortPutter,
-    PortGetter,
-    Memory,
-}
-impl LocKind {
-    fn is_port(self) -> bool {
-        use LocKind::*;
-        match self {
-            PortPutter | PortGetter => true,
-            Memory => false,
-        }
-    }
-    fn is_mem(self) -> bool {
-        !self.is_port()
-    }
-    fn is_putter(self) -> bool {
-        use LocKind::*;
-        match self {
-            PortPutter | Memory => true,
-            PortGetter => false,
-        }
-    }
-    fn is_getter(self) -> bool {
-        use LocKind::*;
-        match self {
-            PortGetter | Memory => true,
-            PortPutter => false,
-        }
-    }
-}
-
 macro_rules! rule {
     ( $formula:expr ; $( $putter:tt => $( $getter:tt  ),* );*) => {{
         RuleDef {
@@ -355,13 +299,12 @@ macro_rules! rule {
     }};
 }
 
-
 struct IdkProto;
 impl Proto for IdkProto {
     fn typeless_proto_def() -> &'static TypelessProtoDef {
         lazy_static::lazy_static! {
             static ref LAZY: TypelessProtoDef = TypelessProtoDef {
-                structure: ProtoDef{ 
+                structure: ProtoDef{
                     rules: vec![
                         rule![Formula::True; 0=>1],
                         rule![Formula::True; 0=>1],
