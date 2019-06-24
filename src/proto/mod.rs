@@ -25,10 +25,12 @@ use crate::{
 use hashbrown::HashMap;
 use parking_lot::{Mutex, MutexGuard};
 use std::{
+    str::FromStr,
     alloc::Layout,
     any::TypeId,
     cell::UnsafeCell,
     convert::TryInto,
+    fmt::Debug,
     marker::PhantomData,
     mem::{transmute, ManuallyDrop, MaybeUninit},
     sync::{

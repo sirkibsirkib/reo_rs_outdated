@@ -181,18 +181,19 @@ pub struct MemFillPromiseFulfilled {
 }
 pub trait Proto: Sized {
     fn typeless_proto_def() -> &'static TypelessProtoDef;
-    fn fill_memory(loc_id: LocId, promise: MemFillPromise) -> MemFillPromiseFulfilled;
-    fn loc_type(loc_id: LocId) -> TypeInfo;
+    fn fill_memory(loc_id: LocId, promise: MemFillPromise) -> Option<MemFillPromiseFulfilled>;
+    fn loc_type(loc_id: LocId) -> Option<TypeInfo>;
     fn try_instantiate() -> Result<Arc<ProtoAll>, ProtoBuildErr> {
+        use ProtoBuildErr::*;
         let mut builder = ProtoBuilder::new();
         for (&loc_id, kind_ext) in Self::typeless_proto_def().loc_kind_ext.iter() {
             if let LocKindExt::MemInitialized = kind_ext {
                 let promise = MemFillPromise {
                     loc_id,
-                    type_id_expected: Self::loc_type(loc_id).type_id,
+                    type_id_expected: Self::loc_type(loc_id).ok_or(UnknownType { loc_id })?.type_id,
                     builder: &mut builder,
                 };
-                let _promise_fulfilled = Self::fill_memory(loc_id, promise);
+                Self::fill_memory(loc_id, promise).ok_or(MemoryFillPromiseBroken { loc_id })?;
             }
         }
         Ok(Arc::new(builder.finish::<Self>()?))

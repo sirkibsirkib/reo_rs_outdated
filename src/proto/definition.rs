@@ -46,6 +46,9 @@ pub enum ProtoBuildErr {
         loc_id_putter: LocId,
         loc_id_getter: LocId,
     },
+    MemoryFillPromiseBroken {
+        loc_id: LocId
+    },
 }
 
 pub struct ProtoBuilder {
@@ -102,6 +105,7 @@ impl ProtoBuilder {
         assert!(was.is_none());
     }
     pub fn finish<P: Proto>(self) -> Result<ProtoAll, ProtoBuildErr> {
+        use ProtoBuildErr::*;
         let typeless_proto_def = P::typeless_proto_def();
         let memory_bits: BitSet = typeless_proto_def
             .loc_kind_ext
@@ -120,10 +124,10 @@ impl ProtoBuilder {
         let (id_2_type_id, type_id_2_info) = {
             let mut id_2_type_id: HashMap<LocId, TypeId> = Default::default();
             let mut type_id_2_info: HashMap<TypeId, Arc<TypeInfo>> = Default::default();
-            for id in typeless_proto_def.loc_kind_ext.keys().copied() {
-                let type_info = P::loc_type(id);
+            for loc_id in typeless_proto_def.loc_kind_ext.keys().copied() {
+                let type_info = P::loc_type(loc_id).ok_or(UnknownType { loc_id })?;
                 let type_id = type_info.type_id;
-                id_2_type_id.entry(id).or_insert(type_id);
+                id_2_type_id.entry(loc_id).or_insert(type_id);
                 type_id_2_info
                     .entry(type_id)
                     .or_insert_with(|| Arc::new(type_info));
@@ -340,16 +344,14 @@ impl Proto for IdkProto {
         }
         &DEF
     }
-    fn fill_memory(loc_id: LocId, _p: MemFillPromise) -> MemFillPromiseFulfilled {
-        match loc_id {
-            _ => unreachable!(),
-        }
+    fn fill_memory(_: LocId, _p: MemFillPromise) -> Option<MemFillPromiseFulfilled> {
+        None
     }
-    fn loc_type(loc_id: LocId) -> TypeInfo {
-        match loc_id {
+    fn loc_type(loc_id: LocId) -> Option<TypeInfo> {
+        Some(match loc_id {
             0 | 1 => TypeInfo::new::<u32>(),
-            _ => unreachable!(),
-        }
+            _ => return None
+        })
     }
 }
 
@@ -359,12 +361,20 @@ fn instantiate_idk() {
     println!("DONE");
 }
 
-use std::str::FromStr;
-use std::fmt::Debug;
-struct AlternatorProto<T0> {
+
+pub trait Parsable: 'static + Sized {
+    fn try_parse(s: &str) -> Option<Self>;
+}
+impl<T: 'static> Parsable for T where T: FromStr, <Self as FromStr>::Err: Debug {
+    fn try_parse(s: &str) -> Option<Self> {
+        T::from_str(s).ok()
+    }
+}
+
+struct AlternatorProto<T0: Parsable> {
     phantom: PhantomData<(T0,)>,
 }
-impl<T0: 'static + FromStr<Err=T>, T: Debug> Proto for AlternatorProto<T0> {
+impl<T0: Parsable> Proto for AlternatorProto<T0> {
     fn typeless_proto_def() -> &'static TypelessProtoDef {
         lazy_static::lazy_static! {
             static ref DEF: TypelessProtoDef = TypelessProtoDef {
@@ -384,20 +394,19 @@ impl<T0: 'static + FromStr<Err=T>, T: Debug> Proto for AlternatorProto<T0> {
         }
         &DEF
     }
-    fn fill_memory(loc_id: LocId, p: MemFillPromise) -> MemFillPromiseFulfilled {
-        match loc_id {
-            3 => p.fill_memory(T0::from_str("32").expect("failed to parse that type!")).unwrap(),
-            _ => unreachable!(),
-        }
+    fn fill_memory(loc_id: LocId, p: MemFillPromise) -> Option<MemFillPromiseFulfilled> {
+        Some(match loc_id {
+            3 => p.fill_memory(T0::try_parse("2368")?).ok()?,
+            _ => return None,
+        })
     }
-    fn loc_type(loc_id: LocId) -> TypeInfo {
-        match loc_id {
-            0...3 => TypeInfo::new::<T0>(),
-            _ => unreachable!(),
-        }
+    fn loc_type(loc_id: LocId) -> Option<TypeInfo> {
+        Some(match loc_id {
+            0 ..= 3 => TypeInfo::new::<T0>(),
+            _ => return None,
+        })
     }
 }
-
 #[test]
 fn instantiate_alternator() {
     let _x = AlternatorProto::<u32>::instantiate();
