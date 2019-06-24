@@ -89,7 +89,7 @@ impl LocKind {
 
 pub struct TypelessProtoDef {
     pub structure: ProtoDef,
-    pub loc_kind_ext: HashMap<LocId, LocKind>,
+    pub loc_kinds: HashMap<LocId, LocKind>,
 }
 
 impl ProtoBuilder {
@@ -108,23 +108,23 @@ impl ProtoBuilder {
         use ProtoBuildErr::*;
         let typeless_proto_def = P::typeless_proto_def();
         let memory_bits: BitSet = typeless_proto_def
-            .loc_kind_ext
+            .loc_kinds
             .iter()
-            .filter(|(_, &loc_kind_ext)| loc_kind_ext == LocKind::MemInitialized)
+            .filter(|(_, &loc_kinds)| loc_kinds == LocKind::MemInitialized)
             .map(|(&id, _)| id)
             .collect();
 
         let ready: BitSet = typeless_proto_def
-            .loc_kind_ext
+            .loc_kinds
             .iter()
-            .filter(|(_, loc_kind_ext)| loc_kind_ext.is_mem())
+            .filter(|(_, loc_kinds)| loc_kinds.is_mem())
             .map(|(&id, _)| id)
             .collect();
 
         let (id_2_type_id, type_id_2_info) = {
             let mut id_2_type_id: HashMap<LocId, TypeId> = Default::default();
             let mut type_id_2_info: HashMap<TypeId, Arc<TypeInfo>> = Default::default();
-            for loc_id in typeless_proto_def.loc_kind_ext.keys().copied() {
+            for loc_id in typeless_proto_def.loc_kinds.keys().copied() {
                 let type_info = P::loc_type(loc_id).ok_or(UnknownType { loc_id })?;
                 let type_id = type_info.type_id;
                 id_2_type_id.entry(loc_id).or_insert(type_id);
@@ -141,10 +141,10 @@ impl ProtoBuilder {
         };
 
         let unclaimed_ports = typeless_proto_def
-            .loc_kind_ext
+            .loc_kinds
             .iter()
-            .filter_map(|(&id, loc_kind_ext)| {
-                let role = match loc_kind_ext {
+            .filter_map(|(&id, loc_kinds)| {
+                let role = match loc_kinds {
                     LocKind::PortPutter => PortRole::Putter,
                     LocKind::PortGetter => PortRole::Getter,
                     _ => return None,
@@ -158,9 +158,9 @@ impl ProtoBuilder {
             .collect();
 
         let spaces = typeless_proto_def
-            .loc_kind_ext
+            .loc_kinds
             .iter()
-            .map(|(id, loc_kind_ext)| match loc_kind_ext {
+            .map(|(id, loc_kinds)| match loc_kinds {
                 LocKind::PortPutter => Space::PoPu(PoPuSpace::new({ id_2_info(id).clone() })),
                 LocKind::PortGetter => Space::PoGe(PoGeSpace::new()),
                 LocKind::MemInitialized => Space::Memo({
@@ -214,7 +214,7 @@ impl ProtoBuilder {
 
                 let p = action_def.putter;
                 let p_kind = typeless_proto_def
-                    .loc_kind_ext
+                    .loc_kinds
                     .get(&p)
                     .ok_or(UnknownType { loc_id: p })?;
                 let p_type = id_2_type_id.get(&p).unwrap();
@@ -239,7 +239,7 @@ impl ProtoBuilder {
                 use itertools::Itertools;
                 for &g in action_def.getters.iter().unique() {
                     let g_kind = typeless_proto_def
-                        .loc_kind_ext
+                        .loc_kinds
                         .get(&g)
                         .ok_or(UnknownType { loc_id: g })?;
                     let g_type = id_2_type_id.get(&g).unwrap();
@@ -284,7 +284,7 @@ impl ProtoBuilder {
                 });
             }
             let c = typeless_proto_def
-                .loc_kind_ext
+                .loc_kinds
                 .keys()
                 .copied()
                 .max()
@@ -336,7 +336,7 @@ impl Proto for IdkProto {
                         rule![Formula::True; 0=>1],
                     ]
                 },
-                loc_kind_ext: map! {
+                loc_kinds: map! {
                     0 => LocKind::PortPutter,
                     1 => LocKind::PortGetter,
                 },
@@ -374,7 +374,7 @@ impl<T0: Parsable> Proto for AlternatorProto<T0> {
                         rule![Formula::True; 3=>2],
                     ]
                 },
-                loc_kind_ext: map! {
+                loc_kinds: map! {
                     0 => LocKind::PortPutter,
                     1 => LocKind::PortPutter,
                     2 => LocKind::PortGetter,

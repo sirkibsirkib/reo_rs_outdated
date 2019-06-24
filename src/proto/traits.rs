@@ -131,27 +131,6 @@ impl<T: 'static> HasProto for Getter<T> {
     }
 }
 
-/* Separate concerns:
-1. rule structure
-2. which memcells start initialized
-3. LocId => LocKind
--------------------
-4. LocId => TypeInfo
-5. for all memcells initialized, what are their init values?
-
-Rbpa needs to know 1,2,3
-Proto needs all
-1,2,3 are the same regardless of type instantiation
-
-OK so here's the API:
-1. fn get_structure() -> &'static ProtoDef; // optimization. caller needs it intact
-2. fn mem_starts_initialized(id: LocId) -> bool;
-3. fn mem_kind(id: LocId) -> LocKind;
-4. dn get_type_info()
-
-
-*/
-
 pub struct MemFillPromise<'a> {
     type_id_expected: TypeId,
     loc_id: LocId,
@@ -186,7 +165,7 @@ pub trait Proto: Sized {
     fn try_instantiate() -> Result<Arc<ProtoAll>, ProtoBuildErr> {
         use ProtoBuildErr::*;
         let mut builder = ProtoBuilder::new();
-        for (&loc_id, kind_ext) in Self::typeless_proto_def().loc_kind_ext.iter() {
+        for (&loc_id, kind_ext) in Self::typeless_proto_def().loc_kinds.iter() {
             if let LocKind::MemInitialized = kind_ext {
                 let promise = MemFillPromise {
                     loc_id,
