@@ -57,29 +57,29 @@ pub struct ProtoBuilder {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum LocKindExt {
+pub enum LocKind {
     PortPutter,
     PortGetter,
     MemInitialized,
     MemUninitialized,
 }
-impl LocKindExt {
+impl LocKind {
     fn can_put(self) -> bool {
-        use LocKindExt::*;
+        use LocKind::*;
         match self {
             PortGetter => false,
             _ => true,
         }
     }
     fn can_get(self) -> bool {
-        use LocKindExt::*;
+        use LocKind::*;
         match self {
             PortPutter => false,
             _ => true,
         }
     }
     fn is_mem(self) -> bool {
-        use LocKindExt::*;
+        use LocKind::*;
         match self {
             PortPutter | PortGetter => false,
             MemInitialized | MemUninitialized => true,
@@ -89,7 +89,7 @@ impl LocKindExt {
 
 pub struct TypelessProtoDef {
     pub structure: ProtoDef,
-    pub loc_kind_ext: HashMap<LocId, LocKindExt>,
+    pub loc_kind_ext: HashMap<LocId, LocKind>,
 }
 
 impl ProtoBuilder {
@@ -110,7 +110,7 @@ impl ProtoBuilder {
         let memory_bits: BitSet = typeless_proto_def
             .loc_kind_ext
             .iter()
-            .filter(|(_, &loc_kind_ext)| loc_kind_ext == LocKindExt::MemInitialized)
+            .filter(|(_, &loc_kind_ext)| loc_kind_ext == LocKind::MemInitialized)
             .map(|(&id, _)| id)
             .collect();
 
@@ -145,8 +145,8 @@ impl ProtoBuilder {
             .iter()
             .filter_map(|(&id, loc_kind_ext)| {
                 let role = match loc_kind_ext {
-                    LocKindExt::PortPutter => PortRole::Putter,
-                    LocKindExt::PortGetter => PortRole::Getter,
+                    LocKind::PortPutter => PortRole::Putter,
+                    LocKind::PortGetter => PortRole::Getter,
                     _ => return None,
                 };
                 let info = PortInfo {
@@ -161,14 +161,14 @@ impl ProtoBuilder {
             .loc_kind_ext
             .iter()
             .map(|(id, loc_kind_ext)| match loc_kind_ext {
-                LocKindExt::PortPutter => Space::PoPu(PoPuSpace::new({ id_2_info(id).clone() })),
-                LocKindExt::PortGetter => Space::PoGe(PoGeSpace::new()),
-                LocKindExt::MemInitialized => Space::Memo({
+                LocKind::PortPutter => Space::PoPu(PoPuSpace::new({ id_2_info(id).clone() })),
+                LocKind::PortGetter => Space::PoGe(PoGeSpace::new()),
+                LocKind::MemInitialized => Space::Memo({
                     let ptr: *mut u8 = *self.init_mems.get(id).unwrap();
                     let type_info = id_2_info(id).clone();
                     MemoSpace::new(ptr, type_info)
                 }),
-                LocKindExt::MemUninitialized => Space::Memo({
+                LocKind::MemUninitialized => Space::Memo({
                     let ptr: *mut u8 = std::ptr::null_mut();
                     let type_info = id_2_info(id).clone();
                     MemoSpace::new(ptr, type_info)
@@ -337,8 +337,8 @@ impl Proto for IdkProto {
                     ]
                 },
                 loc_kind_ext: map! {
-                    0 => LocKindExt::PortPutter,
-                    1 => LocKindExt::PortGetter,
+                    0 => LocKind::PortPutter,
+                    1 => LocKind::PortGetter,
                 },
             };
         }
@@ -375,10 +375,10 @@ impl<T0: Parsable> Proto for AlternatorProto<T0> {
                     ]
                 },
                 loc_kind_ext: map! {
-                    0 => LocKindExt::PortPutter,
-                    1 => LocKindExt::PortPutter,
-                    2 => LocKindExt::PortGetter,
-                    3 => LocKindExt::MemInitialized,
+                    0 => LocKind::PortPutter,
+                    1 => LocKind::PortPutter,
+                    2 => LocKind::PortGetter,
+                    3 => LocKind::MemInitialized,
                 },
             };
         }
