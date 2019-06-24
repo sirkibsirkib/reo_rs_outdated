@@ -11,7 +11,7 @@ use reflection::TypeInfo;
 pub mod traits;
 use traits::{
     DataSource, HasMsgDropBox, HasUnclaimedPorts, MaybeClone, MaybeCopy, MaybePartialEq,
-    MemFillPromise, MemFillPromiseFulfilled, Proto,
+    MemFillPromise, MemFillPromiseFulfilled, Proto, Parsable
 };
 
 pub mod groups;

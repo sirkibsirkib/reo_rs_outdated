@@ -361,16 +361,6 @@ fn instantiate_idk() {
     println!("DONE");
 }
 
-
-pub trait Parsable: 'static + Sized {
-    fn try_parse(s: &str) -> Option<Self>;
-}
-impl<T: 'static> Parsable for T where T: FromStr, <Self as FromStr>::Err: Debug {
-    fn try_parse(s: &str) -> Option<Self> {
-        T::from_str(s).ok()
-    }
-}
-
 struct AlternatorProto<T0: Parsable> {
     phantom: PhantomData<(T0,)>,
 }
