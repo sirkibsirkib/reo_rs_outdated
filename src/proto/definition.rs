@@ -28,10 +28,24 @@ pub enum Formula {
 
 #[derive(Debug, Copy, Clone)]
 pub enum ProtoBuildErr {
-    UnknownType { loc_id: LocId },
-    SynchronousFiring { loc_id: LocId },
-    LocCannotGet { loc_id: LocId },
-    LocCannotPut { loc_id: LocId },
+    UnknownType {
+        loc_id: LocId,
+    },
+    SynchronousFiring {
+        loc_id: LocId,
+    },
+    LocCannotGet {
+        loc_id: LocId,
+    },
+    LocCannotPut {
+        loc_id: LocId,
+    },
+    TypeMismatch {
+        rule_id: usize,
+        action_id: usize,
+        loc_id_putter: LocId,
+        loc_id_getter: LocId,
+    },
 }
 
 pub struct ProtoBuilder {
@@ -47,9 +61,6 @@ pub enum LocKindExt {
     MemUninitialized,
 }
 impl LocKindExt {
-    fn is_port(self) -> bool {
-        !self.is_mem()
-    }
     fn can_put(self) -> bool {
         use LocKindExt::*;
         match self {
@@ -161,7 +172,7 @@ impl ProtoBuilder {
             })
             .collect();
 
-        let rules = Self::build_rules::<P>()?;
+        let rules = Self::build_rules::<P>(&id_2_type_id)?;
 
         println!("{:?}", (&rules, &memory_bits, &ready));
         let r = ProtoR { spaces, rules };
@@ -180,30 +191,33 @@ impl ProtoBuilder {
         Ok(ProtoAll { w, r })
     }
 
-    fn build_rules<P: Proto>() -> Result<Vec<RunRule>, ProtoBuildErr> {
+    fn build_rules<P: Proto>(
+        id_2_type_id: &HashMap<LocId, TypeId>,
+    ) -> Result<Vec<RunRule>, ProtoBuildErr> {
         let typeless_proto_def = P::typeless_proto_def();
         use ProtoBuildErr::*;
         let mut rules = vec![];
-        for (_rule_id, rule_def) in typeless_proto_def.structure.rules.iter().enumerate() {
+        for (rule_id, rule_def) in typeless_proto_def.structure.rules.iter().enumerate() {
             let mut guard_ready = BitSet::default();
             let mut guard_full = BitSet::default();
             let mut actions = vec![];
             let mut assign_vals = BitSet::default();
             let mut assign_mask = BitSet::default();
 
-            for action_def in rule_def.actions.iter() {
+            for (action_id, action_def) in rule_def.actions.iter().enumerate() {
                 let mut mg = vec![];
                 let mut pg = vec![];
 
                 let p = action_def.putter;
-                let p_type = typeless_proto_def
+                let p_kind = typeless_proto_def
                     .loc_kind_ext
                     .get(&p)
                     .ok_or(UnknownType { loc_id: p })?;
-                if !p_type.can_put() {
+                let p_type = id_2_type_id.get(&p).unwrap();
+                if !p_kind.can_put() {
                     return Err(LocCannotPut { loc_id: p });
                 }
-                let mem_putter = p_type.is_mem();
+                let mem_putter = p_kind.is_mem();
                 if guard_ready.test(p) {
                     return Err(SynchronousFiring { loc_id: p });
                 }
@@ -220,14 +234,23 @@ impl ProtoBuilder {
 
                 use itertools::Itertools;
                 for &g in action_def.getters.iter().unique() {
-                    let g_type = typeless_proto_def
+                    let g_kind = typeless_proto_def
                         .loc_kind_ext
                         .get(&g)
                         .ok_or(UnknownType { loc_id: g })?;
-                    if !g_type.can_get() {
+                    let g_type = id_2_type_id.get(&g).unwrap();
+                    if p_type != g_type {
+                        return Err(TypeMismatch {
+                            rule_id,
+                            action_id,
+                            loc_id_putter: p,
+                            loc_id_getter: g,
+                        });
+                    }
+                    if !g_kind.can_get() {
                         return Err(LocCannotGet { loc_id: g });
                     }
-                    let mem_getter = g_type.is_mem();
+                    let mem_getter = g_kind.is_mem();
                     match mem_getter {
                         false => &mut pg,
                         true => &mut mg,
@@ -303,10 +326,9 @@ struct IdkProto;
 impl Proto for IdkProto {
     fn typeless_proto_def() -> &'static TypelessProtoDef {
         lazy_static::lazy_static! {
-            static ref LAZY: TypelessProtoDef = TypelessProtoDef {
+            static ref DEF: TypelessProtoDef = TypelessProtoDef {
                 structure: ProtoDef{
                     rules: vec![
-                        rule![Formula::True; 0=>1],
                         rule![Formula::True; 0=>1],
                     ]
                 },
@@ -316,7 +338,7 @@ impl Proto for IdkProto {
                 },
             };
         }
-        &LAZY
+        &DEF
     }
     fn fill_memory(loc_id: LocId, _p: MemFillPromise) -> MemFillPromiseFulfilled {
         match loc_id {
@@ -332,7 +354,49 @@ impl Proto for IdkProto {
 }
 
 #[test]
-fn instantiate_fifo3() {
+fn instantiate_idk() {
     let _x = IdkProto::instantiate();
+    println!("DONE");
+}
+
+struct AlternatorProto;
+impl Proto for AlternatorProto {
+    fn typeless_proto_def() -> &'static TypelessProtoDef {
+        lazy_static::lazy_static! {
+            static ref DEF: TypelessProtoDef = TypelessProtoDef {
+                structure: ProtoDef{
+                    rules: vec![
+                        rule![Formula::True; 0=>2; 1=>3],
+                        rule![Formula::True; 3=>2],
+                    ]
+                },
+                loc_kind_ext: map! {
+                    0 => LocKindExt::PortPutter,
+                    1 => LocKindExt::PortPutter,
+                    2 => LocKindExt::PortGetter,
+                    3 => LocKindExt::MemInitialized,
+                },
+            };
+        }
+        &DEF
+    }
+    fn fill_memory(loc_id: LocId, p: MemFillPromise) -> MemFillPromiseFulfilled {
+        match loc_id {
+            3 => p.fill_memory(0u8).unwrap(),
+            _ => unreachable!(),
+        }
+    }
+    fn loc_type(loc_id: LocId) -> TypeInfo {
+        match loc_id {
+            0...2 => TypeInfo::new::<u32>(),
+            3 => TypeInfo::new::<u8>(),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn instantiate_alternator() {
+    let _x = AlternatorProto::instantiate();
     println!("DONE");
 }

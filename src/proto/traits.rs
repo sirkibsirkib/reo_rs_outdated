@@ -158,11 +158,13 @@ pub struct MemFillPromise<'a> {
     builder: &'a mut ProtoBuilder,
 }
 impl<'a> MemFillPromise<'a> {
-
-    pub fn define_init_memory<T: 'static>(self, t: T) -> Result<MemFillPromiseFulfilled, WrongMemFillType> {
+    pub fn fill_memory<T: 'static>(
+        self,
+        t: T,
+    ) -> Result<MemFillPromiseFulfilled, WrongMemFillType> {
         if TypeId::of::<T>() != self.type_id_expected {
             Err(WrongMemFillType {
-                expected_type: self.type_id_expected
+                expected_type: self.type_id_expected,
             })
         } else {
             self.builder.define_init_memory(self.loc_id, t);
