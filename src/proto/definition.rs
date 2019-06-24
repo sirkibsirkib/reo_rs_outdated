@@ -359,8 +359,12 @@ fn instantiate_idk() {
     println!("DONE");
 }
 
-struct AlternatorProto;
-impl Proto for AlternatorProto {
+use std::str::FromStr;
+use std::fmt::Debug;
+struct AlternatorProto<T0> {
+    phantom: PhantomData<(T0,)>,
+}
+impl<T0: 'static + FromStr<Err=T>, T: Debug> Proto for AlternatorProto<T0> {
     fn typeless_proto_def() -> &'static TypelessProtoDef {
         lazy_static::lazy_static! {
             static ref DEF: TypelessProtoDef = TypelessProtoDef {
@@ -382,14 +386,13 @@ impl Proto for AlternatorProto {
     }
     fn fill_memory(loc_id: LocId, p: MemFillPromise) -> MemFillPromiseFulfilled {
         match loc_id {
-            3 => p.fill_memory(0u8).unwrap(),
+            3 => p.fill_memory(T0::from_str("32").expect("failed to parse that type!")).unwrap(),
             _ => unreachable!(),
         }
     }
     fn loc_type(loc_id: LocId) -> TypeInfo {
         match loc_id {
-            0...2 => TypeInfo::new::<u32>(),
-            3 => TypeInfo::new::<u8>(),
+            0...3 => TypeInfo::new::<T0>(),
             _ => unreachable!(),
         }
     }
@@ -397,6 +400,6 @@ impl Proto for AlternatorProto {
 
 #[test]
 fn instantiate_alternator() {
-    let _x = AlternatorProto::instantiate();
+    let _x = AlternatorProto::<u32>::instantiate();
     println!("DONE");
 }
