@@ -71,7 +71,7 @@ impl Storage {
     pub fn shrink_to_fit(&mut self) {
         for (layout_hashable, vec) in self.free.drain() {
             for ptr in vec {
-                println!("dropping (empty) alloc at {:p}", ptr);
+                // println!("dropping (empty) alloc at {:p}", ptr);
                 unsafe { alloc::dealloc(ptr, layout_hashable.0) }
             }
         }
@@ -85,7 +85,7 @@ impl Storage {
             .push(ptr);
     }
     unsafe fn inner_alloc(&mut self, type_info: &Arc<TypeInfo>) -> StorePtr {
-        println!("move_ining.. looking for a free space...");
+        // println!("move_ining.. looking for a free space...");
         // preserve the invariant
         self.type_info
             .entry(type_info.type_id)
@@ -96,7 +96,7 @@ impl Storage {
             .or_insert_with(Vec::new)
             .pop()
             .unwrap_or_else(|| {
-                println!("allocating with layout {:?}", &type_info.layout);
+                // println!("allocating with layout {:?}", &type_info.layout);
                 alloc::alloc(type_info.layout)
             });
         if let Some(_) = self.owned.insert(dest, type_info.type_id) {
@@ -107,13 +107,13 @@ impl Storage {
 }
 impl Drop for Storage {
     fn drop(&mut self) {
-        println!("DROPPING");
+        // println!("DROPPING");
         for (ptr, tid) in self.owned.drain() {
             // invariant: self.owned keys ALWAYS are mapped in type_info
             let info = self.type_info.get(&tid).unwrap();
             unsafe {
                 info.drop_fn.execute(ptr);
-                println!("dropping occupied alloc at {:p}", ptr);
+                // println!("dropping occupied alloc at {:p}", ptr);
                 alloc::dealloc(ptr, info.layout);
             };
         }
@@ -122,18 +122,19 @@ impl Drop for Storage {
     }
 }
 
-#[derive(Debug)]
-struct Foo {
-    x: [usize; 3],
-}
-impl Drop for Foo {
-    fn drop(&mut self) {
-        println!("dropping foo {:?}", self.x);
-    }
-}
 
 #[test]
 fn memtest() {
+    #[derive(Debug)]
+    struct Foo {
+        x: [usize; 3],
+    }
+    impl Drop for Foo {
+        fn drop(&mut self) {
+            println!("dropping foo {:?}", self.x);
+        }
+    }
+
     let mut storage = Storage::default();
 
     let mut a: MaybeUninit<Foo> = MaybeUninit::new(Foo { x: [1, 2, 3] });

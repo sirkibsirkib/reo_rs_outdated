@@ -178,7 +178,7 @@ impl ProtoBuilder {
 
         let rules = Self::build_rules::<P>(&id_2_type_id)?;
 
-        println!("{:?}", (&rules, &memory_bits, &ready));
+        // println!("{:?}", (&rules, &memory_bits, &ready));
         let r = ProtoR { spaces, rules };
         let w = Mutex::new(ProtoW {
             memory_bits,
@@ -409,6 +409,8 @@ impl<T0: Parsable> Proto for AlternatorProto<T0> {
 }
 #[test]
 fn instantiate_alternator() {
+    let x = std::time::Instant::now();
     let _x = AlternatorProto::<u32>::instantiate();
+    println!("{:?}", x.elapsed());
     println!("DONE");
 }
