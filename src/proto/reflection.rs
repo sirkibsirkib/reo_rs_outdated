@@ -89,7 +89,11 @@ pub struct TypeInfo {
     pub(crate) layout: Layout,
 }
 impl TypeInfo {
+
     #[inline]
+    /// This function doesn't need a pointer. It's derived from the layout field.
+    /// MOVE and COPY are equivalent. The only difference is whether an accompanying
+    /// drop is inserted (by the compiler).
     pub unsafe fn move_fn_execute(&self, src: *mut u8, dest: *mut u8) {
         std::ptr::copy(src, dest, self.layout.size());
     }
@@ -97,8 +101,6 @@ impl TypeInfo {
         self.type_id
     }
     pub fn new<T: 'static>() -> Self {
-        // always true: clone_fn.is_none() || !is_copy
-        // holds because Copy trait is mutually exclusive with Drop trait.
         Self {
             type_id: TypeId::of::<T>(),
             drop_fn: DropFn::new::<T>(),
