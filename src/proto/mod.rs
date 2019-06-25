@@ -25,7 +25,7 @@ use crate::{
 use hashbrown::HashMap;
 use parking_lot::{Mutex, MutexGuard};
 use std::{
-    alloc::Layout,
+    alloc::{self, Layout},
     any::TypeId,
     cell::UnsafeCell,
     convert::TryInto,

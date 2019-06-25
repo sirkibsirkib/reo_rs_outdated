@@ -1,21 +1,4 @@
-/*
-Storage structure for OWNING allocation
-
-
-Invariants:
-1. integrity of bytes buffer always OK
-2. for every value in `owned`, there is a key in `type_info`.
-*/
-
-use std::alloc;
-use std::alloc::Layout;
-use std::mem::MaybeUninit;
-
-use crate::proto::reflection::TypeInfo;
-use hashbrown::HashMap;
-use std::any::TypeId;
-use std::sync::Arc;
-
+use super::*;
 use std::hash::{Hash, Hasher};
 
 // type DataLen = usize;
