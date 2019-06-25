@@ -151,6 +151,7 @@ impl<'a> MemFillPromise<'a> {
         }
     }
 }
+
 #[derive(Debug, Copy, Clone)]
 pub struct WrongMemFillType {
     pub expected_type: TypeId,
@@ -169,7 +170,9 @@ pub trait Proto: Sized {
             if let LocKind::MemInitialized = kind_ext {
                 let promise = MemFillPromise {
                     loc_id,
-                    type_id_expected: Self::loc_type(loc_id).ok_or(UnknownType { loc_id })?.type_id,
+                    type_id_expected: Self::loc_type(loc_id)
+                        .ok_or(UnknownType { loc_id })?
+                        .type_id,
                     builder: &mut builder,
                 };
                 Self::fill_memory(loc_id, promise).ok_or(MemoryFillPromiseBroken { loc_id })?;
@@ -280,12 +283,14 @@ impl<'a> DataSource<'a> for MemoSpace {
     }
 }
 
-
-
 pub trait Parsable: 'static + Sized {
     fn try_parse(s: &str) -> Option<Self>;
 }
-impl<T: 'static> Parsable for T where T: FromStr, <Self as FromStr>::Err: Debug {
+impl<T: 'static> Parsable for T
+where
+    T: FromStr,
+    <Self as FromStr>::Err: Debug,
+{
     fn try_parse(s: &str) -> Option<Self> {
         T::from_str(s).ok()
     }

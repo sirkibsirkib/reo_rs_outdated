@@ -11,7 +11,7 @@ use reflection::TypeInfo;
 pub mod traits;
 use traits::{
     DataSource, HasMsgDropBox, HasUnclaimedPorts, MaybeClone, MaybeCopy, MaybePartialEq,
-    MemFillPromise, MemFillPromiseFulfilled, Proto, Parsable
+    MemFillPromise, MemFillPromiseFulfilled, Parsable, Proto,
 };
 
 pub mod groups;
@@ -25,14 +25,14 @@ use crate::{
 use hashbrown::HashMap;
 use parking_lot::{Mutex, MutexGuard};
 use std::{
-    str::FromStr,
     alloc::Layout,
     any::TypeId,
     cell::UnsafeCell,
     convert::TryInto,
     fmt::Debug,
     marker::PhantomData,
-    mem::{transmute, ManuallyDrop, MaybeUninit},
+    mem::{transmute, MaybeUninit},
+    str::FromStr,
     sync::{
         atomic::{AtomicPtr, AtomicUsize, Ordering},
         Arc,

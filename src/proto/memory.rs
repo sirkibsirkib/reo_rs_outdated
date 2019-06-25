@@ -122,7 +122,6 @@ impl Drop for Storage {
     }
 }
 
-
 #[test]
 fn memtest() {
     #[derive(Debug)]

@@ -8,9 +8,12 @@ pub(crate) struct CloneFn(Option<fn(*mut u8, *mut u8)>);
 impl CloneFn {
     fn new<T>() -> Self {
         let clos: fn(*mut u8, *mut u8) = |src, dest| unsafe {
+            // maybe_clone does not have the same memory layout for values of T.
+            // we avoid this problem by defining a CLOSURE with a known layout,
+            // and invoking maybe_clone for our known type here
             let datum = T::maybe_clone(transmute(src));
-            let dest: &mut T = transmute(dest);
-            *dest = datum;
+            let dest: *mut T = transmute(dest);
+            dest.write(datum);
         };
         CloneFn(Some(clos))
     }
@@ -32,11 +35,11 @@ impl CloneFn {
 pub(crate) struct PartialEqFn(Option<fn(*mut u8, *mut u8) -> bool>);
 impl PartialEqFn {
     fn new<T>() -> Self {
-        let clos: fn(*mut u8, *mut u8) -> bool = |a, b| unsafe {
-            let a: &T = transmute(a);
-            a.maybe_partial_eq(transmute(b))
-        };
-        PartialEqFn(Some(clos))
+        PartialEqFn(Some(unsafe {
+            transmute(
+                <T as MaybePartialEq>::maybe_partial_eq as fn(&T, &T) -> bool
+            )
+        }))
     }
     #[inline]
     pub unsafe fn execute(self, a: *mut u8, b: *mut u8) -> bool {
@@ -56,11 +59,9 @@ pub(crate) struct DropFn(Option<fn(*mut u8)>);
 impl DropFn {
     fn new<T>() -> Self {
         if std::mem::needs_drop::<T>() {
-            let clos: fn(*mut u8) = |ptr| unsafe {
-                let ptr: &mut ManuallyDrop<T> = transmute(ptr);
-                ManuallyDrop::drop(ptr);
-            };
-            DropFn(Some(clos))
+            DropFn(Some(unsafe {
+                transmute(std::ptr::drop_in_place::<T> as unsafe fn(*mut T))
+            }))
         } else {
             DropFn(None)
         }
@@ -109,23 +110,56 @@ impl TypeInfo {
     }
 }
 
-#[test]
-fn drops_ok() {
-    #[derive(Debug)]
-    struct Foo(u32);
-    impl Drop for Foo {
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct Defined(String);
+    impl Drop for Defined {
         fn drop(&mut self) {
-            println!("dropped Foo({}) !", self.0);
+            println!("dropped Defined({}) !", self.0);
         }
     }
 
-    let drop_fn = DropFn::new::<Foo>();
+    #[test]
+    fn drops_ok() {
+        let drop_fn = DropFn::new::<Defined>();
 
-    let foo = Foo(2);
-    let x1: *const Foo = &foo as *const Foo;
-    let x2: *mut u8 = unsafe { transmute(x1) };
-    println!("{:?}", (x1, x2));
+        let foo = Defined("Hello, there.".into());
+        let x1: *const _ = &foo as *const _;
+        let x2: *mut u8 = unsafe { transmute(x1) };
+        println!("{:?}", (x1, x2));
 
-    unsafe { drop_fn.execute(x2) };
-    std::mem::forget(foo);
+        unsafe { drop_fn.execute(x2) };
+        std::mem::forget(foo);
+    }
+
+    #[test]
+    fn partial_eq_ok() {
+        let partial_eq_fn = PartialEqFn::new::<Defined>();
+
+        let foo = Defined("General Kenobi!".into());
+        let x1: *const _ = &foo as *const _;
+        let x2: *mut u8 = unsafe { transmute(x1) };
+        println!("{:?}", (x1, x2));
+
+        unsafe { println!("maybe_partial_eq of Defined with itself gives {}", partial_eq_fn.execute(x2, x2)) };
+    }
+
+    struct Undefined(f32, f32);
+
+    #[test]
+    #[should_panic]
+    fn partial_eq_undefined_panic() {
+        let partial_eq_fn = PartialEqFn::new::<Undefined>();
+        let x = Undefined(5.3, 234.4);
+        let x1: *const _ = &x as *const _;
+        let x2: *mut u8 = unsafe { transmute(x1) };
+        unsafe {
+            // this should panic, as partial_eq_fn.0 == None
+            partial_eq_fn.execute(x2, x2);
+        }
+    }
 }

@@ -47,7 +47,7 @@ pub enum ProtoBuildErr {
         loc_id_getter: LocId,
     },
     MemoryFillPromiseBroken {
-        loc_id: LocId
+        loc_id: LocId,
     },
 }
 
@@ -350,7 +350,7 @@ impl Proto for IdkProto {
     fn loc_type(loc_id: LocId) -> Option<TypeInfo> {
         Some(match loc_id {
             0 | 1 => TypeInfo::new::<u32>(),
-            _ => return None
+            _ => return None,
         })
     }
 }
@@ -392,7 +392,7 @@ impl<T0: Parsable> Proto for AlternatorProto<T0> {
     }
     fn loc_type(loc_id: LocId) -> Option<TypeInfo> {
         Some(match loc_id {
-            0 ..= 3 => TypeInfo::new::<T0>(),
+            0..=3 => TypeInfo::new::<T0>(),
             _ => return None,
         })
     }
