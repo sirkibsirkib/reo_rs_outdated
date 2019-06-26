@@ -238,11 +238,13 @@ impl ProtoW {
             // keep looping until 0 rules can fire
             for (rule_id, rule) in r.rules.iter().enumerate() {
                 let bits_ready = is_ready(&self.memory_bits, &self.active.ready, rule);
+                println!("Rule {} is ready!", rule_id);
                 if bits_ready && unsafe { r.eval_formula(&rule.guard_pred) } {
                     // safe if Equal functions are sound
                     println!("FIRING {}: {:?}", rule_id, rule);
                     println!("FIRING BEFORE:");
                     (r, self as &ProtoW).debug_print();
+                    println!("refs currently: {:?}", &self.active.mem_refs);
 
                     let mut num_tenatives = 0;
                     for id in self.active.ready.iter_and(&self.ready_tentative) {
@@ -255,10 +257,6 @@ impl ProtoW {
                     }
                     // assign bits BEFORE the action happens. necessary for the tentative ports
                     assign_memory_bits(&mut self.memory_bits, rule);
-
-                    println!("FIRING AFTER:");
-                    (r, self as &ProtoW).debug_print();
-                    println!("----------");
 
                     // tenative ports! must wait for them to resolve
                     if num_tenatives > 0 {
@@ -273,6 +271,12 @@ impl ProtoW {
                         r,
                         w: &mut self.active,
                     });
+
+                    println!("FIRING AFTER:");
+                    (r, self as &ProtoW).debug_print();
+                    println!("refs currently: {:?}", &self.active.mem_refs);
+                    println!("----------");
+
                     Self::notify_state_waiters(&self.active.ready, &mut self.awaiting_states, r);
                     continue 'repeat;
                 }
@@ -286,7 +290,10 @@ impl ProtoW {
 
 fn subtract_readiness(ready: &mut BitSet, rule: &RunRule) {
     // ready.pad_trailing_zeroes(rule.guard_ready.data.len());
-    for (mr, &gr) in izip!(ready.data.iter_mut(), rule.guard_ready.data.iter(),) {
+    println!("subtracking readiness {:?}", 
+        (ready.data.len(), rule.guard_ready.data.len())
+        );
+    for (mr, &gr) in izip!(ready.data.iter_mut(), rule.guard_ready.data.iter()) {
         *mr &= !gr;
     }
 }
@@ -311,6 +318,15 @@ fn is_ready(memory: &BitSet, ready: &BitSet, rule: &RunRule) -> bool {
             return false;
         }
     }
+    println!(
+        "is_ready returning TRUE with lens {:?}",
+        (
+            ready.data.len(),
+            memory.data.len(),
+            rule.guard_ready.data.len(),
+            rule.guard_full.data.len()
+        )
+    );
     true
 }
 
@@ -844,7 +860,7 @@ impl<'a> Firer<'a> {
             self.w.ready.set_to(g, true); // PUTTER is ready
         }
         // 2. increment memory pointer refs of me_pu
-        let src_refs = self.w.mem_refs.get_mut(&src).expect("UNKNWN");
+        let src_refs = self.w.mem_refs.get_mut(&src).expect("mem_to_locs BAD REFS?");
         *src_refs += me_ge.len();
         self.mem_to_ports(me_pu, po_ge);
     }

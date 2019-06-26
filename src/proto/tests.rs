@@ -27,17 +27,14 @@ impl<T0: Parsable> Proto for AlternatorProto<T0> {
                     0 => LocKind::PortPutter,
                     1 => LocKind::PortPutter,
                     2 => LocKind::PortGetter,
-                    3 => LocKind::MemInitialized,
+                    3 => LocKind::MemUninitialized,
                 },
             };
         }
         &DEF
     }
-    fn fill_memory(loc_id: LocId, p: MemFillPromise) -> Option<MemFillPromiseFulfilled> {
-        Some(match loc_id {
-            3 => p.fill_memory(T0::try_parse("2368")?).ok()?,
-            _ => return None,
-        })
+    fn fill_memory(loc_id: LocId, _p: MemFillPromise) -> Option<MemFillPromiseFulfilled> {
+        None
     }
     fn loc_type(loc_id: LocId) -> Option<TypeInfo> {
         Some(match loc_id {
@@ -49,14 +46,13 @@ impl<T0: Parsable> Proto for AlternatorProto<T0> {
 #[test]
 fn instantiate_alternator() {
     let p = AlternatorProto::<u32>::instantiate();
-    // return;
 
     use std::convert::TryInto;
     let mut p0: Putter<u32> = p.claim(0).try_into().unwrap();
     let mut p1: Putter<u32> = p.claim(1).try_into().unwrap();
     let mut p2: Getter<u32> = p.claim(2).try_into().unwrap();
 
-    const N: u32 = 3;
+    const N: u32 = 1;
     crossbeam::scope(|s| {
         s.spawn(move |_| {
             for i in 0..N {

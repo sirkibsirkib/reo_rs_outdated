@@ -107,12 +107,13 @@ impl ProtoBuilder {
     pub fn finish<P: Proto>(self) -> Result<ProtoAll, ProtoBuildErr> {
         use ProtoBuildErr::*;
         let typeless_proto_def = P::typeless_proto_def();
-        let memory_bits: BitSet = typeless_proto_def
+        let mut memory_bits: BitSet = typeless_proto_def
             .loc_kinds
             .iter()
             .filter(|(_, &loc_kinds)| loc_kinds == LocKind::MemInitialized)
             .map(|(&id, _)| id)
             .collect();
+        memory_bits.pad_trailing_zeroes_to_capacity(Self::max_loc_id(typeless_proto_def));
 
         let ready: BitSet = typeless_proto_def
             .loc_kinds
@@ -207,6 +208,15 @@ impl ProtoBuilder {
         Ok(ProtoAll { w, r })
     }
 
+    fn max_loc_id(typeless_proto_def: &'static TypelessProtoDef) -> LocId {
+        typeless_proto_def
+            .loc_kinds
+            .keys()
+            .copied()
+            .max()
+            .unwrap_or(0)
+    }
+
     fn build_rules<P: Proto>(
         id_2_type_id: &HashMap<LocId, TypeId>,
     ) -> Result<Vec<RunRule>, ProtoBuildErr> {
@@ -295,12 +305,7 @@ impl ProtoBuilder {
                     true => RunAction::MemPut { putter: p, mg, pg },
                 });
             }
-            let c = typeless_proto_def
-                .loc_kinds
-                .keys()
-                .copied()
-                .max()
-                .unwrap_or(0);
+            let c = Self::max_loc_id(typeless_proto_def);
             guard_ready.pad_trailing_zeroes_to_capacity(c);
             guard_full.pad_trailing_zeroes_to_capacity(c);
             assign_vals.pad_trailing_zeroes_to_capacity(c);

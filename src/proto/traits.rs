@@ -200,10 +200,12 @@ pub(crate) trait DataSource<'a> {
         let src = space.get_ptr();
         if space.type_info.is_copy {
             // MOVE HAPPENS HERE
+            println!("..COPYING");
             self.execute_copy(out_ptr);
             unsafe { src.copy_to(out_ptr, space.type_info.layout.size()) };
             let was = space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
             if was == case.last_countdown() {
+                println!("I WAS LAST!");
                 self.finalize(true, fin);
             }
         } else {
