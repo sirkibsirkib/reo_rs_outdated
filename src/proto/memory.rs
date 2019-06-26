@@ -34,7 +34,7 @@ impl Storage {
     }
     pub unsafe fn move_in(&mut self, src: StackPtr, type_info: &Arc<TypeInfo>) -> StorePtr {
         let dest = self.inner_alloc(type_info);
-        type_info.move_fn_execute(src, dest);
+        type_info.copy_fn_execute(src, dest);
         dest
     }
     pub unsafe fn clone_in(&mut self, src: StackPtr, type_info: &Arc<TypeInfo>) -> StorePtr {
@@ -43,8 +43,14 @@ impl Storage {
         dest
     }
     pub unsafe fn move_out(&mut self, src: StorePtr, dest: StackPtr, layout: &Layout) {
-        std::ptr::copy(src, dest, layout.size());
+        self.copy_out(src, dest, layout);
         self.inner_free(src, &LayoutHashable(*layout));
+    }
+    pub unsafe fn copy_out(&mut self, src: StorePtr, dest: StackPtr, layout: &Layout) {
+        std::ptr::copy(src, dest, layout.size());
+    }
+    pub unsafe fn forget_inside(&mut self, ptr: StorePtr, info: &Arc<TypeInfo>) {
+        self.inner_free(ptr, &LayoutHashable(info.layout));
     }
     pub unsafe fn drop_inside(&mut self, ptr: StorePtr, info: &Arc<TypeInfo>) {
         info.drop_fn.execute(ptr);

@@ -11,8 +11,11 @@ use reflection::TypeInfo;
 pub mod traits;
 use traits::{
     DataSource, HasMsgDropBox, HasUnclaimedPorts, MaybeClone, MaybeCopy, MaybePartialEq,
-    MemFillPromise, MemFillPromiseFulfilled, Parsable, Proto,
+    MemFillPromise, MemFillPromiseFulfilled, Proto,
 };
+
+// #[cfg!(test)]
+mod tests;
 
 pub mod groups;
 
@@ -43,9 +46,11 @@ use std_semaphore::Semaphore;
 
 /// A coordination point that getters interact with to acquire a datum.
 /// Common to memory and port putters.
+#[derive(debug_stub_derive::DebugStub)]
 pub(crate) struct PutterSpace {
     ptr: AtomicPtr<u8>,
     cloner_countdown: AtomicUsize,
+    #[debug_stub = "<Semaphore>"]
     mover_sema: Semaphore,
     type_info: Arc<TypeInfo>,
 }
@@ -75,6 +80,8 @@ impl PutterSpace {
 
 /// Memory variant of PutterSpace. Contains no additional data but has unique
 /// behavior: simulating "Drop" for a ptr that may be shared with other memory cells.
+
+#[derive(Debug)]
 struct MemoSpace {
     p: PutterSpace,
 }
@@ -88,6 +95,7 @@ impl MemoSpace {
 
 /// Port-variant of PutterSpace. Ptr here points to the putter's stack
 /// Also includes a dropbox for receiving coordination messages
+#[derive(Debug)]
 struct PoPuSpace {
     p: PutterSpace,
     dropbox: MsgDropbox,
@@ -103,6 +111,7 @@ impl PoPuSpace {
 
 /// Personal coordination space for this getter to receive messages and advertise
 /// whether it called get() or get_signal().
+#[derive(Debug)]
 struct PoGeSpace {
     dropbox: MsgDropbox, // used only by this guy to recv messages
     want_data: UnsafeCell<bool>,
@@ -123,8 +132,8 @@ impl PoGeSpace {
     unsafe fn participate_with_msg(&self, a: &ProtoAll, msg: usize, out_ptr: *mut u8) {
         let (case, putter_id) = DataGetCase::parse_msg(msg);
         match a.r.get_space(putter_id) {
-            Some(Space::Memo(space)) => space.acquire_data(out_ptr, case, || a.w.lock()),
-            Some(Space::PoPu(space)) => space.acquire_data(out_ptr, case, || ()),
+            Some(Space::Memo(space)) => space.acquire_data(out_ptr, case, (a, putter_id)),
+            Some(Space::PoPu(space)) => space.acquire_data(out_ptr, case, ()),
             _ => panic!("Bad putter ID!!"),
         }
     }
@@ -327,6 +336,7 @@ fn assign_memory_bits(memory: &mut BitSet, rule: &RunRule) {
     }
 }
 
+#[derive(Debug)]
 enum Space {
     PoPu(PoPuSpace),
     PoGe(PoGeSpace),
@@ -336,7 +346,7 @@ enum Space {
 /// Part of the protocol NOT protected by the lock
 pub struct ProtoR {
     rules: Vec<RunRule>,
-    spaces: Vec<Space>,
+    spaces: HashMap<LocId, Space>,
 }
 impl ProtoR {
     unsafe fn eval_formula(&self, guard: &Formula) -> bool {
@@ -391,10 +401,10 @@ impl ProtoR {
         }
     }
     fn get_space(&self, id: LocId) -> Option<&Space> {
-        self.spaces.get(id)
+        self.spaces.get(&id)
     }
     pub fn loc_is_mem(&self, id: LocId) -> bool {
-        match self.spaces.get(id) {
+        match self.spaces.get(&id) {
             Some(Space::Memo(_)) => true,
             _ => false,
         }
@@ -403,6 +413,7 @@ impl ProtoR {
 
 /// A single-cell message channel. The port-thread associated with this
 /// dropbox waits here until a message is ready to tell them what to do.
+#[derive(Debug)]
 pub(crate) struct MsgDropbox {
     s: crossbeam::Sender<usize>,
     r: crossbeam::Receiver<usize>,

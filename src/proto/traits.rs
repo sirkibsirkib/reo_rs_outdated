@@ -189,27 +189,22 @@ pub trait Proto: Sized {
 }
 
 pub(crate) trait DataSource<'a> {
-    type MoveMcguffin: Sized;
+    type Finalizer: Sized;
     fn my_space(&self) -> &PutterSpace;
-    fn execute_move(&self, mm: Self::MoveMcguffin, out_ptr: *mut u8);
     fn execute_clone(&self, out_ptr: *mut u8);
-    fn send_done_signal(&self, someone_moved: bool);
+    fn execute_copy(&self, out_ptr: *mut u8);
+    fn finalize(&self, someone_moved: bool, fin: Self::Finalizer);
 
-    fn acquire_data<F: Fn() -> Self::MoveMcguffin>(
-        &self,
-        out_ptr: *mut u8,
-        case: DataGetCase,
-        mm_getter: F,
-    ) {
+    fn acquire_data(&self, out_ptr: *mut u8, case: DataGetCase, fin: Self::Finalizer) {
         let space = self.my_space();
         let src = space.get_ptr();
         if space.type_info.is_copy {
             // MOVE HAPPENS HERE
-            self.execute_move(mm_getter(), out_ptr);
+            self.execute_copy(out_ptr);
             unsafe { src.copy_to(out_ptr, space.type_info.layout.size()) };
             let was = space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
             if was == case.last_countdown() {
-                self.send_done_signal(true);
+                self.finalize(true, fin);
             }
         } else {
             if case.i_move() {
@@ -217,8 +212,8 @@ pub(crate) trait DataSource<'a> {
                     space.mover_sema.acquire();
                 }
                 // MOVE HAPPENS HERE
-                self.execute_move(mm_getter(), out_ptr);
-                self.send_done_signal(true);
+                self.execute_copy(out_ptr);
+                self.finalize(true, fin);
             } else {
                 // CLONE HAPPENS HERE
                 unsafe { space.type_info.clone_fn.execute(src, out_ptr) };
@@ -227,7 +222,7 @@ pub(crate) trait DataSource<'a> {
                     if case.someone_moves() {
                         space.mover_sema.release();
                     } else {
-                        self.send_done_signal(false);
+                        self.finalize(false, fin);
                     }
                 }
             }
@@ -236,29 +231,39 @@ pub(crate) trait DataSource<'a> {
 }
 
 impl<'a> DataSource<'a> for PoPuSpace {
-    type MoveMcguffin = ();
+    type Finalizer = ();
     fn my_space(&self) -> &PutterSpace {
         &self.p
     }
-    fn execute_move(&self, _: Self::MoveMcguffin, out_ptr: *mut u8) {
+    fn execute_copy(&self, out_ptr: *mut u8) {
         let src: *mut u8 = self.p.remove_ptr();
-        unsafe { self.p.type_info.move_fn_execute(src, out_ptr) };
+        unsafe { self.p.type_info.copy_fn_execute(src, out_ptr) };
     }
     fn execute_clone(&self, out_ptr: *mut u8) {
         let src: *mut u8 = self.p.get_ptr();
         unsafe { self.p.type_info.clone_fn.execute(src, out_ptr) };
     }
-    fn send_done_signal(&self, someone_moved: bool) {
+    fn finalize(&self, someone_moved: bool, _fin: Self::Finalizer) {
         self.dropbox.send(if someone_moved { 1 } else { 0 });
     }
 }
 
 impl<'a> DataSource<'a> for MemoSpace {
-    type MoveMcguffin = MutexGuard<'a, ProtoW>;
+    type Finalizer = (&'a ProtoAll, LocId);
     fn my_space(&self) -> &PutterSpace {
         &self.p
     }
-    fn execute_move(&self, mut w: Self::MoveMcguffin, out_ptr: *mut u8) {
+    fn execute_copy(&self, out_ptr: *mut u8) {
+        let src: *mut u8 = self.p.get_ptr();
+        unsafe { self.p.type_info.copy_fn_execute(src, out_ptr) };
+    }
+    fn execute_clone(&self, out_ptr: *mut u8) {
+        let src: *mut u8 = self.p.get_ptr();
+        unsafe { self.p.type_info.clone_fn.execute(src, out_ptr) };
+    }
+    fn finalize(&self, someone_moved: bool, fin: Self::Finalizer) {
+        let putter_id: LocId = fin.1; // my id
+        let mut w = fin.0.w.lock();
         let src: *mut u8 = self.p.get_ptr();
         let refs: &mut usize = w.active.mem_refs.get_mut(&src).expect("no memrefs?");
         assert!(*refs >= 1);
@@ -266,20 +271,17 @@ impl<'a> DataSource<'a> for MemoSpace {
         if *refs == 0 {
             w.active.mem_refs.remove(&src);
             unsafe {
-                w.active
-                    .storage
-                    .move_out(src, out_ptr, &self.p.type_info.layout)
+                if someone_moved {
+                    w.active.storage.forget_inside(src, &self.p.type_info)
+                } else {
+                    unreachable!()
+                    // w.active
+                    //     .storage
+                    //     .drop_inside(src, &self.p.type_info)
+                }
             }
-        } else {
-            panic!("Tried to MOVE out a memcell with 2+ aliases")
         }
-    }
-    fn execute_clone(&self, out_ptr: *mut u8) {
-        let src: *mut u8 = self.p.get_ptr();
-        unsafe { self.p.type_info.clone_fn.execute(src, out_ptr) };
-    }
-    fn send_done_signal(&self, _someone_moved: bool) {
-        // nothing to do here
+        w.enter(&fin.0.r, putter_id);
     }
 }
 

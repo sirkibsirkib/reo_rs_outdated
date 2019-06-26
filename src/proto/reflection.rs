@@ -36,9 +36,7 @@ pub(crate) struct PartialEqFn(Option<fn(*mut u8, *mut u8) -> bool>);
 impl PartialEqFn {
     fn new<T>() -> Self {
         PartialEqFn(Some(unsafe {
-            transmute(
-                <T as MaybePartialEq>::maybe_partial_eq as fn(&T, &T) -> bool
-            )
+            transmute(<T as MaybePartialEq>::maybe_partial_eq as fn(&T, &T) -> bool)
         }))
     }
     #[inline]
@@ -89,12 +87,11 @@ pub struct TypeInfo {
     pub(crate) layout: Layout,
 }
 impl TypeInfo {
-
     #[inline]
     /// This function doesn't need a pointer. It's derived from the layout field.
     /// MOVE and COPY are equivalent. The only difference is whether an accompanying
     /// drop is inserted (by the compiler).
-    pub unsafe fn move_fn_execute(&self, src: *mut u8, dest: *mut u8) {
+    pub unsafe fn copy_fn_execute(&self, src: *mut u8, dest: *mut u8) {
         std::ptr::copy(src, dest, self.layout.size());
     }
     pub fn get_tid(&self) -> TypeId {
@@ -111,7 +108,6 @@ impl TypeInfo {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -147,7 +143,12 @@ mod tests {
         let x2: *mut u8 = unsafe { transmute(x1) };
         println!("{:?}", (x1, x2));
 
-        unsafe { println!("maybe_partial_eq of Defined with itself gives {}", partial_eq_fn.execute(x2, x2)) };
+        unsafe {
+            println!(
+                "maybe_partial_eq of Defined with itself gives {}",
+                partial_eq_fn.execute(x2, x2)
+            )
+        };
     }
 
     struct Undefined(f32, f32);

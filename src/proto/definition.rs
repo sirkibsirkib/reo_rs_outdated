@@ -157,35 +157,47 @@ impl ProtoBuilder {
             })
             .collect();
 
+        let mem_refs = self
+            .init_mems
+            .iter()
+            .map(|(&loc_id, &ptr)| (ptr, loc_id))
+            .collect();
+
         let spaces = typeless_proto_def
             .loc_kinds
             .iter()
-            .map(|(id, loc_kinds)| match loc_kinds {
-                LocKind::PortPutter => Space::PoPu(PoPuSpace::new({ id_2_info(id).clone() })),
-                LocKind::PortGetter => Space::PoGe(PoGeSpace::new()),
-                LocKind::MemInitialized => Space::Memo({
-                    let ptr: *mut u8 = *self.init_mems.get(id).unwrap();
-                    let type_info = id_2_info(id).clone();
-                    MemoSpace::new(ptr, type_info)
-                }),
-                LocKind::MemUninitialized => Space::Memo({
-                    let ptr: *mut u8 = std::ptr::null_mut();
-                    let type_info = id_2_info(id).clone();
-                    MemoSpace::new(ptr, type_info)
-                }),
+            .map(|(id, loc_kinds)| {
+                let space = match loc_kinds {
+                    LocKind::PortPutter => Space::PoPu(PoPuSpace::new({ id_2_info(id).clone() })),
+                    LocKind::PortGetter => Space::PoGe(PoGeSpace::new()),
+                    LocKind::MemInitialized => Space::Memo({
+                        let ptr: *mut u8 = *self.init_mems.get(id).unwrap();
+                        let type_info = id_2_info(id).clone();
+                        MemoSpace::new(ptr, type_info)
+                    }),
+                    LocKind::MemUninitialized => Space::Memo({
+                        let ptr: *mut u8 = std::ptr::null_mut();
+                        let type_info = id_2_info(id).clone();
+                        MemoSpace::new(ptr, type_info)
+                    }),
+                };
+                (*id, space)
             })
             .collect();
 
         let rules = Self::build_rules::<P>(&id_2_type_id)?;
 
-        // println!("{:?}", (&rules, &memory_bits, &ready));
+        println!(
+            " READY {:#?}",
+            (&rules, &memory_bits, &ready, &unclaimed_ports, &spaces)
+        );
         let r = ProtoR { spaces, rules };
         let w = Mutex::new(ProtoW {
             memory_bits,
             active: ProtoActive {
                 ready,
                 storage: self.mem_storage,
-                mem_refs: HashMap::default(),
+                mem_refs,
             },
             commitment: None,
             ready_tentative: BitSet::default(),
@@ -306,26 +318,6 @@ impl ProtoBuilder {
     }
 }
 
-macro_rules! rule {
-    ( $formula:expr ; $( $putter:tt => $( $getter:tt  ),* );*) => {{
-        RuleDef {
-            guard: $formula,
-            actions: vec![
-                $(
-                ActionDef {
-                    putter: $putter,
-                    getters: vec![
-                        $(
-                            $getter
-                        ),*
-                    ],
-                }
-                ),*
-            ],
-        }
-    }};
-}
-
 struct IdkProto;
 impl Proto for IdkProto {
     fn typeless_proto_def() -> &'static TypelessProtoDef {
@@ -358,49 +350,5 @@ impl Proto for IdkProto {
 #[test]
 fn instantiate_idk() {
     let _x = IdkProto::instantiate();
-    println!("DONE");
-}
-
-struct AlternatorProto<T0: Parsable> {
-    phantom: PhantomData<(T0,)>,
-}
-impl<T0: Parsable> Proto for AlternatorProto<T0> {
-    fn typeless_proto_def() -> &'static TypelessProtoDef {
-        lazy_static::lazy_static! {
-            static ref DEF: TypelessProtoDef = TypelessProtoDef {
-                structure: ProtoDef{
-                    rules: vec![
-                        rule![Formula::True; 0=>2; 1=>3],
-                        rule![Formula::True; 3=>2],
-                    ]
-                },
-                loc_kinds: map! {
-                    0 => LocKind::PortPutter,
-                    1 => LocKind::PortPutter,
-                    2 => LocKind::PortGetter,
-                    3 => LocKind::MemInitialized,
-                },
-            };
-        }
-        &DEF
-    }
-    fn fill_memory(loc_id: LocId, p: MemFillPromise) -> Option<MemFillPromiseFulfilled> {
-        Some(match loc_id {
-            3 => p.fill_memory(T0::try_parse("2368")?).ok()?,
-            _ => return None,
-        })
-    }
-    fn loc_type(loc_id: LocId) -> Option<TypeInfo> {
-        Some(match loc_id {
-            0..=3 => TypeInfo::new::<T0>(),
-            _ => return None,
-        })
-    }
-}
-#[test]
-fn instantiate_alternator() {
-    let x = std::time::Instant::now();
-    let _x = AlternatorProto::<u32>::instantiate();
-    println!("{:?}", x.elapsed());
     println!("DONE");
 }

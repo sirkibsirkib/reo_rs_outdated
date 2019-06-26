@@ -1,35 +1,56 @@
 #[macro_export]
-macro_rules! id_iter {
-    ($($id:expr),*) => {
-        [$( $id, )*].iter().cloned()
-    };
-}
-
-#[macro_export]
-macro_rules! new_rule_def {
-    ($guard_pred:expr ;    $( $p:tt => $(  $g:tt ),*   );* ) => {{
+macro_rules! rule {
+    ( $formula:expr ; $( $putter:tt => $( $getter:tt  ),* );*) => {{
         RuleDef {
-            guard_pred: $guard_pred,
+            guard: $formula,
             actions: vec![
-                $(ActionDef {
-                    putter: $p,
-                    getters: &[$($g),*],
-                }),*
+                $(
+                ActionDef {
+                    putter: $putter,
+                    getters: vec![
+                        $(
+                            $getter
+                        ),*
+                    ],
+                }
+                ),*
             ],
         }
-    }}
+    }};
 }
 
-#[macro_export]
-macro_rules! putters_getters {
-    ($__arc_p:expr => $($id:tt),* ) => {{
-        (
-            $(
-                $__arc_p.claim($id).try_into().expect("BAD CLAIM")
-            ),*
-        )
-    }}
-}
+// #[macro_export]
+// macro_rules! id_iter {
+//     ($($id:expr),*) => {
+//         [$( $id, )*].iter().cloned()
+//     };
+// }
+
+// #[macro_export]
+// macro_rules! new_rule_def {
+//     ($guard_pred:expr ;    $( $p:tt => $(  $g:tt ),*   );* ) => {{
+//         RuleDef {
+//             guard_pred: $guard_pred,
+//             actions: vec![
+//                 $(ActionDef {
+//                     putter: $p,
+//                     getters: &[$($g),*],
+//                 }),*
+//             ],
+//         }
+//     }}
+// }
+
+// #[macro_export]
+// macro_rules! putters_getters {
+//     ($__arc_p:expr => $($id:tt),* ) => {{
+//         (
+//             $(
+//                 $__arc_p.claim($id).try_into().expect("BAD CLAIM")
+//             ),*
+//         )
+//     }}
+// }
 
 // transforms an n-ary tuple into nested binary tuples.
 // (a,b,c,d) => (a,(b,(c,d)))
