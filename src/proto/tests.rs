@@ -33,7 +33,7 @@ impl<T0: Parsable> Proto for AlternatorProto<T0> {
         }
         &DEF
     }
-    fn fill_memory(loc_id: LocId, _p: MemFillPromise) -> Option<MemFillPromiseFulfilled> {
+    fn fill_memory(_loc_id: LocId, _p: MemFillPromise) -> Option<MemFillPromiseFulfilled> {
         None
     }
     fn loc_type(loc_id: LocId) -> Option<TypeInfo> {
@@ -73,3 +73,44 @@ fn instantiate_alternator() {
     })
     .expect("Crashed!");
 }
+
+
+
+struct SyncProto<T0: Parsable> {
+    phantom: std::marker::PhantomData<(T0,)>,
+}
+impl<T0: Parsable> Proto for SyncProto<T0> {
+    fn typeless_proto_def() -> &'static TypelessProtoDef {
+        lazy_static::lazy_static! {
+            static ref DEF: TypelessProtoDef = TypelessProtoDef {
+                structure: ProtoDef{
+                    rules: vec![
+                        rule![Formula::True; 0=>1],
+                    ]
+                },
+                loc_kinds: map! {
+                    0 => LocKind::PortPutter,
+                    1 => LocKind::PortGetter,
+                },
+            };
+        }
+        &DEF
+    }
+    fn fill_memory(_loc_id: LocId, _p: MemFillPromise) -> Option<MemFillPromiseFulfilled> {
+        None
+    }
+    fn loc_type(loc_id: LocId) -> Option<TypeInfo> {
+        Some(match loc_id {
+            0 ..= 1 => TypeInfo::new::<T0>(),
+            _ => return None,
+        })
+    }
+}
+
+
+// test a normal moving sync with Arc<u32>
+// test a normal moving sync with u32
+// test replicator with u32
+// test replicator with String
+// test counter with u32
+// test counter with String
