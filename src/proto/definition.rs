@@ -322,38 +322,3 @@ impl ProtoBuilder {
         Ok(rules)
     }
 }
-
-struct IdkProto;
-impl Proto for IdkProto {
-    fn typeless_proto_def() -> &'static TypelessProtoDef {
-        lazy_static::lazy_static! {
-            static ref DEF: TypelessProtoDef = TypelessProtoDef {
-                structure: ProtoDef{
-                    rules: vec![
-                        rule![Formula::True; 0=>1],
-                    ]
-                },
-                loc_kinds: map! {
-                    0 => LocKind::PortPutter,
-                    1 => LocKind::PortGetter,
-                },
-            };
-        }
-        &DEF
-    }
-    fn fill_memory(_: LocId, _p: MemFillPromise) -> Option<MemFillPromiseFulfilled> {
-        None
-    }
-    fn loc_type(loc_id: LocId) -> Option<TypeInfo> {
-        Some(match loc_id {
-            0 | 1 => TypeInfo::new::<u32>(),
-            _ => return None,
-        })
-    }
-}
-
-#[test]
-fn instantiate_idk() {
-    let _x = IdkProto::instantiate();
-    println!("DONE");
-}

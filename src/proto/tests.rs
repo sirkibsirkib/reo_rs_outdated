@@ -1,7 +1,3 @@
-use std::sync::Arc;
-use rand::{Rng, thread_rng};
-use crate as reo_rs;
-use crossbeam;
 use self::reo_rs::{
     proto::{
         definition::{ActionDef, Formula, LocKind, ProtoDef, RuleDef, TypelessProtoDef},
@@ -11,6 +7,19 @@ use self::reo_rs::{
     },
     LocId,
 };
+use crate as reo_rs;
+use crossbeam;
+use parking_lot::Mutex;
+use rand::{thread_rng, Rng};
+use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+struct DropCounter(Arc<Mutex<u32>>);
+impl Drop for DropCounter {
+    fn drop(&mut self) {
+        *self.0.lock() += 1;
+    }
+}
 
 struct AlternatorProto<T0: 'static> {
     phantom: std::marker::PhantomData<(T0,)>,
@@ -44,16 +53,29 @@ impl<T0: 'static> Proto for AlternatorProto<T0> {
             _ => return None,
         })
     }
+    type Interface = (Putter<T0>, Putter<T0>, Getter<T0>);
+    fn instantiate_and_claim() -> Self::Interface {
+        let p = Self::instantiate();
+        putters_getters![p => 0,1,2]
+    }
 }
 #[test]
 fn proto_alt_u32_build() {
     let _ = AlternatorProto::<u32>::instantiate();
+}
+#[test]
+fn proto_alt_u32_instantiate_and_claim() {
+    let (_, _, _) = AlternatorProto::<u32>::instantiate_and_claim();
 }
 
 #[test]
 fn proto_alt_u32_claim() {
     let p = AlternatorProto::<u32>::instantiate();
     use std::convert::TryInto;
+    for i in 0..3 {
+        assert!(p.claim::<Putter<u16>>(i).claimed_nothing());
+        assert!(p.claim::<Getter<u16>>(i).claimed_nothing());
+    }
     let _: Putter<u32> = p.claim(0).try_into().unwrap();
     let _: Putter<u32> = p.claim(1).try_into().unwrap();
     let _: Getter<u32> = p.claim(2).try_into().unwrap();
@@ -128,22 +150,10 @@ fn proto_alt_u32_signals() {
     .expect("Crashed!");
 }
 
-
 #[test]
 fn proto_alt_counting() {
     use parking_lot::Mutex;
-    let ctr = Arc::new(Mutex::new(0));
-
-    #[derive(Debug, Clone)]
-    struct DropCounter(Arc<Mutex<u32>>);
-    impl Drop for DropCounter {
-        fn drop(&mut self) {
-            *self.0.lock() += 1;
-        }
-    }
-
-    let dc = DropCounter(ctr.clone());
-
+    let dc = DropCounter(Arc::new(Mutex::new(0)));
     let p = AlternatorProto::<DropCounter>::instantiate();
 
     use std::convert::TryInto;
@@ -171,19 +181,21 @@ fn proto_alt_counting() {
                         true => {
                             println!("GETTING SIG");
                             p2.get_signal();
-                        },
+                        }
                         false => {
                             println!("GETTING VAL");
                             p2.get();
-                        },
+                        }
                     }
                 }
             }
         });
     })
     .expect("Crashed!");
-    assert_eq!(*dc.0.lock(), N*2);
+    assert_eq!(*dc.0.lock(), N * 2);
 }
+
+////////////////////////////////////////////////////////////////////////
 
 struct SyncProto<T0: Parsable> {
     phantom: std::marker::PhantomData<(T0,)>,
@@ -214,34 +226,76 @@ impl<T0: Parsable> Proto for SyncProto<T0> {
             _ => return None,
         })
     }
+    type Interface = (Putter<T0>, Getter<T0>);
+    fn instantiate_and_claim() -> Self::Interface {
+        let p = Self::instantiate();
+        putters_getters![p => 0,1]
+    }
 }
 
-// #[test]
-// fn proto_sync_u32_basic() {
-//     let p = AlternatorProto::<u32>::instantiate();
-//     use std::convert::TryInto;
-//     let mut p0: Putter<u32> = p.claim(0).try_into().unwrap();
-//     let mut p1: Getter<u32> = p.claim(1).try_into().unwrap();
+#[test]
+fn proto_sync_f64_create() {
+    let _p = SyncProto::<f64>::instantiate();
+}
+#[test]
+fn proto_sync_f64_instantiate_and_claim() {
+    let (_, _) = SyncProto::<f64>::instantiate_and_claim();
+}
+#[test]
+fn proto_sync_f64_basic() {
+    let p = SyncProto::<f64>::instantiate();
+    use std::convert::TryInto;
+    let mut p0: Putter<f64> = p.claim(0).try_into().unwrap();
+    let mut p1: Getter<f64> = p.claim(1).try_into().unwrap();
 
-//     const N: u32 = 3;
-//     crossbeam::scope(|s| {
-//         s.spawn(move |_| {
-//             for i in 0..N {
-//                 assert!(p0.put(i).is_none());
-//             }
-//         });
-//         s.spawn(move |_| {
-//             for i in 0..N {
-//                 assert_eq!(p1.get(), i);
-//             }
-//         });
-//     })
-//     .expect("Crashed!");
-// }
+    const N: u32 = 10;
+    crossbeam::scope(|s| {
+        s.spawn(move |_| {
+            for i in 0..N {
+                assert!(p0.put(i as f64).is_none());
+            }
+        });
+        s.spawn(move |_| {
+            for i in 0..N {
+                assert_eq!(p1.get(), i as f64);
+            }
+        });
+    })
+    .expect("Crashed!");
+}
 
-// test a normal moving sync with Arc<u32>
-// test a normal moving sync with u32
-// test replicator with u32
-// test replicator with String
-// test counter with u32
-// test counter with String
+#[test]
+fn proto_sync_f64_chain() {
+    use std::convert::TryInto;
+
+    let p = SyncProto::<f64>::instantiate();
+    let mut p0: Putter<f64> = p.claim(0).try_into().unwrap();
+    let mut p1: Getter<f64> = p.claim(1).try_into().unwrap();
+
+    let p = SyncProto::<f64>::instantiate();
+    let mut p2: Putter<f64> = p.claim(0).try_into().unwrap();
+    let mut p3: Getter<f64> = p.claim(1).try_into().unwrap();
+
+    const N: u32 = 10;
+    crossbeam::scope(|s| {
+        s.spawn(move |_| {
+            for i in 0..N {
+                assert!(p0.put(i as f64).is_none());
+            }
+        });
+        s.spawn(move |_| {
+            for i in 0..N {
+                let val = p1.get();
+                assert_eq!(val, i as f64);
+                assert!(p2.put(val).is_none());
+            }
+        });
+        s.spawn(move |_| {
+            for i in 0..N {
+                let val = p3.get();
+                assert_eq!(val, i as f64);
+            }
+        });
+    })
+    .expect("Crashed!");
+}

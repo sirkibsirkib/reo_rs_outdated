@@ -186,6 +186,8 @@ pub trait Proto: Sized {
             Err(e) => panic!("Instantiate failed! {:?}", e),
         }
     }
+    type Interface: Sized;
+    fn instantiate_and_claim() -> Self::Interface;
 }
 
 pub(crate) trait DataSource<'a> {
