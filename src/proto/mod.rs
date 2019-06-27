@@ -93,7 +93,7 @@ impl MemoSpace {
     }
 
     /// invoked from both protocol or last getter.
-    pub(crate) fn make_empty(&self, w: &mut ProtoActive, drop_if_last_ref: bool) {
+    pub(crate) fn make_empty(&self, w: &mut ProtoActive, drop_if_last_ref: bool, my_id: LocId) {
         let src = self.p.remove_ptr();
         let refs: &mut usize = w.mem_refs.get_mut(&src).expect("no memrefs?");
         assert!(*refs >= 1);
@@ -110,6 +110,8 @@ impl MemoSpace {
                 }
             }
         }
+        let was = w.ready.set_to(my_id, true); // I am ready
+        assert!(!was);
     }
 }
 
@@ -881,7 +883,7 @@ impl<'a> Firer<'a> {
             // cleanup function. invoked when there are 0 data-getters
             println!("PROTO MEM CLEANUP");
             if !move_into_self {
-                memo_space.make_empty(w, true);
+                memo_space.make_empty(w, true, me_pu);
             }
         });
     }

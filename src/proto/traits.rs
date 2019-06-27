@@ -268,8 +268,9 @@ impl<'a> DataSource<'a> for MemoSpace {
     fn finalize(&self, someone_moved: bool, fin: Self::Finalizer) {
         println!("PO GE FINALIZE CLEANUP MEM");
         let mut w = fin.0.w.lock();
-        self.make_empty(&mut w.active, someone_moved);
-        w.enter(&fin.0.r, fin.1);
+        let putter_id = fin.1;
+        self.make_empty(&mut w.active, !someone_moved, putter_id);
+        w.enter(&fin.0.r, putter_id);
     }
 }
 
