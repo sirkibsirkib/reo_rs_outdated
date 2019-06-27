@@ -2,7 +2,7 @@ use std::sync::Arc;
 use rand::{Rng, thread_rng};
 use crate as reo_rs;
 use crossbeam;
-use reo_rs::{
+use self::reo_rs::{
     proto::{
         definition::{ActionDef, Formula, LocKind, ProtoDef, RuleDef, TypelessProtoDef},
         reflection::TypeInfo,
