@@ -14,7 +14,7 @@ use traits::{
     MemFillPromise, MemFillPromiseFulfilled, Proto,
 };
 
-// #[cfg!(test)]
+#[cfg(test)]
 mod tests;
 
 pub mod groups;
@@ -91,6 +91,26 @@ impl MemoSpace {
             p: PutterSpace::new(ptr, type_info),
         }
     }
+
+    /// invoked from both protocol or last getter.
+    pub(crate) fn make_empty(&self, w: &mut ProtoActive, drop_if_last_ref: bool) {
+        let src = self.p.remove_ptr();
+        let refs: &mut usize = w.mem_refs.get_mut(&src).expect("no memrefs?");
+        assert!(*refs >= 1);
+        *refs -= 1;
+        if *refs == 0 {
+            w.mem_refs.remove(&src);
+            unsafe {
+                if drop_if_last_ref {
+                    println!("MEM CELL DROPPING");
+                    w.storage.drop_inside(src, &self.p.type_info)
+                } else {
+                    println!("MEM CELL FORGETTING");
+                    w.storage.forget_inside(src, &self.p.type_info)
+                }
+            }
+        }
+    }
 }
 
 /// Port-variant of PutterSpace. Ptr here points to the putter's stack
@@ -145,7 +165,6 @@ impl PoGeSpace {
 struct ProtoActive {
     ready: BitSet,
     storage: Storage,
-    // free_mems: HashMap<TypeId, Vec<*mut u8>>,
     mem_refs: HashMap<*mut u8, usize>,
 }
 
@@ -238,7 +257,6 @@ impl ProtoW {
             // keep looping until 0 rules can fire
             for (rule_id, rule) in r.rules.iter().enumerate() {
                 let bits_ready = is_ready(&self.memory_bits, &self.active.ready, rule);
-                println!("Rule {} is ready!", rule_id);
                 if bits_ready && unsafe { r.eval_formula(&rule.guard_pred) } {
                     // safe if Equal functions are sound
                     println!("FIRING {}: {:?}", rule_id, rule);
@@ -290,9 +308,10 @@ impl ProtoW {
 
 fn subtract_readiness(ready: &mut BitSet, rule: &RunRule) {
     // ready.pad_trailing_zeroes(rule.guard_ready.data.len());
-    println!("subtracking readiness {:?}", 
+    println!(
+        "subtracking readiness {:?}",
         (ready.data.len(), rule.guard_ready.data.len())
-        );
+    );
     for (mr, &gr) in izip!(ready.data.iter_mut(), rule.guard_ready.data.iter()) {
         *mr &= !gr;
     }
@@ -494,6 +513,15 @@ pub enum ClaimResult<T: 'static> {
     GotPutter(Putter<T>),
     NotUnclaimed,
     TypeMismatch,
+}
+impl<T: 'static> ClaimResult<T> {
+    pub fn claimed_nothing(&self) -> bool {
+        use ClaimResult::*;
+        match self {
+            GotGetter(_) | GotPutter(_) => false,
+            NotUnclaimed | TypeMismatch => true,
+        }
+    }
 }
 impl<T: 'static> TryInto<Putter<T>> for ClaimResult<T> {
     type Error = bool;
@@ -771,22 +799,6 @@ impl<'a> Firer<'a> {
         count
     }
 
-    fn empty_memcell(&mut self, space: &MemoSpace) {
-        let ptr = space.p.remove_ptr();
-        let refs: &mut usize = self.w.mem_refs.get_mut(&ptr).expect("NO REFS HERE?");
-        assert!(*refs >= 1);
-        *refs -= 1;
-        if *refs == 0 {
-            unsafe { self.w.storage.drop_inside(ptr, &space.p.type_info) };
-        }
-    }
-
-    /// A fire action that
-    pub fn mem_to_nowhere(&mut self, me_pu: LocId) {
-        let memo_space = self.r.get_me_pu(me_pu).expect("NOT MEM?");
-        self.empty_memcell(memo_space)
-    }
-
     fn instruct_data_getters<F>(
         r: &ProtoR,
         po_ge: &[LocId],
@@ -832,41 +844,50 @@ impl<'a> Firer<'a> {
         }
     }
 
-    pub fn mem_to_ports(&mut self, me_pu: LocId, po_ge: &[LocId]) {
-        // println!("mem2ports");
+    pub fn mem_to_locs(&mut self, me_pu: LocId, me_ge: &[LocId], po_ge: &[LocId]) {
+        println!("mem_to_locs");
         let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
+        let tid = &memo_space.p.type_info.type_id;
 
-        // 1. port getters have move-priority
+        // 1. get data ptr of putter memcell.
+        let src = memo_space.p.get_ptr();
+        assert!(!src.is_null());
+        println!("src is {:p}", src);
+
+        // 1. duplicate ref to getter memcells
+        let mut move_into_self = false;
+        for g in me_ge.iter().cloned() {
+            if g == me_pu {
+                move_into_self = true;
+            } else {
+                let me_ge_space = self.r.get_me_pu(g).expect("gggg");
+                assert_eq!(*tid, me_ge_space.p.type_info.type_id);
+                me_ge_space.p.overwrite_null_ptr(src);
+                self.w.ready.set_to(g, true); // PUTTER is ready
+            }
+        }
+
+        // 2. release signal getters
         let data_getters_count = self.release_sig_getters_count_getters(po_ge);
-        let Firer { r, .. } = self;
+
+        // 3. update refcounts
+        let Firer { r, w } = self;
+        let src_refs = w.mem_refs.get_mut(&src).expect("mem_to_locs BAD REFS?");
+        assert!(*src_refs >= 1);
+        *src_refs += me_ge.len();
+
+        // 4. perform port moves
         Self::instruct_data_getters(r, po_ge, data_getters_count, me_pu, &memo_space.p, || {
             // cleanup function. invoked when there are 0 data-getters
-            self.empty_memcell(memo_space)
+            println!("PROTO MEM CLEANUP");
+            if !move_into_self {
+                memo_space.make_empty(w, true);
+            }
         });
     }
 
-    pub fn mem_to_locs(&mut self, me_pu: LocId, me_ge: &[LocId], po_ge: &[LocId]) {
-        // println!("mem_to_mem_and_ports");
-        let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
-        let tid = &memo_space.p.type_info.type_id;
-        let src = memo_space.p.get_ptr();
-
-        // 1. copy pointers to other memory cells
-        // ASSUMES destinations have dangling pointers TODO checks
-        for g in me_ge.iter().cloned() {
-            let me_ge_space = self.r.get_me_pu(g).expect("gggg");
-            assert_eq!(*tid, me_ge_space.p.type_info.type_id);
-            me_ge_space.p.set_ptr(src);
-            self.w.ready.set_to(g, true); // PUTTER is ready
-        }
-        // 2. increment memory pointer refs of me_pu
-        let src_refs = self.w.mem_refs.get_mut(&src).expect("mem_to_locs BAD REFS?");
-        *src_refs += me_ge.len();
-        self.mem_to_ports(me_pu, po_ge);
-    }
-
     pub fn port_to_locs(&mut self, po_pu: LocId, me_ge: &[LocId], po_ge: &[LocId]) {
-        // println!("port_to_mem_and_ports");
+        println!("port_to_locs");
         let po_pu_space = self.r.get_po_pu(po_pu).expect("ECH");
 
         // 1. port getters have move-priority
@@ -877,7 +898,6 @@ impl<'a> Firer<'a> {
         let mut me_ge_iter = me_ge.iter().cloned();
         if let Some(first_me_ge) = me_ge_iter.next() {
             let first_me_ge_space = self.r.get_me_pu(first_me_ge).expect("wfew");
-            self.w.ready.set_to(first_me_ge, true); // GETTER is ready
             let type_info = &first_me_ge_space.p.type_info;
             let tid = type_info.type_id;
 
@@ -890,6 +910,8 @@ impl<'a> Firer<'a> {
                 }
             };
             let mut refcounts = 1;
+            first_me_ge_space.p.overwrite_null_ptr(dest);
+            self.w.ready.set_to(first_me_ge, true); // mem is ready for GET
 
             // 4. copy pointers to other memory cells (if any)
             for g in me_ge_iter {
@@ -897,7 +919,7 @@ impl<'a> Firer<'a> {
                 assert_eq!(tid, me_ge_space.p.type_info.type_id);
 
                 me_ge_space.p.overwrite_null_ptr(dest);
-                self.w.ready.set_to(g, true); // GETTER is ready
+                self.w.ready.set_to(g, true); // mem is ready for GET
                 refcounts += 1;
             }
             let was = self.w.mem_refs.insert(dest, refcounts);

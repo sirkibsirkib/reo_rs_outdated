@@ -188,10 +188,10 @@ impl ProtoBuilder {
 
         let rules = Self::build_rules::<P>(&id_2_type_id)?;
 
-        println!(
-            " READY {:#?}",
-            (&rules, &memory_bits, &ready, &unclaimed_ports, &spaces)
-        );
+        // println!(
+        //     " READY {:#?}",
+        //     (&rules, &memory_bits, &ready, &unclaimed_ports, &spaces)
+        // );
         let r = ProtoR { spaces, rules };
         let w = Mutex::new(ProtoW {
             memory_bits,

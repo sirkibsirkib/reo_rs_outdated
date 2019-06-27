@@ -200,16 +200,15 @@ pub(crate) trait DataSource<'a> {
         let src = space.get_ptr();
         if space.type_info.is_copy {
             // MOVE HAPPENS HERE
-            println!("..COPYING");
             self.execute_copy(out_ptr);
             unsafe { src.copy_to(out_ptr, space.type_info.layout.size()) };
             let was = space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
             if was == case.last_countdown() {
-                println!("I WAS LAST!");
                 self.finalize(true, fin);
             }
         } else {
             if case.i_move() {
+                // I am the finalizer
                 if case.mover_must_wait() {
                     space.mover_sema.acquire();
                 }
@@ -224,6 +223,7 @@ pub(crate) trait DataSource<'a> {
                     if case.someone_moves() {
                         space.mover_sema.release();
                     } else {
+                        // no movers. I finalize
                         self.finalize(false, fin);
                     }
                 }
@@ -246,7 +246,9 @@ impl<'a> DataSource<'a> for PoPuSpace {
         unsafe { self.p.type_info.clone_fn.execute(src, out_ptr) };
     }
     fn finalize(&self, someone_moved: bool, _fin: Self::Finalizer) {
-        self.dropbox.send(if someone_moved { 1 } else { 0 });
+        let msg = if someone_moved { 1 } else { 0 };
+        println!("POPU FIN MSG = {}", msg);
+        self.dropbox.send(msg);
     }
 }
 
@@ -264,26 +266,10 @@ impl<'a> DataSource<'a> for MemoSpace {
         unsafe { self.p.type_info.clone_fn.execute(src, out_ptr) };
     }
     fn finalize(&self, someone_moved: bool, fin: Self::Finalizer) {
-        let putter_id: LocId = fin.1; // my id
+        println!("PO GE FINALIZE CLEANUP MEM");
         let mut w = fin.0.w.lock();
-        let src: *mut u8 = self.p.get_ptr();
-        let refs: &mut usize = w.active.mem_refs.get_mut(&src).expect("no memrefs?");
-        assert!(*refs >= 1);
-        *refs -= 1;
-        if *refs == 0 {
-            w.active.mem_refs.remove(&src);
-            unsafe {
-                if someone_moved {
-                    w.active.storage.forget_inside(src, &self.p.type_info)
-                } else {
-                    unreachable!()
-                    // w.active
-                    //     .storage
-                    //     .drop_inside(src, &self.p.type_info)
-                }
-            }
-        }
-        w.enter(&fin.0.r, putter_id);
+        self.make_empty(&mut w.active, someone_moved);
+        w.enter(&fin.0.r, fin.1);
     }
 }
 
