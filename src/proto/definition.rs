@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Debug, Clone)]
-pub struct ProtoDef {
+pub struct BehaviourDef {
     pub rules: Vec<RuleDef>,
 }
 
@@ -88,7 +88,7 @@ impl LocKind {
 }
 
 pub struct TypelessProtoDef {
-    pub structure: ProtoDef,
+    pub behaviour: BehaviourDef,
     pub loc_kinds: HashMap<LocId, LocKind>,
 }
 
@@ -223,7 +223,7 @@ impl ProtoBuilder {
         let typeless_proto_def = P::typeless_proto_def();
         use ProtoBuildErr::*;
         let mut rules = vec![];
-        for (rule_id, rule_def) in typeless_proto_def.structure.rules.iter().enumerate() {
+        for (rule_id, rule_def) in typeless_proto_def.behaviour.rules.iter().enumerate() {
             let mut guard_ready = BitSet::default();
             let mut guard_full = BitSet::default();
             let mut actions = vec![];

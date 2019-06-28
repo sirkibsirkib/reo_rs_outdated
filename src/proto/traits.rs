@@ -272,7 +272,7 @@ impl<'a> DataSource<'a> for MemoSpace {
         let mut w = fin.0.w.lock();
         let putter_id = fin.1;
         self.make_empty(&mut w.active, !someone_moved, putter_id);
-        w.enter(&fin.0.r, putter_id);
+        w.ready_set_coordinate(&fin.0.r, putter_id);
     }
 }
 

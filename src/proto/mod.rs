@@ -222,7 +222,7 @@ impl ProtoW {
     }
     /// "Act as protocol" procedure. Mutable reference ensures 0/1 threads
     /// call this per proto at a time.
-    fn enter(&mut self, r: &ProtoR, my_id: LocId) {
+    fn ready_set_coordinate(&mut self, r: &ProtoR, my_id: LocId) {
         println!("ENTER WITH ID {}", my_id);
         self.active.ready.set_to(my_id, true);
         (r, self as &ProtoW).debug_print();
@@ -603,7 +603,7 @@ impl<T: 'static> Getter<T> {
     pub fn get_signal_timeout(&mut self, timeout: Duration) -> bool {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
         po_ge.set_want_data(false);
-        self.c.p.w.lock().enter(&self.c.p.r, self.c.id);
+        self.c.p.w.lock().ready_set_coordinate(&self.c.p.r, self.c.id);
         po_ge
             .await_msg_timeout(&self.c.p, timeout, self.c.id)
             .is_some()
@@ -613,7 +613,7 @@ impl<T: 'static> Getter<T> {
     pub fn get_signal(&mut self) {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
         po_ge.set_want_data(false);
-        self.c.p.w.lock().enter(&self.c.p.r, self.c.id);
+        self.c.p.w.lock().ready_set_coordinate(&self.c.p.r, self.c.id);
         po_ge.dropbox.recv_nothing()
     }
     /// like `get` but attempts to return with `None` if the provided duration
@@ -624,7 +624,7 @@ impl<T: 'static> Getter<T> {
     pub fn get_timeout(&mut self, timeout: Duration) -> Option<T> {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
         po_ge.set_want_data(true);
-        self.c.p.w.lock().enter(&self.c.p.r, self.c.id);
+        self.c.p.w.lock().ready_set_coordinate(&self.c.p.r, self.c.id);
         let mut datum: MaybeUninit<T> = MaybeUninit::uninit();
         let out_ptr = unsafe { transmute(datum.as_mut_ptr()) };
         unsafe {
@@ -638,7 +638,7 @@ impl<T: 'static> Getter<T> {
     pub fn get(&mut self) -> T {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
         po_ge.set_want_data(true);
-        self.c.p.w.lock().enter(&self.c.p.r, self.c.id);
+        self.c.p.w.lock().ready_set_coordinate(&self.c.p.r, self.c.id);
         let mut datum: MaybeUninit<T> = MaybeUninit::uninit();
         let out_ptr = unsafe { transmute(datum.as_mut_ptr()) };
         unsafe {
@@ -683,7 +683,7 @@ impl<T: 'static> Putter<T> {
         use PutTimeoutResult::*;
         let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
         unsafe { po_pu.p.set_ptr(transmute(&datum)) };
-        self.c.p.w.lock().enter(&self.c.p.r, self.c.id);
+        self.c.p.w.lock().ready_set_coordinate(&self.c.p.r, self.c.id);
         let num_movers_msg = match po_pu.await_msg_timeout(&self.c.p, timeout, self.c.id) {
             Some(msg) => msg,
             None => {
@@ -711,7 +711,7 @@ impl<T: 'static> Putter<T> {
         use PutTimeoutResult::*;
         let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
         unsafe { po_pu.p.set_ptr(transmute(&datum)) };
-        self.c.p.w.lock().enter(&self.c.p.r, self.c.id);
+        self.c.p.w.lock().ready_set_coordinate(&self.c.p.r, self.c.id);
         let num_movers_msg = match po_pu.dropbox.recv_timeout(timeout) {
             Some(msg) => msg,
             None => {
@@ -738,7 +738,7 @@ impl<T: 'static> Putter<T> {
     pub fn put(&mut self, datum: T) -> Option<T> {
         let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
         unsafe { po_pu.p.set_ptr(transmute(&datum)) };
-        self.c.p.w.lock().enter(&self.c.p.r, self.c.id);
+        self.c.p.w.lock().ready_set_coordinate(&self.c.p.r, self.c.id);
         let num_movers_msg = po_pu.dropbox.recv();
         match num_movers_msg {
             0 => Some(datum),
@@ -754,7 +754,7 @@ impl<T: 'static> Putter<T> {
     pub fn put_lossy(&mut self, datum: T) -> Option<()> {
         let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
         unsafe { po_pu.p.set_ptr(transmute(&datum)) };
-        self.c.p.w.lock().enter(&self.c.p.r, self.c.id);
+        self.c.p.w.lock().ready_set_coordinate(&self.c.p.r, self.c.id);
         let num_movers_msg = po_pu.dropbox.recv();
         match num_movers_msg {
             0 => {

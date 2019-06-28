@@ -1,6 +1,6 @@
 use self::reo_rs::{
     proto::{
-        definition::{ActionDef, Formula, LocKind, ProtoDef, RuleDef, TypelessProtoDef},
+        definition::{ActionDef, Formula, LocKind, BehaviourDef, RuleDef, TypelessProtoDef},
         reflection::TypeInfo,
         traits::{HasUnclaimedPorts, MemFillPromise, MemFillPromiseFulfilled, Parsable, Proto},
         Getter, Putter,
@@ -20,7 +20,6 @@ impl Drop for DropCounter {
         *self.0.lock() += 1;
     }
 }
-
 struct AlternatorProto<T0: 'static> {
     phantom: std::marker::PhantomData<(T0,)>,
 }
@@ -28,7 +27,7 @@ impl<T0: 'static> Proto for AlternatorProto<T0> {
     fn typeless_proto_def() -> &'static TypelessProtoDef {
         lazy_static::lazy_static! {
             static ref DEF: TypelessProtoDef = TypelessProtoDef {
-                structure: ProtoDef{
+                behaviour: BehaviourDef {
                     rules: vec![
                         rule![Formula::True; 0=>2; 1=>3],
                         rule![Formula::True; 3=>2],
@@ -204,7 +203,7 @@ impl<T0: Parsable> Proto for SyncProto<T0> {
     fn typeless_proto_def() -> &'static TypelessProtoDef {
         lazy_static::lazy_static! {
             static ref DEF: TypelessProtoDef = TypelessProtoDef {
-                structure: ProtoDef{
+                behaviour: BehaviourDef {
                     rules: vec![
                         rule![Formula::True; 0=>1],
                     ]
