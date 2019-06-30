@@ -154,6 +154,11 @@ pub struct WrongMemFillType {
 pub struct MemFillPromiseFulfilled {
     _secret: (),
 }
+
+/// Does not enforce that used LocIds have any particular order or are contiguous,
+/// HOWEVER, leaving gaps in ID-SPACE will reduce efficiency by:
+/// 1. leaving gaps in the protocol's internal buffer (it uses a vector of Space objects)
+/// 2. making inefficient use of bitset operations
 pub trait Proto: Sized {
     fn typeless_proto_def() -> &'static TypelessProtoDef;
     fn fill_memory(loc_id: LocId, promise: MemFillPromise) -> Option<MemFillPromiseFulfilled>;
