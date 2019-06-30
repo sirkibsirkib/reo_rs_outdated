@@ -218,7 +218,7 @@ pub(crate) trait DataSource<'a> {
                 self.finalize(true, fin);
             } else {
                 // CLONE HAPPENS HERE
-                unsafe { space.type_info.clone_fn.execute(src, out_ptr) };
+                unsafe { space.type_info.funcs.clone.execute(src, out_ptr) };
                 let was = space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
                 if was == case.last_countdown() {
                     if case.someone_moves() {
@@ -244,7 +244,7 @@ impl<'a> DataSource<'a> for PoPuSpace {
     }
     fn execute_clone(&self, out_ptr: *mut u8) {
         let src: *mut u8 = self.p.get_ptr();
-        unsafe { self.p.type_info.clone_fn.execute(src, out_ptr) };
+        unsafe { self.p.type_info.funcs.clone.execute(src, out_ptr) };
     }
     fn finalize(&self, someone_moved: bool, _fin: Self::Finalizer) {
         let msg = if someone_moved { 1 } else { 0 };
@@ -264,7 +264,7 @@ impl<'a> DataSource<'a> for MemoSpace {
     }
     fn execute_clone(&self, out_ptr: *mut u8) {
         let src: *mut u8 = self.p.get_ptr();
-        unsafe { self.p.type_info.clone_fn.execute(src, out_ptr) };
+        unsafe { self.p.type_info.funcs.clone.execute(src, out_ptr) };
     }
     fn finalize(&self, someone_moved: bool, fin: Self::Finalizer) {
         println!("PO GE FINALIZE CLEANUP MEM");

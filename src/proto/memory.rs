@@ -39,7 +39,7 @@ impl Storage {
     }
     pub unsafe fn clone_in(&mut self, src: StackPtr, type_info: &Arc<TypeInfo>) -> StorePtr {
         let dest = self.inner_alloc(type_info);
-        type_info.clone_fn.execute(src, dest);
+        type_info.funcs.clone.execute(src, dest);
         dest
     }
     pub unsafe fn move_out(&mut self, src: StorePtr, dest: StackPtr, layout: &Layout) {
@@ -53,7 +53,7 @@ impl Storage {
         self.inner_free(ptr, &LayoutHashable(info.layout));
     }
     pub unsafe fn drop_inside(&mut self, ptr: StorePtr, info: &Arc<TypeInfo>) {
-        info.drop_fn.execute(ptr);
+        info.funcs.drop.execute(ptr);
         self.inner_free(ptr, &LayoutHashable(info.layout));
     }
     /// Deallocates emptied allocations
@@ -101,7 +101,7 @@ impl Drop for Storage {
             // invariant: self.owned keys ALWAYS are mapped in type_info
             let info = self.type_info.get(&tid).unwrap();
             unsafe {
-                info.drop_fn.execute(ptr);
+                info.funcs.drop.execute(ptr);
                 // println!("dropping occupied alloc at {:p}", ptr);
                 alloc::dealloc(ptr, info.layout);
             };

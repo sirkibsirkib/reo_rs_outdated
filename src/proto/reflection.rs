@@ -80,11 +80,16 @@ impl DropFn {
 #[derive(Debug, Clone, Copy)]
 pub struct TypeInfo {
     pub(crate) type_id: TypeId,
-    pub(crate) drop_fn: DropFn,
-    pub(crate) clone_fn: CloneFn,
-    pub(crate) partial_eq_fn: PartialEqFn,
     pub(crate) is_copy: bool,
     pub(crate) layout: Layout,
+    pub(crate) funcs: TypeInfoFuncs,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct TypeInfoFuncs {
+    pub(crate) drop: DropFn,
+    pub(crate) clone: CloneFn,
+    pub(crate) partial_eq: PartialEqFn,
 }
 impl TypeInfo {
     #[inline]
@@ -100,11 +105,13 @@ impl TypeInfo {
     pub fn new<T: 'static>() -> Self {
         Self {
             type_id: TypeId::of::<T>(),
-            drop_fn: DropFn::new::<T>(),
-            clone_fn: CloneFn::new::<T>(),
-            partial_eq_fn: PartialEqFn::new::<T>(),
             layout: Layout::new::<T>(),
             is_copy: <T as MaybeCopy>::IS_COPY,
+            funcs: TypeInfoFuncs {
+                drop: DropFn::new::<T>(),
+                clone: CloneFn::new::<T>(),
+                partial_eq: PartialEqFn::new::<T>(),
+            }
         }
     }
 }

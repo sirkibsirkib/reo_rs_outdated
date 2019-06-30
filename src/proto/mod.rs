@@ -408,7 +408,7 @@ impl ProtoR {
         let (i1, p1) = clos(a);
         let (i2, p2) = clos(b);
         assert_eq!(i1.type_id, i2.type_id);
-        i1.partial_eq_fn.execute(p1, p2)
+        i1.funcs.partial_eq.execute(p1, p2)
     }
     fn send_to_getter(&self, id: LocId, msg: usize) {
         if let Some(Space::PoGe(space)) = self.get_space(id) {
