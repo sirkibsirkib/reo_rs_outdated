@@ -98,15 +98,10 @@ impl HasUnclaimedPorts for Arc<ProtoAll> {
                     p: self.clone(),
                     id,
                 };
+                let phantom = Default::default();
                 match role {
-                    PortRole::Putter => GotPutter(Putter {
-                        c,
-                        phantom: Default::default(),
-                    }),
-                    PortRole::Getter => GotGetter(Getter {
-                        c,
-                        phantom: Default::default(),
-                    }),
+                    PortRole::Putter => GotPutter(Putter { c, phantom }),
+                    PortRole::Getter => GotGetter(Getter { c, phantom }),
                 }
             } else {
                 TypeMismatch
@@ -203,7 +198,6 @@ pub(crate) trait DataSource<'a> {
         if space.type_info.is_copy {
             // MOVE HAPPENS HERE
             self.execute_copy(out_ptr);
-            unsafe { src.copy_to(out_ptr, space.type_info.layout.size()) };
             let was = space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
             if was == case.last_countdown() {
                 self.finalize(true, fin);

@@ -1,6 +1,6 @@
 use self::reo_rs::{
     proto::{
-        definition::{ActionDef, Formula, LocKind, BehaviourDef, RuleDef, TypelessProtoDef},
+        definition::{ActionDef, BehaviourDef, Formula, LocKind, RuleDef, TypelessProtoDef},
         reflection::TypeInfo,
         traits::{HasUnclaimedPorts, MemFillPromise, MemFillPromiseFulfilled, Parsable, Proto},
         Getter, Putter,
@@ -61,6 +61,18 @@ impl<T0: 'static> Proto for AlternatorProto<T0> {
 #[test]
 fn proto_alt_u32_build() {
     let _ = AlternatorProto::<u32>::instantiate();
+}
+#[test]
+fn proto_alt_u32_build_repeatedly() {
+    let p = AlternatorProto::<u32>::instantiate();
+    use std::convert::TryInto;
+
+    let a: Putter<u32> = p.claim(0).try_into().unwrap();
+    drop(a);
+    let a: Putter<u32> = p.claim(0).try_into().unwrap();
+    drop(a);
+    let a: Putter<u32> = p.claim(0).try_into().unwrap();
+    drop(a);
 }
 #[test]
 fn proto_alt_u32_instantiate_and_claim() {

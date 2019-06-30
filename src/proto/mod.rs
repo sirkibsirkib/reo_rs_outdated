@@ -1,5 +1,6 @@
 use crate::proto::memory::Storage;
 use itertools::izip;
+use smallvec::SmallVec;
 
 pub mod definition;
 mod memory;
@@ -377,12 +378,13 @@ enum Space {
     PoPu(PoPuSpace),
     PoGe(PoGeSpace),
     Memo(MemoSpace),
+    Unused,
 }
 
 /// Part of the protocol NOT protected by the lock
 pub struct ProtoR {
     rules: Vec<RunRule>,
-    spaces: HashMap<LocId, Space>,
+    spaces: Vec<Space>,
 }
 impl ProtoR {
     unsafe fn eval_formula(&self, guard: &Formula) -> bool {
@@ -437,10 +439,10 @@ impl ProtoR {
         }
     }
     fn get_space(&self, id: LocId) -> Option<&Space> {
-        self.spaces.get(&id)
+        self.spaces.get(id)
     }
     pub fn loc_is_mem(&self, id: LocId) -> bool {
-        match self.spaces.get(&id) {
+        match self.spaces.get(id) {
             Some(Space::Memo(_)) => true,
             _ => false,
         }
@@ -574,13 +576,13 @@ impl RunRule {
 enum RunAction {
     PortPut {
         putter: LocId,
-        mg: Vec<LocId>,
-        pg: Vec<LocId>,
+        mg: SmallVec<[LocId; 4]>,
+        pg: SmallVec<[LocId; 4]>,
     },
     MemPut {
         putter: LocId,
-        mg: Vec<LocId>,
-        pg: Vec<LocId>,
+        mg: SmallVec<[LocId; 4]>,
+        pg: SmallVec<[LocId; 4]>,
     },
 }
 
@@ -599,11 +601,19 @@ unsafe impl<T: 'static> Sync for Getter<T> {}
 impl<T: 'static> Getter<T> {
     const BAD_ID: &'static str = "My ID isn't associated with a valid getter!";
 
+    pub fn proto_handle(&self) -> &Arc<ProtoAll> {
+        &self.c.p
+    }
+
     /// combination of `get_signal` and `get_timeout`
     pub fn get_signal_timeout(&mut self, timeout: Duration) -> bool {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
         po_ge.set_want_data(false);
-        self.c.p.w.lock().ready_set_coordinate(&self.c.p.r, self.c.id);
+        self.c
+            .p
+            .w
+            .lock()
+            .ready_set_coordinate(&self.c.p.r, self.c.id);
         po_ge
             .await_msg_timeout(&self.c.p, timeout, self.c.id)
             .is_some()
@@ -613,7 +623,11 @@ impl<T: 'static> Getter<T> {
     pub fn get_signal(&mut self) {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
         po_ge.set_want_data(false);
-        self.c.p.w.lock().ready_set_coordinate(&self.c.p.r, self.c.id);
+        self.c
+            .p
+            .w
+            .lock()
+            .ready_set_coordinate(&self.c.p.r, self.c.id);
         po_ge.dropbox.recv_nothing()
     }
     /// like `get` but attempts to return with `None` if the provided duration
@@ -624,7 +638,11 @@ impl<T: 'static> Getter<T> {
     pub fn get_timeout(&mut self, timeout: Duration) -> Option<T> {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
         po_ge.set_want_data(true);
-        self.c.p.w.lock().ready_set_coordinate(&self.c.p.r, self.c.id);
+        self.c
+            .p
+            .w
+            .lock()
+            .ready_set_coordinate(&self.c.p.r, self.c.id);
         let mut datum: MaybeUninit<T> = MaybeUninit::uninit();
         let out_ptr = unsafe { transmute(datum.as_mut_ptr()) };
         unsafe {
@@ -638,7 +656,11 @@ impl<T: 'static> Getter<T> {
     pub fn get(&mut self) -> T {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
         po_ge.set_want_data(true);
-        self.c.p.w.lock().ready_set_coordinate(&self.c.p.r, self.c.id);
+        self.c
+            .p
+            .w
+            .lock()
+            .ready_set_coordinate(&self.c.p.r, self.c.id);
         let mut datum: MaybeUninit<T> = MaybeUninit::uninit();
         let out_ptr = unsafe { transmute(datum.as_mut_ptr()) };
         unsafe {
@@ -678,12 +700,20 @@ impl<T: 'static> Putter<T> {
     const BAD_MSG: &'static str = "putter got a bad `num_movers_msg`";
     const BAD_ID: &'static str = "protocol doesn't recognize my role as putter!";
 
+    pub fn proto_handle(&self) -> &Arc<ProtoAll> {
+        &self.c.p
+    }
+
     /// Combination of `put_timeout` and `put_lossy`.
     pub fn put_timeout_lossy(&mut self, datum: T, timeout: Duration) -> PutTimeoutResult<()> {
         use PutTimeoutResult::*;
         let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
         unsafe { po_pu.p.set_ptr(transmute(&datum)) };
-        self.c.p.w.lock().ready_set_coordinate(&self.c.p.r, self.c.id);
+        self.c
+            .p
+            .w
+            .lock()
+            .ready_set_coordinate(&self.c.p.r, self.c.id);
         let num_movers_msg = match po_pu.await_msg_timeout(&self.c.p, timeout, self.c.id) {
             Some(msg) => msg,
             None => {
@@ -711,7 +741,11 @@ impl<T: 'static> Putter<T> {
         use PutTimeoutResult::*;
         let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
         unsafe { po_pu.p.set_ptr(transmute(&datum)) };
-        self.c.p.w.lock().ready_set_coordinate(&self.c.p.r, self.c.id);
+        self.c
+            .p
+            .w
+            .lock()
+            .ready_set_coordinate(&self.c.p.r, self.c.id);
         let num_movers_msg = match po_pu.dropbox.recv_timeout(timeout) {
             Some(msg) => msg,
             None => {
@@ -738,7 +772,11 @@ impl<T: 'static> Putter<T> {
     pub fn put(&mut self, datum: T) -> Option<T> {
         let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
         unsafe { po_pu.p.set_ptr(transmute(&datum)) };
-        self.c.p.w.lock().ready_set_coordinate(&self.c.p.r, self.c.id);
+        self.c
+            .p
+            .w
+            .lock()
+            .ready_set_coordinate(&self.c.p.r, self.c.id);
         let num_movers_msg = po_pu.dropbox.recv();
         match num_movers_msg {
             0 => Some(datum),
@@ -754,7 +792,11 @@ impl<T: 'static> Putter<T> {
     pub fn put_lossy(&mut self, datum: T) -> Option<()> {
         let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
         unsafe { po_pu.p.set_ptr(transmute(&datum)) };
-        self.c.p.w.lock().ready_set_coordinate(&self.c.p.r, self.c.id);
+        self.c
+            .p
+            .w
+            .lock()
+            .ready_set_coordinate(&self.c.p.r, self.c.id);
         let num_movers_msg = po_pu.dropbox.recv();
         match num_movers_msg {
             0 => {

@@ -107,13 +107,14 @@ impl ProtoBuilder {
     pub fn finish<P: Proto>(self) -> Result<ProtoAll, ProtoBuildErr> {
         use ProtoBuildErr::*;
         let typeless_proto_def = P::typeless_proto_def();
+        let max_loc_id = Self::max_loc_id(typeless_proto_def);
         let mut memory_bits: BitSet = typeless_proto_def
             .loc_kinds
             .iter()
             .filter(|(_, &loc_kinds)| loc_kinds == LocKind::MemInitialized)
             .map(|(&id, _)| id)
             .collect();
-        memory_bits.pad_trailing_zeroes_to_capacity(Self::max_loc_id(typeless_proto_def));
+        memory_bits.pad_trailing_zeroes_to_capacity(max_loc_id);
 
         let ready: BitSet = typeless_proto_def
             .loc_kinds
@@ -164,34 +165,31 @@ impl ProtoBuilder {
             .map(|(&loc_id, &ptr)| (ptr, loc_id))
             .collect();
 
-        let spaces = typeless_proto_def
-            .loc_kinds
-            .iter()
-            .map(|(id, loc_kinds)| {
-                let space = match loc_kinds {
-                    LocKind::PortPutter => Space::PoPu(PoPuSpace::new({ id_2_info(id).clone() })),
-                    LocKind::PortGetter => Space::PoGe(PoGeSpace::new()),
-                    LocKind::MemInitialized => Space::Memo({
-                        let ptr: *mut u8 = *self.init_mems.get(id).unwrap();
-                        let type_info = id_2_info(id).clone();
-                        MemoSpace::new(ptr, type_info)
-                    }),
-                    LocKind::MemUninitialized => Space::Memo({
-                        let ptr: *mut u8 = std::ptr::null_mut();
-                        let type_info = id_2_info(id).clone();
-                        MemoSpace::new(ptr, type_info)
-                    }),
-                };
-                (*id, space)
+        let spaces = (0..=max_loc_id)
+            .map(|id| {
+                if let Some(k) = typeless_proto_def.loc_kinds.get(&id) {
+                    match k {
+                        LocKind::PortPutter => {
+                            Space::PoPu(PoPuSpace::new({ id_2_info(&id).clone() }))
+                        }
+                        LocKind::PortGetter => Space::PoGe(PoGeSpace::new()),
+                        LocKind::MemInitialized => Space::Memo({
+                            let ptr: *mut u8 = *self.init_mems.get(&id).unwrap();
+                            let type_info = id_2_info(&id).clone();
+                            MemoSpace::new(ptr, type_info)
+                        }),
+                        LocKind::MemUninitialized => Space::Memo({
+                            let ptr: *mut u8 = std::ptr::null_mut();
+                            let type_info = id_2_info(&id).clone();
+                            MemoSpace::new(ptr, type_info)
+                        }),
+                    }
+                } else {
+                    Space::Unused
+                }
             })
             .collect();
-
         let rules = Self::build_rules::<P>(&id_2_type_id)?;
-
-        // println!(
-        //     " READY {:#?}",
-        //     (&rules, &memory_bits, &ready, &unclaimed_ports, &spaces)
-        // );
         let r = ProtoR { spaces, rules };
         let w = Mutex::new(ProtoW {
             memory_bits,
@@ -231,8 +229,8 @@ impl ProtoBuilder {
             let mut assign_mask = BitSet::default();
 
             for (action_id, action_def) in rule_def.actions.iter().enumerate() {
-                let mut mg = vec![];
-                let mut pg = vec![];
+                let mut mg = smallvec::smallvec![];
+                let mut pg = smallvec::smallvec![];
 
                 let p = action_def.putter;
                 let p_kind = typeless_proto_def
