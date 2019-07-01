@@ -645,6 +645,8 @@ impl<T: 'static> Getter<T> {
         }
     }
 
+    /// Safety: `dest` is uninitialized at first. 
+    /// on return: `dest` is initialized.
     pub unsafe fn get_in_place(&mut self, dest: *mut T) {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
         po_ge.set_want_data(true);
@@ -656,6 +658,9 @@ impl<T: 'static> Getter<T> {
         po_ge.participate_with_msg(&self.c.p, po_ge.dropbox.recv(), transmute(dest));
     }
 
+
+    /// Safety: `dest` is uninitialized at first. 
+    /// on return: `dest` is initialized iff `true` was returned.
     pub unsafe fn get_in_place_timeout(&mut self, dest: *mut T, timeout: Duration) -> bool {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
         po_ge.set_want_data(true);
@@ -719,32 +724,17 @@ impl<T: 'static> Putter<T> {
     }
 
     /// Combination of `put_timeout` and `put_lossy`.
-    pub fn put_timeout_lossy(&mut self, datum: T, timeout: Duration) -> PutTimeoutResult<()> {
+    pub fn put_timeout_lossy(&mut self, mut datum: T, timeout: Duration) -> PutTimeoutResult<()> {
         use PutTimeoutResult::*;
-        let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
-        unsafe { po_pu.p.set_ptr(transmute(&datum)) };
-        self.c
-            .p
-            .w
-            .lock()
-            .ready_set_coordinate(&self.c.p.r, self.c.id);
-        let num_movers_msg = match po_pu.await_msg_timeout(&self.c.p, timeout, self.c.id) {
-            Some(msg) => msg,
-            None => {
-                drop(datum);
-                return Timeout(());
+        unsafe {
+            match self.put_in_place_timeout(&mut datum, timeout) {
+                Moved => {
+                    std::mem::forget(datum);
+                    Moved
+                }
+                Timeout(()) => Timeout(()),
+                Observed(()) => Observed(()),
             }
-        };
-        match num_movers_msg {
-            0 => {
-                drop(datum);
-                Observed(())
-            }
-            1 => {
-                std::mem::forget(datum);
-                Moved
-            }
-            _ => panic!(Self::BAD_MSG),
         }
     }
     /// Like `put`, but attempts to return early (with `Some` variant) if no
@@ -762,6 +752,8 @@ impl<T: 'static> Putter<T> {
         }
     }
 
+    /// Safety: `src` is initialized at first. 
+    /// on return: `src` was moved IFF `true` was returned. 
     pub unsafe fn put_in_place(&mut self, src: *mut T) -> bool {
         let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
         po_pu.p.set_ptr(transmute(src));
@@ -778,6 +770,8 @@ impl<T: 'static> Putter<T> {
         }
     }
 
+    /// Safety: `src` is initialized at first. 
+    /// on return: `src` was moved IFF `Moved` was returned.
     pub unsafe fn put_in_place_timeout(
         &mut self,
         src: *mut T,
