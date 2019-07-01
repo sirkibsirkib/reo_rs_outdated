@@ -170,13 +170,24 @@ mod tests {
     fn clone_ok() {
         let clone_fn = CloneFn::new::<String>();
         assert!(clone_fn.0.is_some());
+        let sa: &'static str = "Did you ever hear the tragedy of Darth Plagueis The Wise?";
+        let sb: &'static str = "Is it possible to learn this power?";
+
         unsafe {
-            let mut from = MaybeUninit::new("HELLO!".to_string());
+            let mut from = MaybeUninit::new(sa.to_string());
             let mut to = MaybeUninit::<String>::uninit();
             clone_fn.execute(transmute(from.as_mut_ptr()), transmute(to.as_mut_ptr()));
 
-            from.assume_init(); // drop
-            to.assume_init(); // drop
+            let mut from = from.assume_init();
+            let to = to.assume_init();
+
+            // demonstrate that they really are independent objects
+            from.clear();
+            from.push_str(sb);
+
+            assert_eq!(sb, &from);
+            assert_eq!(sa, &to);
+            // from and to both dropped
         };
     }
 
