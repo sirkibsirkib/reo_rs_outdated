@@ -636,6 +636,16 @@ impl<T: 'static> Getter<T> {
     /// if the protocol initiates a data movement and other peers delay completion
     /// of the firing.
     pub fn get_timeout(&mut self, timeout: Duration) -> Option<T> {
+        let mut datum: MaybeUninit<T> = MaybeUninit::uninit();
+        unsafe {
+            match self.get_in_place_timeout(datum.as_mut_ptr(), timeout) {
+                true => Some(datum.assume_init()),
+                false => None,
+            }
+        }
+    }
+
+    pub unsafe fn get_in_place(&mut self, dest: *mut T) {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
         po_ge.set_want_data(true);
         self.c
@@ -643,28 +653,32 @@ impl<T: 'static> Getter<T> {
             .w
             .lock()
             .ready_set_coordinate(&self.c.p.r, self.c.id);
-        let mut datum: MaybeUninit<T> = MaybeUninit::uninit();
-        let out_ptr = unsafe { transmute(datum.as_mut_ptr()) };
-        unsafe {
-            let msg = po_ge.await_msg_timeout(&self.c.p, timeout, self.c.id)?;
-            po_ge.participate_with_msg(&self.c.p, msg, out_ptr);
-            Some(datum.assume_init())
+        po_ge.participate_with_msg(&self.c.p, po_ge.dropbox.recv(), transmute(dest));
+    }
+
+    pub unsafe fn get_in_place_timeout(&mut self, dest: *mut T, timeout: Duration) -> bool {
+        let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
+        po_ge.set_want_data(true);
+        self.c
+            .p
+            .w
+            .lock()
+            .ready_set_coordinate(&self.c.p.r, self.c.id);
+        match po_ge.await_msg_timeout(&self.c.p, timeout, self.c.id) {
+            Some(msg) => {
+                po_ge.participate_with_msg(&self.c.p, msg, transmute(dest));
+                true
+            },
+            None => false
         }
     }
+
     /// participates in a synchronous firing, acquiring data from some
     /// putter-peer in accordance with the protocol's definition
     pub fn get(&mut self) -> T {
-        let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
-        po_ge.set_want_data(true);
-        self.c
-            .p
-            .w
-            .lock()
-            .ready_set_coordinate(&self.c.p.r, self.c.id);
         let mut datum: MaybeUninit<T> = MaybeUninit::uninit();
-        let out_ptr = unsafe { transmute(datum.as_mut_ptr()) };
         unsafe {
-            po_ge.participate_with_msg(&self.c.p, po_ge.dropbox.recv(), out_ptr);
+            self.get_in_place(datum.as_mut_ptr());
             datum.assume_init()
         }
     }
@@ -737,10 +751,41 @@ impl<T: 'static> Putter<T> {
     /// protocol action occurs that accesses the put-datum. Note, the call
     /// _may  take longer than the duration_ if the protocol initiates a data
     /// movement and other peers delay completion of the firing.
-    pub fn put_timeout(&mut self, datum: T, timeout: Duration) -> PutTimeoutResult<T> {
+    pub fn put_timeout(&mut self, mut datum: T, timeout: Duration) -> PutTimeoutResult<T> {
+        use PutTimeoutResult::*;
+        unsafe {
+            match self.put_in_place_timeout(&mut datum, timeout) {
+                Timeout(()) => Timeout(datum),
+                Observed(()) => Observed(datum),
+                Moved => Moved,
+            }
+        }
+    }
+
+    pub unsafe fn put_in_place(&mut self, src: *mut T) -> bool {
+        let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
+        po_pu.p.set_ptr(transmute(src));
+        self.c
+            .p
+            .w
+            .lock()
+            .ready_set_coordinate(&self.c.p.r, self.c.id);
+        let num_movers_msg = po_pu.dropbox.recv();
+        match num_movers_msg {
+            0 => false,
+            1 => true,
+            _ => panic!(Self::BAD_MSG),
+        }
+    }
+
+    pub unsafe fn put_in_place_timeout(
+        &mut self,
+        src: *mut T,
+        timeout: Duration,
+    ) -> PutTimeoutResult<()> {
         use PutTimeoutResult::*;
         let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
-        unsafe { po_pu.p.set_ptr(transmute(&datum)) };
+        po_pu.p.set_ptr(transmute(src));
         self.c
             .p
             .w
@@ -750,64 +795,44 @@ impl<T: 'static> Putter<T> {
             Some(msg) => msg,
             None => {
                 if self.c.p.w.lock().active.ready.set_to(self.c.id, false) {
-                    return Timeout(datum);
+                    return Timeout(());
                 } else {
                     po_pu.dropbox.recv()
                 }
             }
         };
         match num_movers_msg {
-            0 => Observed(datum),
-            1 => {
-                std::mem::forget(datum);
-                Moved
-            }
+            0 => Observed(()),
+            1 => Moved,
             _ => panic!(Self::BAD_MSG),
         }
     }
+
     /// Provide a data element for some getters to take according to the protocol
     /// definition. The datum is returned (as the `Some` variant) if the put-datum
     /// was observed by getters in a synchronous protocol rule, but not consumed
     /// by any getter.   
-    pub fn put(&mut self, datum: T) -> Option<T> {
-        let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
-        unsafe { po_pu.p.set_ptr(transmute(&datum)) };
-        self.c
-            .p
-            .w
-            .lock()
-            .ready_set_coordinate(&self.c.p.r, self.c.id);
-        let num_movers_msg = po_pu.dropbox.recv();
-        match num_movers_msg {
-            0 => Some(datum),
-            1 => {
+    pub fn put(&mut self, mut datum: T) -> Option<T> {
+        unsafe {
+            if self.put_in_place(&mut datum) {
                 std::mem::forget(datum);
                 None
+            } else {
+                Some(datum)
             }
-            _ => panic!(Self::BAD_MSG),
         }
     }
     /// This function mirrors the API of that of `put`, returning `Some` if the
     /// value was not consumed, but instead drops the datum in place.
-    pub fn put_lossy(&mut self, datum: T) -> Option<()> {
-        let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
-        unsafe { po_pu.p.set_ptr(transmute(&datum)) };
-        self.c
-            .p
-            .w
-            .lock()
-            .ready_set_coordinate(&self.c.p.r, self.c.id);
-        let num_movers_msg = po_pu.dropbox.recv();
-        match num_movers_msg {
-            0 => {
-                drop(datum);
-                Some(())
-            }
-            1 => {
+    pub fn put_lossy(&mut self, mut datum: T) -> Option<()> {
+        unsafe {
+            if self.put_in_place(&mut datum) {
                 std::mem::forget(datum);
                 None
+            } else {
+                drop(datum); // for readability
+                Some(())
             }
-            _ => panic!(Self::BAD_MSG),
         }
     }
 }

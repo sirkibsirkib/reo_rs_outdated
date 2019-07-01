@@ -208,10 +208,10 @@ fn proto_alt_counting() {
 
 ////////////////////////////////////////////////////////////////////////
 
-struct SyncProto<T0: Parsable> {
+struct SyncProto<T0: 'static> {
     phantom: std::marker::PhantomData<(T0,)>,
 }
-impl<T0: Parsable> Proto for SyncProto<T0> {
+impl<T0: 'static> Proto for SyncProto<T0> {
     fn typeless_proto_def() -> &'static TypelessProtoDef {
         lazy_static::lazy_static! {
             static ref DEF: TypelessProtoDef = TypelessProtoDef {
@@ -273,6 +273,64 @@ fn proto_sync_f64_basic() {
         });
     })
     .expect("Crashed!");
+}
+
+#[test]
+fn proto_sync_string_in_place() {
+    let (mut p0, mut p1) = SyncProto::<String>::instantiate_and_claim();
+    const N: u32 = 10;
+    crossbeam::scope(|s| {
+        s.spawn(move |_| {
+            for i in 0..N {
+                unsafe {
+                    let mut src = std::mem::MaybeUninit::new(format!("STRING #{}.", i));
+                    let sent = p0.put_in_place(src.as_mut_ptr());
+                    assert!(sent);
+                }
+            }
+        });
+        s.spawn(move |_| {
+            for i in 0..N {
+                let mut dest = std::mem::MaybeUninit::uninit();
+                unsafe {
+                    p1.get_in_place(dest.as_mut_ptr());
+                    let value = dest.assume_init();
+                    assert_eq!(&value, &format!("STRING #{}.", i));
+                    println!("{:?}", value);
+                }
+            }
+        });
+    })
+    .expect("Crashed!");
+}
+#[test]
+fn proto_sync_counter_in_place() {
+    let dc = DropCounter(Arc::new(Mutex::new(0)));
+    let (mut p0, mut p1) = SyncProto::<DropCounter>::instantiate_and_claim();
+    const N: u32 = 10;
+    crossbeam::scope(|s| {
+        s.spawn(|_| {
+            for _i in 0..N {
+                unsafe {
+                    let mut src = std::mem::MaybeUninit::new(dc.clone());
+                    let sent = p0.put_in_place(src.as_mut_ptr());
+                    assert!(sent);
+                }
+            }
+        });
+        s.spawn(|_| {
+            for _i in 0..N {
+                let mut dest = std::mem::MaybeUninit::uninit();
+                unsafe {
+                    p1.get_in_place(dest.as_mut_ptr());
+                    let value = dest.assume_init();
+                    println!("got value {:?}. now dropping!", &value);
+                }
+            }
+        });
+    })
+    .expect("Crashed!");
+    assert_eq!(*dc.0.lock(), N);
 }
 
 #[test]

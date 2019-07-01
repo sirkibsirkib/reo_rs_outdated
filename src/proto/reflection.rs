@@ -111,7 +111,7 @@ impl TypeInfo {
                 drop: DropFn::new::<T>(),
                 clone: CloneFn::new::<T>(),
                 partial_eq: PartialEqFn::new::<T>(),
-            }
+            },
         }
     }
 }
@@ -158,18 +158,18 @@ mod tests {
         };
     }
 
-    struct Undefined(f32, f32);
+    // struct Undefined(f32, f32);
 
-    #[test]
-    #[should_panic]
-    fn partial_eq_undefined_panic() {
-        let partial_eq_fn = PartialEqFn::new::<Undefined>();
-        let x = Undefined(5.3, 234.4);
-        let x1: *const _ = &x as *const _;
-        let x2: *mut u8 = unsafe { transmute(x1) };
-        unsafe {
-            // this should panic, as partial_eq_fn.0 == None
-            partial_eq_fn.execute(x2, x2);
-        }
-    }
+    // #[test]
+    // #[should_panic]
+    // fn partial_eq_undefined_panic() {
+    //     let partial_eq_fn = PartialEqFn::new::<Undefined>();
+    //     let x = Undefined(5.3, 234.4);
+    //     let x1: *const _ = &x as *const _;
+    //     let x2: *mut u8 = unsafe { transmute(x1) };
+    //     unsafe {
+    //         // this should panic, as partial_eq_fn.0 == None
+    //         partial_eq_fn.execute(x2, x2);
+    //     }
+    // }
 }
