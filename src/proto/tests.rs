@@ -2,7 +2,7 @@ use self::reo_rs::{
     proto::{
         definition::{ActionDef, BehaviourDef, Formula, LocKind, RuleDef, TypelessProtoDef},
         reflection::TypeInfo,
-        traits::{HasUnclaimedPorts, MemFillPromise, MemFillPromiseFulfilled, Parsable, Proto},
+        traits::{HasUnclaimedPorts, MemFillPromise, MemFillPromiseFulfilled, Proto},
         Getter, Putter,
     },
     LocId,
@@ -11,7 +11,7 @@ use crate as reo_rs;
 use crossbeam;
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 #[derive(Debug, Clone)]
 struct DropCounter(Arc<Mutex<u32>>);
@@ -254,11 +254,7 @@ fn proto_sync_f64_instantiate_and_claim() {
 }
 #[test]
 fn proto_sync_f64_basic() {
-    let p = SyncProto::<f64>::instantiate();
-    use std::convert::TryInto;
-    let mut p0: Putter<f64> = p.claim(0).try_into().unwrap();
-    let mut p1: Getter<f64> = p.claim(1).try_into().unwrap();
-
+    let (mut p0, mut p1) = SyncProto::<f64>::instantiate_and_claim();
     const N: u32 = 10;
     crossbeam::scope(|s| {
         s.spawn(move |_| {
@@ -269,6 +265,28 @@ fn proto_sync_f64_basic() {
         s.spawn(move |_| {
             for i in 0..N {
                 assert_eq!(p1.get(), i as f64);
+            }
+        });
+    })
+    .expect("Crashed!");
+}
+
+#[test]
+fn proto_sync_u8_put_timeout() {
+    let (mut p0, mut p1) = SyncProto::<u8>::instantiate_and_claim();
+    const N: u8 = 5;
+    crossbeam::scope(|s| {
+        s.spawn(move |_| {
+            let dur = Duration::from_millis(100);
+            for i in 0..N {
+                assert!(!p0.put_timeout(i, dur).moved()); // times out
+                assert!(p0.put_timeout(i, dur).moved()); // succeeds
+            }
+        });
+        s.spawn(move |_| {
+            for i in 0..N {
+                milli_sleep!(150);
+                assert_eq!(p1.get(), i);
             }
         });
     })

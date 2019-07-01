@@ -645,7 +645,7 @@ impl<T: 'static> Getter<T> {
         }
     }
 
-    /// Safety: `dest` is uninitialized at first. 
+    /// Safety: `dest` is uninitialized at first.
     /// on return: `dest` is initialized.
     pub unsafe fn get_in_place(&mut self, dest: *mut T) {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
@@ -658,8 +658,7 @@ impl<T: 'static> Getter<T> {
         po_ge.participate_with_msg(&self.c.p, po_ge.dropbox.recv(), transmute(dest));
     }
 
-
-    /// Safety: `dest` is uninitialized at first. 
+    /// Safety: `dest` is uninitialized at first.
     /// on return: `dest` is initialized iff `true` was returned.
     pub unsafe fn get_in_place_timeout(&mut self, dest: *mut T, timeout: Duration) -> bool {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
@@ -673,8 +672,8 @@ impl<T: 'static> Getter<T> {
             Some(msg) => {
                 po_ge.participate_with_msg(&self.c.p, msg, transmute(dest));
                 true
-            },
-            None => false
+            }
+            None => false,
         }
     }
 
@@ -706,6 +705,25 @@ pub enum PutTimeoutResult<T> {
     Timeout(T),
     Observed(T),
     Moved,
+}
+impl<T> Into<Result<(), (T, bool)>> for PutTimeoutResult<T> {
+    fn into(self) -> Result<(), (T, bool)> {
+        use PutTimeoutResult::*;
+        match self {
+            Timeout(t) => Err((t, false)),
+            Observed(t) => Err((t, true)),
+            Moved => Ok(()),
+        }
+    }
+}
+impl<T> PutTimeoutResult<T> {
+    pub fn moved(&self) -> bool {
+        use PutTimeoutResult::*;
+        match self {
+            Timeout(_) | Observed(_) => false,
+            Moved => true,
+        }
+    }
 }
 
 /// User-facing port-object with the role of "Putter" of type T.
@@ -752,8 +770,8 @@ impl<T: 'static> Putter<T> {
         }
     }
 
-    /// Safety: `src` is initialized at first. 
-    /// on return: `src` was moved IFF `true` was returned. 
+    /// Safety: `src` is initialized at first.
+    /// on return: `src` was moved IFF `true` was returned.
     pub unsafe fn put_in_place(&mut self, src: *mut T) -> bool {
         let po_pu = self.c.p.r.get_po_pu(self.c.id).expect(Self::BAD_ID);
         po_pu.p.set_ptr(transmute(src));
@@ -770,7 +788,7 @@ impl<T: 'static> Putter<T> {
         }
     }
 
-    /// Safety: `src` is initialized at first. 
+    /// Safety: `src` is initialized at first.
     /// on return: `src` was moved IFF `Moved` was returned.
     pub unsafe fn put_in_place_timeout(
         &mut self,
