@@ -7,15 +7,19 @@ use super::*;
 pub(crate) struct CloneFn(Option<fn(*mut u8, *mut u8)>);
 impl CloneFn {
     fn new<T>() -> Self {
-        let clos: fn(*mut u8, *mut u8) = |src, dest| unsafe {
-            // maybe_clone does not have the same memory layout for values of T.
-            // we avoid this problem by defining a CLOSURE with a known layout,
-            // and invoking maybe_clone for our known type here
-            let datum = T::maybe_clone(transmute(src));
-            let dest: *mut T = transmute(dest);
-            dest.write(datum);
-        };
-        CloneFn(Some(clos))
+        CloneFn(if <T as MaybeClone>::IS_DEFINED {
+            let clos: fn(*mut u8, *mut u8) = |src, dest| unsafe {
+                // maybe_clone does not have the same memory layout for values of T.
+                // we avoid this problem by defining a CLOSURE with a known layout,
+                // and invoking maybe_clone for our known type here
+                let datum = T::maybe_clone(transmute(src));
+                let dest: *mut T = transmute(dest);
+                dest.write(datum);
+            };
+            Some(clos)
+        } else {
+            None
+        })
     }
     /// safe ONLY IF:
     ///  - src is &T to initialized memory
@@ -35,9 +39,13 @@ impl CloneFn {
 pub(crate) struct PartialEqFn(Option<fn(*mut u8, *mut u8) -> bool>);
 impl PartialEqFn {
     fn new<T>() -> Self {
-        PartialEqFn(Some(unsafe {
-            transmute(<T as MaybePartialEq>::maybe_partial_eq as fn(&T, &T) -> bool)
-        }))
+        PartialEqFn(if <T as MaybePartialEq>::IS_DEFINED {
+            Some(unsafe {
+                transmute(<T as MaybePartialEq>::maybe_partial_eq as fn(&T, &T) -> bool)
+            })
+        } else {
+            None
+        })
     }
     #[inline]
     pub unsafe fn execute(self, a: *mut u8, b: *mut u8) -> bool {
@@ -158,18 +166,17 @@ mod tests {
         };
     }
 
-    // struct Undefined(f32, f32);
+    struct Undefined(f32, f32);
 
-    // #[test]
-    // #[should_panic]
-    // fn partial_eq_undefined_panic() {
-    //     let partial_eq_fn = PartialEqFn::new::<Undefined>();
-    //     let x = Undefined(5.3, 234.4);
-    //     let x1: *const _ = &x as *const _;
-    //     let x2: *mut u8 = unsafe { transmute(x1) };
-    //     unsafe {
-    //         // this should panic, as partial_eq_fn.0 == None
-    //         partial_eq_fn.execute(x2, x2);
-    //     }
-    // }
+    #[test]
+    fn partial_eq_undefined() {
+        let partial_eq_fn = PartialEqFn::new::<Undefined>();
+        assert!(partial_eq_fn.0.is_none());
+    }
+
+    #[test]
+    fn clone_undefined() {
+        let clone_fn = CloneFn::new::<Undefined>();
+        assert!(clone_fn.0.is_none());
+    }
 }

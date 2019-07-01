@@ -45,15 +45,18 @@ impl HasMsgDropBox for PoGeSpace {
 
 //////////////// INTERNAL SPECIALIZATION TRAITS for port-data ////////////
 pub(crate) trait MaybeClone {
+    const IS_DEFINED: bool;
     fn maybe_clone(&self) -> Self;
 }
 impl<T> MaybeClone for T {
+    default const IS_DEFINED: bool = false;
     default fn maybe_clone(&self) -> Self {
         panic!("type isn't clonable!")
     }
 }
 
 impl<T: Clone> MaybeClone for T {
+    const IS_DEFINED: bool = true;
     fn maybe_clone(&self) -> Self {
         self.clone()
     }
@@ -70,14 +73,17 @@ impl<T: Copy> MaybeCopy for T {
     const IS_COPY: bool = true;
 }
 pub(crate) trait MaybePartialEq {
+    const IS_DEFINED: bool;
     fn maybe_partial_eq(&self, other: &Self) -> bool;
 }
 impl<T> MaybePartialEq for T {
+    default const IS_DEFINED: bool = false;
     default fn maybe_partial_eq(&self, _other: &Self) -> bool {
         panic!("type isn't partial eq!")
     }
 }
 impl<T: PartialEq> MaybePartialEq for T {
+    const IS_DEFINED: bool = true;
     fn maybe_partial_eq(&self, other: &Self) -> bool {
         self.eq(other)
     }

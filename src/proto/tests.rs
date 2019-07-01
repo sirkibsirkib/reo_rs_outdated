@@ -11,7 +11,11 @@ use crate as reo_rs;
 use crossbeam;
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc, thread, time::Duration};
+
+fn dur(x: u64) -> Duration {
+    Duration::from_millis(x)
+}
 
 #[derive(Debug, Clone)]
 struct DropCounter(Arc<Mutex<u32>>);
@@ -277,15 +281,14 @@ fn proto_sync_u8_put_timeout() {
     const N: u8 = 5;
     crossbeam::scope(|s| {
         s.spawn(move |_| {
-            let dur = Duration::from_millis(100);
             for i in 0..N {
-                assert!(!p0.put_timeout(i, dur).moved()); // times out
-                assert!(p0.put_timeout(i, dur).moved()); // succeeds
+                assert!(!p0.put_timeout(i, dur(100)).moved()); // times out
+                assert!(p0.put_timeout(i, dur(100)).moved()); // succeeds
             }
         });
         s.spawn(move |_| {
             for i in 0..N {
-                milli_sleep!(150);
+                thread::sleep(dur(150));
                 assert_eq!(p1.get(), i);
             }
         });
