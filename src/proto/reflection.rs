@@ -166,6 +166,20 @@ mod tests {
         };
     }
 
+    #[test]
+    fn clone_ok() {
+        let clone_fn = CloneFn::new::<String>();
+        assert!(clone_fn.0.is_some());
+        unsafe {
+            let mut from = MaybeUninit::new("HELLO!".to_string());
+            let mut to = MaybeUninit::<String>::uninit();
+            clone_fn.execute(transmute(from.as_mut_ptr()), transmute(to.as_mut_ptr()));
+
+            from.assume_init(); // drop
+            to.assume_init(); // drop
+        };
+    }
+
     struct Undefined(f32, f32);
 
     #[test]
