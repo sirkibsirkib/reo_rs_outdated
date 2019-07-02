@@ -30,14 +30,13 @@ use parking_lot::{Mutex, MutexGuard};
 use std::{
     alloc::{self, Layout},
     any::TypeId,
-    cell::UnsafeCell,
     convert::TryInto,
     fmt::Debug,
     marker::PhantomData,
     mem::{transmute, MaybeUninit},
     str::FromStr,
     sync::{
-        atomic::{AtomicPtr, AtomicUsize, Ordering},
+        atomic::{AtomicPtr, AtomicUsize, AtomicBool, Ordering},
         Arc,
     },
     time::Duration,
@@ -136,7 +135,7 @@ impl PoPuSpace {
 #[derive(Debug)]
 struct PoGeSpace {
     dropbox: MsgDropbox, // used only by this guy to recv messages
-    want_data: UnsafeCell<bool>,
+    want_data: AtomicBool,
 }
 impl PoGeSpace {
     fn new() -> Self {
@@ -146,10 +145,10 @@ impl PoGeSpace {
         }
     }
     fn set_want_data(&self, want_data: bool) {
-        unsafe { *self.want_data.get() = want_data }
+        self.want_data.store(want_data, Ordering::SeqCst);
     }
     fn get_want_data(&self) -> bool {
-        unsafe { *self.want_data.get() }
+        self.want_data.load(Ordering::SeqCst)
     }
     unsafe fn participate_with_msg(&self, a: &ProtoAll, msg: usize, out_ptr: *mut u8) {
         let (case, putter_id) = DataGetCase::parse_msg(msg);
@@ -160,6 +159,12 @@ impl PoGeSpace {
         }
     }
 }
+
+
+// unsafe impl are safe. autoderive inhibited by HashMap<*mut u8, ..> but the
+// pointers are only used as keys (not accessed) in this context.
+unsafe impl Send for ProtoActive {}
+unsafe impl Sync for ProtoActive {}
 
 /// portion of the Protocol state that is both:
 /// 1. protected by the lock
@@ -596,8 +601,6 @@ pub struct Getter<T: 'static> {
     c: PortCommon,
     phantom: PhantomData<T>,
 }
-unsafe impl<T: 'static> Send for Getter<T> {}
-unsafe impl<T: 'static> Sync for Getter<T> {}
 impl<T: 'static> Getter<T> {
     const BAD_ID: &'static str = "My ID isn't associated with a valid getter!";
 
@@ -731,8 +734,6 @@ pub struct Putter<T: 'static> {
     c: PortCommon,
     phantom: PhantomData<T>,
 }
-unsafe impl<T: 'static> Send for Putter<T> {}
-unsafe impl<T: 'static> Sync for Putter<T> {}
 impl<T: 'static> Putter<T> {
     const BAD_MSG: &'static str = "putter got a bad `num_movers_msg`";
     const BAD_ID: &'static str = "protocol doesn't recognize my role as putter!";

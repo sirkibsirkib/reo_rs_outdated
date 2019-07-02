@@ -237,6 +237,7 @@ macro_rules! match_list {
     }};
 }
 
-pub struct T;
-pub struct F;
-pub struct X;
+// empty types
+pub enum T {}
+pub enum F {}
+pub enum X {}
