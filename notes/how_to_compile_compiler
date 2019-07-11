@@ -1,0 +1,8 @@
+mvn install -pl :reo-compiler -am -DskipTests
+
+
+# Experiments:
+1. Sync
+2. Alternator
+3. fifo-K daisy chain
+4. (something with nontrivial guards) 
