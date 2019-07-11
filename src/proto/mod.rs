@@ -316,10 +316,10 @@ impl ProtoW {
                 let bits_ready = is_ready(&self.memory_bits, &self.active.ready, rule);
                 if bits_ready {
                     // TODO 
-                    rule.build_temps();
+                    rule.build_temps(Firer { r, w: &mut self.active });
                     let guard_pass = unsafe { r.eval_formula(&rule.guard_pred, self) };
                     if !guard_pass {
-                        rule.unbuild_temps();
+                        rule.unbuild_temps(Firer { r, w: &mut self.active });
                         continue;
                     }
 
@@ -350,10 +350,7 @@ impl ProtoW {
                         return;
                     }
                     subtract_readiness(&mut self.active.ready, rule);
-                    rule.fire(Firer {
-                        r,
-                        w: &mut self.active,
-                    });
+                    rule.fire(Firer { r, w: &mut self.active });
 
                     println!("FIRING AFTER:");
                     (r, self as &ProtoW).debug_print();
@@ -503,8 +500,24 @@ impl ProtoR {
             None
         }
     }
+    fn get_temp(&self, id: LocId) -> Option<&TempSpace> {
+        if let Some(Space::Temp(space)) = self.get_space(id) {
+            Some(space)
+        } else {
+            None
+        }
+    }
     fn get_space(&self, id: LocId) -> Option<&Space> {
         self.spaces.get(id)
+    }
+    fn get_space_putter(&self, id: LocId) -> Option<&PutterSpace> {
+        use Space::*;
+        Some(match self.get_space(id)? {
+            PoPu(p) => p.my_space(),
+            Memo(p) => p.my_space(),
+            Temp(p) => p.my_space(),
+            _ => return None,
+        })
     }
     pub fn loc_is_mem(&self, id: LocId) -> bool {
         match self.spaces.get(id) {
@@ -610,15 +623,16 @@ impl<T: 'static> TryInto<Getter<T>> for ClaimResult<T> {
 
 #[derive(Debug)]
 enum TempRuleFunc {
-    Arity0 { func: *mut u8, args: [LocId; 0] },
-    Arity1 { func: *mut u8, args: [LocId; 1] },
-    Arity2 { func: *mut u8, args: [LocId; 2] },
-    Arity3 { func: *mut u8, args: [LocId; 3] },
+    // first arg is destination
+    Arity0 { func: fn(*mut u8) },
+    Arity1 { func: fn(*mut u8, *mut u8), args: [LocId; 1] },
+    Arity2 { func: fn(*mut u8, *mut u8, *mut u8), args: [LocId; 2] },
+    Arity3 { func: fn(*mut u8, *mut u8, *mut u8, *mut u8), args: [LocId; 3] },
 }
 #[derive(Debug)]
 struct TempMemRunnable {
     temp_mem_loc_id: LocId,
-    func: fn()
+    func: TempRuleFunc,
 }
 
 /// Structure corresponding with one protocol rule at runtime
@@ -635,11 +649,37 @@ struct RunRule {
     actions: Vec<RunAction>,
 }
 impl RunRule {
-    fn build_temps(&self) {
-        // TODO
+    #[inline]
+    fn build_temps(&self, f: Firer) {
+        for t in self.temp_mems.iter() {
+            let dest = f.r.get_temp(t.temp_mem_loc_id).expect("NOT TEMP??").my_space().get_ptr();
+            use TempRuleFunc::*;
+            match t.func {
+                Arity0 { func, .. } => func(dest),
+                Arity1 { func, args } => func(
+                    dest,
+                    f.r.get_space_putter(args[0]).unwrap().get_ptr(),
+                ),
+                Arity2 { func, args } => func(
+                    dest, 
+                    f.r.get_space_putter(args[0]).unwrap().get_ptr(),
+                    f.r.get_space_putter(args[1]).unwrap().get_ptr(),
+                ),
+                Arity3 { func, args } => func(
+                    dest, 
+                    f.r.get_space_putter(args[0]).unwrap().get_ptr(),
+                    f.r.get_space_putter(args[1]).unwrap().get_ptr(),
+                    f.r.get_space_putter(args[2]).unwrap().get_ptr(),
+                )
+            }
+        }
     }
-    fn unbuild_temps(&self) {
-
+    #[inline]
+    fn unbuild_temps(&self, f: Firer) {
+        for t in self.temp_mems.iter() {
+            let dest = f.r.get_temp(t.temp_mem_loc_id).expect("NOT TEMP??");
+            dest.0.make_empty(f.w, true, t.temp_mem_loc_id);
+        }
     }
     fn fire(&self, mut f: Firer) {
         for a in self.actions.iter() {
