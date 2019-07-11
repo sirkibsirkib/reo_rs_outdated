@@ -5,16 +5,11 @@ use crate::LocId;
 use std::marker::PhantomData;
 use std::{
     fmt,
-    mem::{self, transmute},
+    mem::{transmute},
 };
 
 // for types that have NO SIZE and thus can be created without context
-pub unsafe trait Token: Sized {
-    unsafe fn fresh() -> Self {
-        debug_assert!(mem::size_of::<Self>() == 0);
-        mem::uninitialized()
-    }
-}
+pub unsafe trait Token: Sized {}
 unsafe impl Token for () {}
 
 pub mod decimal {
@@ -68,7 +63,7 @@ impl<D: Decimal, T> Grouped<D, Getter<T>> {
     }
     pub fn get<S>(&mut self, coupon: Coupon<D, S>) -> (T, State<S>) {
         let _ = coupon;
-        (self.as_getter().get(), unsafe { State::fresh() })
+        (self.as_getter().get(), unsafe { transmute(()) })
     }
 }
 impl<D: Decimal, T> Grouped<D, Putter<T>> {
@@ -81,7 +76,7 @@ impl<D: Decimal, T> Grouped<D, Putter<T>> {
     }
     pub fn put<S>(&mut self, coupon: Coupon<D, S>, datum: T) -> (Option<T>, State<S>) {
         let _ = coupon;
-        (self.as_putter().put(datum), unsafe { State::fresh() })
+        (self.as_putter().put(datum), unsafe { transmute(()) })
     }
 }
 

@@ -203,35 +203,58 @@ pub(crate) trait DataSource<'a> {
     fn execute_copy(&self, out_ptr: *mut u8);
     fn finalize(&self, someone_moved: bool, fin: Self::Finalizer);
 
-    fn acquire_data(&self, out_ptr: *mut u8, case: DataGetCase, fin: Self::Finalizer) {
+    fn acquire_data<I>(&self, mut out_ptrs: I, fin: Self::Finalizer)
+    where I: ExactSizeIterator<Item=*mut u8> {
+        use Ordering::SeqCst;
         let space = self.my_space();
-        let src = space.get_ptr();
         if space.type_info.is_copy {
-            // MOVE HAPPENS HERE
-            self.execute_copy(out_ptr);
-            let was = space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
-            if was == case.last_countdown() {
-                self.finalize(true, fin);
+            if out_ptrs.len() > 0 {
+                space.move_flags.type_is_copy_i_moved();
+            }
+            for out_ptr in out_ptrs {
+                self.execute_copy(out_ptr);
+            }
+            let was = space.cloner_countdown.fetch_sub(1, SeqCst);
+            if was == 1 {
+                let somebody_moved = space.move_flags.did_someone_move();
+                self.finalize(somebody_moved, fin);
             }
         } else {
-            if case.i_move() {
-                // I am the finalizer
-                if case.mover_must_wait() {
-                    space.mover_sema.acquire();
-                }
-                // MOVE HAPPENS HERE
-                self.execute_copy(out_ptr);
-                self.finalize(true, fin);
-            } else {
-                // CLONE HAPPENS HERE
-                unsafe { space.type_info.funcs.clone.execute(src, out_ptr) };
-                let was = space.cloner_countdown.fetch_sub(1, Ordering::SeqCst);
-                if was == case.last_countdown() {
-                    if case.someone_moves() {
+            if out_ptrs.len() > 0 {
+                let won = !space.move_flags.ask_for_move_permission();
+                if won {
+                    let was = space.cloner_countdown.fetch_sub(1, SeqCst);
+                    if was == 1 {
+                        let move_to = out_ptrs.next().unwrap();
+                        for out_ptr in out_ptrs {
+                            self.execute_clone(out_ptr);
+                        }
+                        self.execute_copy(move_to);
+                    } else {
+                        space.mover_sema.acquire();
+                    }
+                    self.finalize(true, fin);
+                } else { // lose
+                    for out_ptr in out_ptrs {
+                        self.execute_clone(out_ptr);
+                    }
+                    let was = space.cloner_countdown.fetch_sub(1, SeqCst);
+                    if was == 1 {
+                        // all clones are done
                         space.mover_sema.release();
                     } else {
-                        // no movers. I finalize
+                        // do nothing
+                    }
+                }
+            } else {
+                let was = space.cloner_countdown.fetch_sub(1, SeqCst);
+                if was == 1 {
+                    // all clones done
+                    let nobody_else_won = !space.move_flags.ask_for_move_permission();
+                    if nobody_else_won {
                         self.finalize(false, fin);
+                    } else {
+                        space.mover_sema.release();
                     }
                 }
             }

@@ -23,7 +23,8 @@ pub enum Formula {
     And(Vec<Formula>),
     Or(Vec<Formula>),
     None(Vec<Formula>),
-    Eq(LocId, LocId),
+    ValueEq(LocId, LocId),
+    MemIsNull(LocId),
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -298,10 +299,7 @@ impl ProtoBuilder {
                         }
                     }
                 }
-                actions.push(match mem_putter {
-                    false => RunAction::PortPut { putter: p, mg, pg },
-                    true => RunAction::MemPut { putter: p, mg, pg },
-                });
+                actions.push(RunAction { putter: p, mg, pg });
             }
             let c = Self::max_loc_id(typeless_proto_def);
             guard_ready.pad_trailing_zeroes_to_capacity(c);

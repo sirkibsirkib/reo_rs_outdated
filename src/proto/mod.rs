@@ -21,7 +21,6 @@ pub mod groups;
 
 use crate::{
     bitset::BitSet,
-    helper::WithFirst,
     tokens::{decimal::Decimal, Grouped},
     LocId, ProtoHandle,
 };
@@ -36,12 +35,49 @@ use std::{
     mem::{transmute, MaybeUninit},
     str::FromStr,
     sync::{
-        atomic::{AtomicPtr, AtomicUsize, AtomicBool, Ordering},
+        atomic::{AtomicPtr, AtomicUsize, Ordering, AtomicU8},
         Arc,
     },
     time::Duration,
 };
 use std_semaphore::Semaphore;
+
+
+#[derive(Debug, Default)]
+struct MoveFlags {
+    move_flags: AtomicU8,
+}
+impl MoveFlags {
+    const MOVE_FLAG_MOVED: u8 = 0b01;
+    const MOVE_FLAG_DISABLED: u8 = 0b10;
+
+    #[inline]
+    fn type_is_copy_i_moved(&self) {
+        self.move_flags.store(Self::MOVE_FLAG_MOVED, Ordering::SeqCst);
+    }
+
+    #[inline]
+    fn did_someone_move(&self) -> bool {
+        let x: u8 = self.move_flags.load(Ordering::SeqCst);
+        x & Self::MOVE_FLAG_MOVED != 0 && x & Self::MOVE_FLAG_DISABLED == 0
+    }
+
+    #[inline]
+    fn ask_for_move_permission(&self) -> bool {
+        0 == self.move_flags.fetch_or(Self::MOVE_FLAG_MOVED, Ordering::SeqCst)
+    }
+
+    #[inline]
+    fn reset(&self, move_enabled: bool) {
+        let val = if move_enabled {
+            Self::MOVE_FLAG_DISABLED
+        } else {
+            0
+        };
+        self.move_flags.store(val, Ordering::SeqCst);
+    }
+}
+
 
 /// A coordination point that getters interact with to acquire a datum.
 /// Common to memory and port putters.
@@ -49,6 +85,7 @@ use std_semaphore::Semaphore;
 pub(crate) struct PutterSpace {
     ptr: AtomicPtr<u8>,
     cloner_countdown: AtomicUsize,
+    move_flags: MoveFlags,
     #[debug_stub = "<Semaphore>"]
     mover_sema: Semaphore,
     type_info: Arc<TypeInfo>,
@@ -59,6 +96,7 @@ impl PutterSpace {
             ptr: ptr.into(),
             cloner_countdown: 0.into(),
             mover_sema: Semaphore::new(0),
+            move_flags: MoveFlags::default(),
             type_info,
         }
     }
@@ -135,26 +173,25 @@ impl PoPuSpace {
 #[derive(Debug)]
 struct PoGeSpace {
     dropbox: MsgDropbox, // used only by this guy to recv messages
-    want_data: AtomicBool,
 }
 impl PoGeSpace {
     fn new() -> Self {
         Self {
             dropbox: MsgDropbox::new(),
-            want_data: false.into(),
         }
     }
-    fn set_want_data(&self, want_data: bool) {
-        self.want_data.store(want_data, Ordering::SeqCst);
-    }
-    fn get_want_data(&self) -> bool {
-        self.want_data.load(Ordering::SeqCst)
-    }
-    unsafe fn participate_with_msg(&self, a: &ProtoAll, msg: usize, out_ptr: *mut u8) {
-        let (case, putter_id) = DataGetCase::parse_msg(msg);
+    unsafe fn get_data(&self, a: &ProtoAll, putter_id: LocId, out_ptr: *mut u8) {
+        // let (_case, putter_id) = DataGetCase::parse_msg(msg);
         match a.r.get_space(putter_id) {
-            Some(Space::Memo(space)) => space.acquire_data(out_ptr, case, (a, putter_id)),
-            Some(Space::PoPu(space)) => space.acquire_data(out_ptr, case, ()),
+            Some(Space::Memo(space)) => space.acquire_data([out_ptr].iter().copied(), (a, putter_id)),
+            Some(Space::PoPu(space)) => space.acquire_data([out_ptr].iter().copied(), ()),
+            _ => panic!("Bad putter ID!!"),
+        }
+    }
+    unsafe fn get_signal(&self, a: &ProtoAll, putter_id: LocId) {
+        match a.r.get_space(putter_id) {
+            Some(Space::Memo(space)) => space.acquire_data(std::iter::empty(), (a, putter_id)),
+            Some(Space::PoPu(space)) => space.acquire_data(std::iter::empty(), ()),
             _ => panic!("Bad putter ID!!"),
         }
     }
@@ -264,7 +301,7 @@ impl ProtoW {
             // keep looping until 0 rules can fire
             for (rule_id, rule) in r.rules.iter().enumerate() {
                 let bits_ready = is_ready(&self.memory_bits, &self.active.ready, rule);
-                if bits_ready && unsafe { r.eval_formula(&rule.guard_pred) } {
+                if bits_ready && unsafe { r.eval_formula(&rule.guard_pred, self) } {
                     // safe if Equal functions are sound
                     println!("FIRING {}: {:?}", rule_id, rule);
                     println!("FIRING BEFORE:");
@@ -392,15 +429,16 @@ pub struct ProtoR {
     spaces: Vec<Space>,
 }
 impl ProtoR {
-    unsafe fn eval_formula(&self, guard: &Formula) -> bool {
+    unsafe fn eval_formula(&self, guard: &Formula, w: &ProtoW) -> bool {
         use definition::Formula::*;
-        let f = |formula: &Formula| self.eval_formula(formula);
+        let f = |formula: &Formula| self.eval_formula(formula, w);
         match guard {
             True => true,
             None(x) => !x.iter().any(f),
             And(x) => !x.iter().all(f),
             Or(x) => x.iter().any(f),
-            Eq(a, b) => self.equal_put_data(*a, *b),
+            ValueEq(a, b) => self.equal_put_data(*a, *b),
+            MemIsNull(a) => !w.memory_bits.test(*a),
         }
     }
 
@@ -477,20 +515,14 @@ impl MsgDropbox {
     #[inline]
     fn recv(&self) -> usize {
         let msg = self.r.recv().unwrap();
-        // println!("MSG {:b} rcvd!", msg);
         msg
     }
     #[inline]
     fn send(&self, msg: usize) {
-        // println!("MSG {:b} sent!", msg);
         self.s.try_send(msg).expect("Msgbox was full!")
     }
     fn send_nothing(&self) {
         self.send(Self::NOTHING_MSG)
-    }
-    fn recv_nothing(&self) {
-        let got = self.recv();
-        assert_eq!(got, Self::NOTHING_MSG);
     }
 }
 
@@ -567,28 +599,17 @@ struct RunRule {
 impl RunRule {
     fn fire(&self, mut f: Firer) {
         for a in self.actions.iter() {
-            use RunAction::*;
-            match a {
-                PortPut { putter, mg, pg } => f.port_to_locs(*putter, mg, pg),
-                MemPut { putter, mg, pg } => f.mem_to_locs(*putter, mg, pg),
-            }
+            f.perform_action(a.putter, &a.mg, &a.pg)
         }
     }
 }
 
-/// Structure corresponing to one data-movement action (with 1 putter and N getters)
+/// Structure corresponing to one data-perform_action action (with 1 putter and N getters)
 #[derive(Debug)]
-enum RunAction {
-    PortPut {
-        putter: LocId,
-        mg: SmallVec<[LocId; 4]>,
-        pg: SmallVec<[LocId; 4]>,
-    },
-    MemPut {
-        putter: LocId,
-        mg: SmallVec<[LocId; 4]>,
-        pg: SmallVec<[LocId; 4]>,
-    },
+struct RunAction {
+    putter: LocId,
+    mg: SmallVec<[LocId; 4]>,
+    pg: SmallVec<[LocId; 4]>,
 }
 
 pub(crate) struct PortCommon {
@@ -610,33 +631,25 @@ impl<T: 'static> Getter<T> {
 
     /// combination of `get_signal` and `get_timeout`
     pub fn get_signal_timeout(&mut self, timeout: Duration) -> bool {
-        let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
-        po_ge.set_want_data(false);
-        self.c
-            .p
-            .w
-            .lock()
-            .ready_set_coordinate(&self.c.p.r, self.c.id);
-        po_ge
-            .await_msg_timeout(&self.c.p, timeout, self.c.id)
-            .is_some()
+        unsafe {
+            self.get_signal_in_place_timeout(timeout)
+        }
     }
     /// like `get`, but doesn't acquire any data. Useful for participation
     /// in synchrony when the data isn't useful.
     pub fn get_signal(&mut self) {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
-        po_ge.set_want_data(false);
         self.c
             .p
             .w
             .lock()
             .ready_set_coordinate(&self.c.p.r, self.c.id);
-        po_ge.dropbox.recv_nothing()
+        unsafe { po_ge.get_signal(&self.c.p, po_ge.dropbox.recv()) }
     }
     /// like `get` but attempts to return with `None` if the provided duration
     /// elapses and there is not yet a protocol action which would supply
     /// this getter with data. Note, the call _may take longer than the duration_
-    /// if the protocol initiates a data movement and other peers delay completion
+    /// if the protocol initiates a data perform_action and other peers delay completion
     /// of the firing.
     pub fn get_timeout(&mut self, timeout: Duration) -> Option<T> {
         let mut datum: MaybeUninit<T> = MaybeUninit::uninit();
@@ -652,20 +665,20 @@ impl<T: 'static> Getter<T> {
     /// on return: `dest` is initialized.
     pub unsafe fn get_in_place(&mut self, dest: *mut T) {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
-        po_ge.set_want_data(true);
+        // po_ge.set_want_data(true);
         self.c
             .p
             .w
             .lock()
             .ready_set_coordinate(&self.c.p.r, self.c.id);
-        po_ge.participate_with_msg(&self.c.p, po_ge.dropbox.recv(), transmute(dest));
+        po_ge.get_data(&self.c.p, po_ge.dropbox.recv(), transmute(dest));
     }
 
     /// Safety: `dest` is uninitialized at first.
     /// on return: `dest` is initialized iff `true` was returned.
     pub unsafe fn get_in_place_timeout(&mut self, dest: *mut T, timeout: Duration) -> bool {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
-        po_ge.set_want_data(true);
+        // po_ge.set_want_data(true);
         self.c
             .p
             .w
@@ -673,7 +686,25 @@ impl<T: 'static> Getter<T> {
             .ready_set_coordinate(&self.c.p.r, self.c.id);
         match po_ge.await_msg_timeout(&self.c.p, timeout, self.c.id) {
             Some(msg) => {
-                po_ge.participate_with_msg(&self.c.p, msg, transmute(dest));
+                po_ge.get_data(&self.c.p, msg, transmute(dest));
+                true
+            }
+            None => false,
+        }
+    }
+
+
+    pub unsafe fn get_signal_in_place_timeout(&mut self, timeout: Duration) -> bool {
+        let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
+        // po_ge.set_want_data(true);
+        self.c
+            .p
+            .w
+            .lock()
+            .ready_set_coordinate(&self.c.p.r, self.c.id);
+        match po_ge.await_msg_timeout(&self.c.p, timeout, self.c.id) {
+            Some(msg) => {
+                po_ge.get_signal(&self.c.p, msg);
                 true
             }
             None => false,
@@ -759,7 +790,7 @@ impl<T: 'static> Putter<T> {
     /// Like `put`, but attempts to return early (with `Some` variant) if no
     /// protocol action occurs that accesses the put-datum. Note, the call
     /// _may  take longer than the duration_ if the protocol initiates a data
-    /// movement and other peers delay completion of the firing.
+    /// perform_action and other peers delay completion of the firing.
     pub fn put_timeout(&mut self, mut datum: T, timeout: Duration) -> PutTimeoutResult<T> {
         use PutTimeoutResult::*;
         unsafe {
@@ -861,223 +892,95 @@ impl<T: 'static> Drop for Putter<T> {
     }
 }
 
-/// Convenience structure. Contains behavior for actually executing a data-movement action.
+/// Convenience structure. Contains behavior for actually executing a data-perform_action action.
 pub struct Firer<'a> {
     r: &'a ProtoR,
     w: &'a mut ProtoActive,
 }
 impl<'a> Firer<'a> {
-    fn release_sig_getters_count_getters(&self, getters: &[LocId]) -> usize {
-        let mut count = 0;
-        for &g in getters {
-            let po_ge = self.r.get_po_ge(g).expect("bad id");
-            if po_ge.get_want_data() {
-                count += 1;
-            } else {
-                po_ge.dropbox.send_nothing()
-            }
-        }
-        count
-    }
+    pub fn perform_action(&mut self, putter: LocId, me_ge: &[LocId], po_ge: &[LocId]) {
+        let space = self.r.get_space(putter);
+        let (putter_space, mem_putter): (&PutterSpace, bool) = match space {
+            Some(Space::PoPu(space)) => (&space.p, false),
+            Some(Space::Memo(space)) => (&space.p, true),
+            _ => panic!("Not a putter!"),
+        };
+        let src = putter_space.get_ptr();
+        let tid = putter_space.type_info.type_id;
 
-    fn instruct_data_getters<F>(
-        r: &ProtoR,
-        po_ge: &[LocId],
-        data_getters_count: usize,
-        putter_id: LocId,
-        space: &PutterSpace,
-        cleanup: F,
-    ) where
-        F: FnOnce(),
-    {
-        // 3. instruct port-getters. delegate clearing putters to them (unless 0 getters)
-        match data_getters_count {
-            0 => cleanup(),
-            1 => {
-                // solo mover
-                space.cloner_countdown.store(1, Ordering::SeqCst);
-                let mut i = po_ge
-                    .iter()
-                    .filter(|&&g| r.get_po_ge(g).unwrap().get_want_data());
-                let mover = *i.next().unwrap();
-                assert_eq!(None, i.next());
-                let msg = DataGetCase::OnlyMovers.include_in_msg(putter_id);
-                r.send_to_getter(mover, msg);
-            }
-            n => {
-                // no need to check if data is copy. GETTERS can determine that
-                // themselves and act accordingly
-                space.cloner_countdown.store(n, Ordering::SeqCst);
-                for (is_first, &g) in po_ge
-                    .iter()
-                    .filter(|&&g| r.get_po_ge(g).unwrap().get_want_data())
-                    .with_first()
-                {
-                    let msg = if is_first {
-                        DataGetCase::BothYouMove
-                    } else {
-                        DataGetCase::BothYouClone
-                    }
-                    .include_in_msg(putter_id);
-                    r.send_to_getter(g, msg);
+        let mut move_into_self = false;
+        let disable_move = if mem_putter {
+            // 1. duplicate ref to getter memcells
+            for g in me_ge.iter().cloned() {
+                if g == putter {
+                    move_into_self = true;
+                } else {
+                    let me_ge_space = self.r.get_me_pu(g).expect("gggg");
+                    assert_eq!(tid, me_ge_space.p.type_info.type_id);
+                    me_ge_space.p.overwrite_null_ptr(src);
+                    self.w.ready.set_to(g, true); // PUTTER is ready
                 }
             }
-        }
-    }
+            // 3. update refcounts
+            let src_refs = self.w.mem_refs.get_mut(&src).expect("mem_to_locs BAD REFS?");
+            assert!(*src_refs >= 1);
+            *src_refs += me_ge.len();
+            *src_refs != 1
+        } else {
+            // 2. populate memory cells if necessary
+            let mut me_ge_iter = me_ge.iter().cloned();
+            if let Some(first_me_ge) = me_ge_iter.next() {
+                let first_me_ge_space = self.r.get_me_pu(first_me_ge).expect("wfew");
+                let type_info = &first_me_ge_space.p.type_info;
+                let tid = type_info.type_id;
 
-    pub fn mem_to_locs(&mut self, me_pu: LocId, me_ge: &[LocId], po_ge: &[LocId]) {
-        println!("mem_to_locs");
-        let memo_space = self.r.get_me_pu(me_pu).expect("fewh");
-        let tid = &memo_space.p.type_info.type_id;
+                // 3. move data into memcell
+                let dest = unsafe {
+                    match po_ge.len() {
+                        0 => self.w.storage.move_in(src, type_info),
+                        _ => self.w.storage.clone_in(src, type_info),
+                    }
+                };
+                let mut refcounts = 1;
+                first_me_ge_space.p.overwrite_null_ptr(dest);
+                self.w.ready.set_to(first_me_ge, true); // mem is ready for GET
 
-        // 1. get data ptr of putter memcell.
-        let src = memo_space.p.get_ptr();
-        assert!(!src.is_null());
-        println!("src is {:p}", src);
+                // 4. copy pointers to other memory cells (if any)
+                for g in me_ge_iter {
+                    let me_ge_space = self.r.get_me_pu(g).expect("gggg");
+                    assert_eq!(tid, me_ge_space.p.type_info.type_id);
 
-        // 1. duplicate ref to getter memcells
-        let mut move_into_self = false;
-        for g in me_ge.iter().cloned() {
-            if g == me_pu {
-                move_into_self = true;
-            } else {
-                let me_ge_space = self.r.get_me_pu(g).expect("gggg");
-                assert_eq!(*tid, me_ge_space.p.type_info.type_id);
-                me_ge_space.p.overwrite_null_ptr(src);
-                self.w.ready.set_to(g, true); // PUTTER is ready
+                    me_ge_space.p.overwrite_null_ptr(dest);
+                    self.w.ready.set_to(g, true); // mem is ready for GET
+                    refcounts += 1;
+                }
+                let was = self.w.mem_refs.insert(dest, refcounts);
+                assert!(was.is_none());
             }
-        }
+            false
+        };
 
-        // 2. release signal getters
-        let data_getters_count = self.release_sig_getters_count_getters(po_ge);
-
-        // 3. update refcounts
-        let Firer { r, w } = self;
-        let src_refs = w.mem_refs.get_mut(&src).expect("mem_to_locs BAD REFS?");
-        assert!(*src_refs >= 1);
-        *src_refs += me_ge.len();
 
         // 4. perform port moves
-        Self::instruct_data_getters(r, po_ge, data_getters_count, me_pu, &memo_space.p, || {
-            // cleanup function. invoked when there are 0 data-getters
+        if po_ge.len() == 0 {
             println!("PROTO MEM CLEANUP");
-            if !move_into_self {
-                memo_space.make_empty(w, true, me_pu);
-            }
-        });
-    }
-
-    pub fn port_to_locs(&mut self, po_pu: LocId, me_ge: &[LocId], po_ge: &[LocId]) {
-        println!("port_to_locs");
-        let po_pu_space = self.r.get_po_pu(po_pu).expect("ECH");
-
-        // 1. port getters have move-priority
-        let data_getters_count = self.release_sig_getters_count_getters(po_ge);
-        // println!("::port_to_mem_and_ports| port_mover_id={:?}", port_mover_id);
-
-        // 2. populate memory cells if necessary
-        let mut me_ge_iter = me_ge.iter().cloned();
-        if let Some(first_me_ge) = me_ge_iter.next() {
-            let first_me_ge_space = self.r.get_me_pu(first_me_ge).expect("wfew");
-            let type_info = &first_me_ge_space.p.type_info;
-            let tid = type_info.type_id;
-
-            // 3. move data into memcell
-            let src = po_pu_space.p.get_ptr();
-            let dest = unsafe {
-                match data_getters_count {
-                    0 => self.w.storage.move_in(src, type_info),
-                    _ => self.w.storage.clone_in(src, type_info),
+            match space.unwrap() {
+                Space::PoPu(space) => {
+                    let mem_movers = if me_ge.is_empty() { 0 } else { 1 };
+                    space.dropbox.send(mem_movers);
+                },
+                Space::Memo(space) => if !move_into_self {
+                    space.make_empty(self.w, true, putter);
                 }
+                _ => unreachable!(),
             };
-            let mut refcounts = 1;
-            first_me_ge_space.p.overwrite_null_ptr(dest);
-            self.w.ready.set_to(first_me_ge, true); // mem is ready for GET
-
-            // 4. copy pointers to other memory cells (if any)
-            for g in me_ge_iter {
-                let me_ge_space = self.r.get_me_pu(g).expect("gggg");
-                assert_eq!(tid, me_ge_space.p.type_info.type_id);
-
-                me_ge_space.p.overwrite_null_ptr(dest);
-                self.w.ready.set_to(g, true); // mem is ready for GET
-                refcounts += 1;
+        } else {
+            putter_space.cloner_countdown.store(po_ge.len(), Ordering::SeqCst);
+            // move disabled only for memory cells with 2+ refcounts
+            putter_space.move_flags.reset(!disable_move);
+            for g in po_ge.iter().copied() {
+                self.r.send_to_getter(g, putter);
             }
-            let was = self.w.mem_refs.insert(dest, refcounts);
-            assert!(was.is_none());
         }
-        let Firer { r, .. } = self;
-        Self::instruct_data_getters(r, po_ge, data_getters_count, po_pu, &po_pu_space.p, || {
-            // cleanup function. invoked when there are 0 data-getters
-            let mem_movers = if me_ge.is_empty() { 0 } else { 1 };
-            po_pu_space.dropbox.send(mem_movers);
-        });
-    }
-}
-
-/// Enumeration that encodes one of four flags.
-/// Not user-facing
-/// Used by getters to determine how they need to collaborate (ie: must we wait for cloners? etc.)
-/// Sent to getters encoded in the MsgDropbox message (using top two bits).
-#[derive(Debug, Copy, Clone)]
-pub(crate) enum DataGetCase {
-    BothYouClone,
-    BothYouMove,
-    OnlyCloners,
-    OnlyMovers,
-}
-impl DataGetCase {
-    fn i_move(self) -> bool {
-        use DataGetCase::*;
-        match self {
-            BothYouClone | OnlyCloners => false,
-            BothYouMove | OnlyMovers => true,
-        }
-    }
-    fn last_countdown(self) -> usize {
-        use DataGetCase::*;
-        match self {
-            OnlyCloners | OnlyMovers => 1,
-            BothYouClone | BothYouMove => 2,
-        }
-    }
-    fn someone_moves(self) -> bool {
-        use DataGetCase::*;
-        match self {
-            OnlyCloners => false,
-            BothYouClone | OnlyMovers | BothYouMove => true,
-        }
-    }
-    fn mover_must_wait(self) -> bool {
-        use DataGetCase::*;
-        match self {
-            OnlyMovers => false,
-            // OnlyCloners undefined anyway
-            BothYouClone | BothYouMove | OnlyCloners => true,
-        }
-    }
-    fn parse_msg(msg: usize) -> (Self, LocId) {
-        // println!("... GOT {:b}", msg);
-        use DataGetCase::*;
-        let mask = 0b11 << 62;
-        let case = match (msg & mask) >> 62 {
-            0b00 => BothYouClone,
-            0b01 => BothYouMove,
-            0b10 => OnlyCloners,
-            0b11 => OnlyMovers,
-            _ => unreachable!(),
-        };
-        (case, msg & !mask)
-    }
-    fn include_in_msg(self, msg: usize) -> usize {
-        use DataGetCase::*;
-        // assert_eq!(msg & (0b11 << 62), 0);
-        let x = match self {
-            BothYouClone => 0b00,
-            BothYouMove => 0b01,
-            OnlyCloners => 0b10,
-            OnlyMovers => 0b11,
-        };
-        msg | (x << 62)
     }
 }
