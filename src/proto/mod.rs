@@ -168,6 +168,19 @@ impl PoPuSpace {
     }
 }
 
+
+/// Special instance of a memory space.
+/// differs from memory space in some ways:
+/// 1. only acts as putter or getter in ONE rule
+///   - normal memory cells are kept in consistent state by relying on
+///     becoming UNREADY when its fired, and only again explicitly when someone finished it. See DataSource::finalize
+///   - this memory cell is kept in consistent state by relying on the readiness of others:
+///     either the coordinator itself OR 1+ getters involved in the ONE RULE must still be unready before it can be fired again
+///   - invariant between firings of its one rule: this memory cell is EMPTY
+/// 2. filled explicitly by the coordinator. emptied by coordinator or last getter as usual
+#[derive(Debug)]
+struct TempSpace(MemoSpace);
+
 /// Personal coordination space for this getter to receive messages and advertise
 /// whether it called get() or get_signal().
 #[derive(Debug)]
@@ -301,7 +314,15 @@ impl ProtoW {
             // keep looping until 0 rules can fire
             for (rule_id, rule) in r.rules.iter().enumerate() {
                 let bits_ready = is_ready(&self.memory_bits, &self.active.ready, rule);
-                if bits_ready && unsafe { r.eval_formula(&rule.guard_pred, self) } {
+                if bits_ready {
+                    // TODO 
+                    rule.build_temps();
+                    let guard_pass = unsafe { r.eval_formula(&rule.guard_pred, self) };
+                    if !guard_pass {
+                        rule.unbuild_temps();
+                        continue;
+                    }
+
                     // safe if Equal functions are sound
                     println!("FIRING {}: {:?}", rule_id, rule);
                     println!("FIRING BEFORE:");
@@ -420,6 +441,7 @@ enum Space {
     PoPu(PoPuSpace),
     PoGe(PoGeSpace),
     Memo(MemoSpace),
+    Temp(TempSpace),
     Unused,
 }
 
@@ -586,17 +608,39 @@ impl<T: 'static> TryInto<Getter<T>> for ClaimResult<T> {
     }
 }
 
+#[derive(Debug)]
+enum TempRuleFunc {
+    Arity0 { func: *mut u8, args: [LocId; 0] },
+    Arity1 { func: *mut u8, args: [LocId; 1] },
+    Arity2 { func: *mut u8, args: [LocId; 2] },
+    Arity3 { func: *mut u8, args: [LocId; 3] },
+}
+#[derive(Debug)]
+struct TempMemRunnable {
+    temp_mem_loc_id: LocId,
+    func: fn()
+}
+
 /// Structure corresponding with one protocol rule at runtime
 #[derive(Debug)]
 struct RunRule {
     guard_ready: BitSet,
     guard_full: BitSet,
+
+    temp_mems: Vec<TempMemRunnable>,
     guard_pred: Formula,
+
     assign_vals: BitSet,
     assign_mask: BitSet,
     actions: Vec<RunAction>,
 }
 impl RunRule {
+    fn build_temps(&self) {
+        // TODO
+    }
+    fn unbuild_temps(&self) {
+
+    }
     fn fire(&self, mut f: Firer) {
         for a in self.actions.iter() {
             f.perform_action(a.putter, &a.mg, &a.pg)

@@ -262,6 +262,23 @@ pub(crate) trait DataSource<'a> {
     }
 }
 
+
+impl<'a> DataSource<'a> for TempSpace {
+    type Finalizer = <MemoSpace as DataSource<'a>>::Finalizer;
+    fn my_space(&self) -> &PutterSpace {
+        self.0.my_space()
+    }
+    fn execute_copy(&self, out_ptr: *mut u8) {
+        self.0.execute_copy(out_ptr)
+    }
+    fn execute_clone(&self, out_ptr: *mut u8) {
+        self.0.execute_clone(out_ptr)
+    }
+    fn finalize(&self, someone_moved: bool, fin: Self::Finalizer) {
+        self.0.finalize(someone_moved, fin)
+    }
+}
+
 impl<'a> DataSource<'a> for PoPuSpace {
     type Finalizer = ();
     fn my_space(&self) -> &PutterSpace {

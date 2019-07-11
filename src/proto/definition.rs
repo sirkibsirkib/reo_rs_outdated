@@ -309,6 +309,7 @@ impl ProtoBuilder {
             rules.push(RunRule {
                 guard_ready,
                 guard_full,
+                temp_mems: vec![],
                 guard_pred: rule_def.guard.clone(),
                 assign_vals,
                 assign_mask,
