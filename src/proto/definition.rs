@@ -1,4 +1,6 @@
 use super::*;
+use crate::proto::traits::FuncDefPromise;
+use crate::proto::traits::MemFillPromise;
 
 #[derive(Debug, Clone)]
 pub struct BehaviourDef {
@@ -23,8 +25,16 @@ pub enum Formula {
     And(Vec<Formula>),
     Or(Vec<Formula>),
     None(Vec<Formula>),
-    ValueEq(LocId, LocId),
+    ValueEq(Term, Term),
     MemIsNull(LocId),
+    TermVal(Term),
+    FuncDeclaration { name: &'static str, args: Vec<Term> },
+}
+
+#[derive(Debug, Clone)]
+pub enum Term {
+    Boolean(Box<Formula>),
+    Value(LocId),
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -52,9 +62,16 @@ pub enum ProtoBuildErr {
     },
 }
 
+pub struct FuncDef {
+    ret_info: Arc<TypeInfo>,
+    param_info: Vec<Arc<TypeInfo>>,
+    fnptr: fn(), // bogus type
+}
+
 pub struct ProtoBuilder {
     mem_storage: Storage,
     init_mems: HashMap<LocId, *mut u8>,
+    func_defs: HashMap<&'static str, FuncDef>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -97,10 +114,14 @@ impl ProtoBuilder {
     pub fn new() -> Self {
         Self {
             mem_storage: Default::default(),
+            func_defs: Default::default(),
             init_mems: Default::default(),
         }
     }
-    pub fn define_init_memory<T: 'static>(&mut self, id: LocId, t: T) {
+    pub(crate) fn define_func(&mut self, name: &'static str, func_def: FuncDef) {
+        assert!(self.func_defs.insert(name, func_def).is_none())
+    }
+    pub(crate) fn define_init_memory<T: 'static>(&mut self, id: LocId, t: T) {
         let ptr = self.mem_storage.move_value_in(t);
         let was = self.init_mems.insert(id, ptr);
         assert!(was.is_none());
@@ -168,16 +189,26 @@ impl ProtoBuilder {
 
         let spaces = (0..=max_loc_id)
             .map(|id| {
-                if let Some(k) = typeless_proto_def.loc_kinds.get(&id) {
+                Ok(if let Some(k) = typeless_proto_def.loc_kinds.get(&id) {
                     match k {
                         LocKind::PortPutter => {
                             Space::PoPu(PoPuSpace::new({ id_2_info(&id).clone() }))
                         }
                         LocKind::PortGetter => Space::PoGe(PoGeSpace::new()),
                         LocKind::MemInitialized => Space::Memo({
-                            let ptr: *mut u8 = *self.init_mems.get(&id).unwrap();
+                            // TODO promise
                             let type_info = id_2_info(&id).clone();
-                            MemoSpace::new(ptr, type_info)
+                            let promise = MemFillPromise {
+                                type_id_expected: type_info.type_id,
+                                loc_id: id,
+                                builder: &mut self,
+                            };
+                            P::fill_memory(id, promise);
+                            if let Some(ptr) = self.init_mems.get(&id) {
+                                MemoSpace::new(*ptr, type_info)
+                            } else {
+                                return Err(MemoryFillPromiseBroken { loc_id: id });
+                            }
                         }),
                         LocKind::MemUninitialized => Space::Memo({
                             let ptr: *mut u8 = std::ptr::null_mut();
@@ -187,10 +218,11 @@ impl ProtoBuilder {
                     }
                 } else {
                     Space::Unused
-                }
+                })
             })
-            .collect();
-        let rules = Self::build_rules::<P>(&id_2_type_id)?;
+            .collect::<Result<Vec<Space>, ProtoBuildErr>>()?;
+
+        let rules = self.build_rules::<P>(&id_2_type_id, &mut spaces)?;
         let r = ProtoR { spaces, rules };
         let w = Mutex::new(ProtoW {
             memory_bits,
@@ -217,7 +249,9 @@ impl ProtoBuilder {
     }
 
     fn build_rules<P: Proto>(
+        &self,
         id_2_type_id: &HashMap<LocId, TypeId>,
+        spaces: &mut Vec<Space>,
     ) -> Result<Vec<RunRule>, ProtoBuildErr> {
         let typeless_proto_def = P::typeless_proto_def();
         use ProtoBuildErr::*;
@@ -306,16 +340,104 @@ impl ProtoBuilder {
             guard_full.pad_trailing_zeroes_to_capacity(c);
             assign_vals.pad_trailing_zeroes_to_capacity(c);
             assign_mask.pad_trailing_zeroes_to_capacity(c);
+            let (guard_pred, temp_mems) =
+                Self::calc_guard(id_2_type_id, &rule_def.guard, &actions, spaces);
             rules.push(RunRule {
                 guard_ready,
                 guard_full,
-                temp_mems: vec![],
-                guard_pred: rule_def.guard.clone(),
+                temp_mems,
+                guard_pred,
                 assign_vals,
                 assign_mask,
                 actions,
             });
         }
         Ok(rules)
+    }
+
+    fn calc_guard(
+        _id_2_type_id: &HashMap<LocId, TypeId>,
+        data_constraint: &Formula,
+        _actions: &[RunAction],
+        spaces: &mut Vec<Space>,
+    ) -> (Formula, Vec<TempMemRunnable>) {
+        let f = data_constraint.clone();
+        let t = vec![];
+        (f, t)
+    }
+
+    fn runnify_formulae<P: Proto>(
+        &mut self,
+        f: &[Formula],
+        spaces: &mut Vec<Space>,
+        temp_mems: &mut Vec<TempRuleFunc>,
+    ) -> Result<Vec<Formula>, ProtoBuildErr> {
+        f.iter()
+        .map(|e| self.runnify_formula::<P>(e, spaces, temp_mems))
+        .collect()
+    }
+
+    fn runnify_formula<P: Proto>(
+        &mut self,
+        f: &Formula,
+        spaces: &mut Vec<Space>,
+        temp_mems: &mut Vec<TempRuleFunc>,
+    ) -> Result<Formula, ProtoBuildErr> {
+        use Formula::*;
+        let mut r = |fs| self.runnify_formulae::<P>(fs, spaces, temp_mems);
+        Ok(match f {
+            True | ValueEq(_, _) | MemIsNull(_) | TermVal(_) => f.clone(), // stop condtion
+            And(fs) => And(r(fs)?),
+            Or(fs) => Or(r(fs)?),
+            None(fs) => None(r(fs)?),
+            FuncDeclaration { name, args } => {
+                if !self.func_defs.contains_key(name) {
+                    let promise = FuncDefPromise {
+                        builder: self,
+                        name,
+                    };
+                    P::def_func(name, promise);
+                }
+                if let Some(func_def) = self.func_defs.get(name) {
+                    if args.len() != func_def.param_info.len() {
+                        panic!("WRONG ARGS");
+                    }
+                    for (a, p) in args.iter().zip(func_def.param_info.iter()) {
+                        let subterm: Term = match a {
+                            Term::Boolean(f) => a,
+                            Term::Value(loc_id),
+                        }
+                    }
+                    unimplemented!()
+                } else {
+                    panic!();
+                }
+                // pub struct FuncDef {
+                //     ret_info: Arc<TypeInfo>,
+                //     param_info: Vec<Arc<TypeInfo>>,
+                //     fnptr: fn(), // bogus type
+                // }
+            }
+            _ => f.clone(),
+        })
+    }
+}
+
+trait TempAllocator {
+    fn new_temp(&mut self, type_info: &Arc<TypeInfo>) -> LocId;
+}
+impl TempAllocator for Vec<Space> {
+    fn new_temp(&mut self, type_info: &Arc<TypeInfo>) -> LocId {
+        let t = Space::Temp(TempSpace::new(type_info.clone()));
+        for (i, s) in self.iter_mut().enumerate() {
+            match s {
+                Space::Unused => {
+                    *s = t;
+                    return i;
+                }
+            }
+        }
+        self.push(t);
+        self.len() - 1
     }
 }

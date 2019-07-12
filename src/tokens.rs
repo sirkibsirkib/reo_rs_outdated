@@ -3,10 +3,7 @@ use crate::proto::PortCommon;
 use crate::proto::{Getter, Putter};
 use crate::LocId;
 use std::marker::PhantomData;
-use std::{
-    fmt,
-    mem::{transmute},
-};
+use std::{fmt, mem::transmute};
 
 // for types that have NO SIZE and thus can be created without context
 pub unsafe trait Token: Sized {}

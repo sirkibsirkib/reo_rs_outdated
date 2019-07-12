@@ -1,4 +1,5 @@
 use super::*;
+use crate::proto::definition::FuncDef;
 
 pub trait EndlessIter {
     fn endless_iter(
@@ -138,28 +139,55 @@ pub struct MemFillPromise<'a> {
     builder: &'a mut ProtoBuilder,
 }
 impl<'a> MemFillPromise<'a> {
-    pub fn fill_memory<T: 'static>(
-        self,
-        t: T,
-    ) -> Result<MemFillPromiseFulfilled, WrongMemFillType> {
+    pub fn fill_memory<T: 'static>(self, t: T) -> Result<PromiseFulfilled, WrongMemFillType> {
         if TypeId::of::<T>() != self.type_id_expected {
             Err(WrongMemFillType {
                 expected_type: self.type_id_expected,
             })
         } else {
             self.builder.define_init_memory(self.loc_id, t);
-            Ok(MemFillPromiseFulfilled { _secret: () })
+            Ok(unsafe { std::mem::transmute(()) })
         }
     }
+}
+
+pub struct FuncDefPromise<'a> {
+    builder: &'a mut ProtoBuilder,
+    name: &'static str,
+}
+
+use std::mem::MaybeUninit;
+impl<'a> FuncDefPromise<'a> {
+    pub fn define_arity0<R: 'static>(self, func: fn(&mut MaybeUninit<R>)) -> PromiseFulfilled {
+        let def = FuncDef {
+            ret_info: Arc::new(TypeInfo::new::<R>()),
+            param_info: vec![],
+            fnptr: unsafe { std::mem::transmute(func) },
+        };
+        self.builder.define_func(self.name, def);
+        unsafe { std::mem::transmute(()) }
+    }
+
+    pub fn define_arity1<R: 'static, A0: 'static>(
+        self,
+        func: fn(&mut MaybeUninit<R>, *const A0),
+    ) -> PromiseFulfilled {
+        let def = FuncDef {
+            ret_info: Arc::new(TypeInfo::new::<R>()),
+            param_info: vec![Arc::new(TypeInfo::new::<A0>())],
+            fnptr: unsafe { std::mem::transmute(func) },
+        };
+        self.builder.define_func(self.name, def);
+        unsafe { std::mem::transmute(()) }
+    }
+    // TODO 2 and 3
 }
 
 #[derive(Debug, Copy, Clone)]
 pub struct WrongMemFillType {
     pub expected_type: TypeId,
 }
-pub struct MemFillPromiseFulfilled {
-    _secret: (),
-}
+pub enum PromiseFulfilled {}
 
 /// Does not enforce that used LocIds have any particular order or are contiguous,
 /// HOWEVER, leaving gaps in ID-SPACE will reduce efficiency by:
@@ -167,7 +195,8 @@ pub struct MemFillPromiseFulfilled {
 /// 2. making inefficient use of bitset operations
 pub trait Proto: Sized {
     fn typeless_proto_def() -> &'static TypelessProtoDef;
-    fn fill_memory(loc_id: LocId, promise: MemFillPromise) -> Option<MemFillPromiseFulfilled>;
+    fn fill_memory(loc_id: LocId, promise: MemFillPromise) -> Option<PromiseFulfilled>;
+    fn def_func(func_name: &'static str, promise: FuncDefPromise) -> Option<PromiseFulfilled>;
     fn loc_type(loc_id: LocId) -> Option<TypeInfo>;
     fn try_instantiate() -> Result<Arc<ProtoAll>, ProtoBuildErr> {
         use ProtoBuildErr::*;
@@ -204,7 +233,9 @@ pub(crate) trait DataSource<'a> {
     fn finalize(&self, someone_moved: bool, fin: Self::Finalizer);
 
     fn acquire_data<I>(&self, mut out_ptrs: I, fin: Self::Finalizer)
-    where I: ExactSizeIterator<Item=*mut u8> {
+    where
+        I: ExactSizeIterator<Item = *mut u8>,
+    {
         use Ordering::SeqCst;
         let space = self.my_space();
         if space.type_info.is_copy {
@@ -234,7 +265,8 @@ pub(crate) trait DataSource<'a> {
                         space.mover_sema.acquire();
                     }
                     self.finalize(true, fin);
-                } else { // lose
+                } else {
+                    // lose
                     for out_ptr in out_ptrs {
                         self.execute_clone(out_ptr);
                     }
@@ -261,7 +293,6 @@ pub(crate) trait DataSource<'a> {
         }
     }
 }
-
 
 impl<'a> DataSource<'a> for TempSpace {
     type Finalizer = <MemoSpace as DataSource<'a>>::Finalizer;

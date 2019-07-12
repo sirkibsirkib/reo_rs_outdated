@@ -2,7 +2,7 @@ use self::reo_rs::{
     proto::{
         definition::{ActionDef, BehaviourDef, Formula, LocKind, RuleDef, TypelessProtoDef},
         reflection::TypeInfo,
-        traits::{HasUnclaimedPorts, MemFillPromise, MemFillPromiseFulfilled, Proto},
+        traits::{FuncDefPromise, HasUnclaimedPorts, MemFillPromise, PromiseFulfilled, Proto},
         Getter, Putter,
     },
     LocId,
@@ -47,7 +47,10 @@ impl<T0: 'static> Proto for AlternatorProto<T0> {
         }
         &DEF
     }
-    fn fill_memory(_loc_id: LocId, _p: MemFillPromise) -> Option<MemFillPromiseFulfilled> {
+    fn fill_memory(_loc_id: LocId, _p: MemFillPromise) -> Option<PromiseFulfilled> {
+        None
+    }
+    fn def_func(_name: &'static str, _p: FuncDefPromise) -> Option<PromiseFulfilled> {
         None
     }
     fn loc_type(loc_id: LocId) -> Option<TypeInfo> {
@@ -232,7 +235,10 @@ impl<T0: 'static> Proto for SyncProto<T0> {
         }
         &DEF
     }
-    fn fill_memory(_loc_id: LocId, _p: MemFillPromise) -> Option<MemFillPromiseFulfilled> {
+    fn fill_memory(_loc_id: LocId, _p: MemFillPromise) -> Option<PromiseFulfilled> {
+        None
+    }
+    fn def_func(_name: &'static str, _p: FuncDefPromise) -> Option<PromiseFulfilled> {
         None
     }
     fn loc_type(loc_id: LocId) -> Option<TypeInfo> {

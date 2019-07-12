@@ -33,12 +33,12 @@ impl Storage {
         stored_ptr
     }
     pub unsafe fn move_in(&mut self, src: StackPtr, type_info: &Arc<TypeInfo>) -> StorePtr {
-        let dest = self.inner_alloc(type_info);
+        let dest = self.alloc(type_info);
         type_info.copy_fn_execute(src, dest);
         dest
     }
     pub unsafe fn clone_in(&mut self, src: StackPtr, type_info: &Arc<TypeInfo>) -> StorePtr {
-        let dest = self.inner_alloc(type_info);
+        let dest = self.alloc(type_info);
         type_info.funcs.clone.execute(src, dest);
         dest
     }
@@ -65,15 +65,8 @@ impl Storage {
             }
         }
     }
-    ///////////////////
-    unsafe fn inner_free(&mut self, ptr: StorePtr, lh: &LayoutHashable) {
-        self.owned.remove(&ptr).expect("not owned?");
-        self.free
-            .get_mut(&lh)
-            .expect("not prepared for this len")
-            .push(ptr);
-    }
-    unsafe fn inner_alloc(&mut self, type_info: &Arc<TypeInfo>) -> StorePtr {
+    /// allocates a space for this type. does NOT initialize it but assumes its initialized
+    pub unsafe fn alloc(&mut self, type_info: &Arc<TypeInfo>) -> StorePtr {
         // println!("move_ining.. looking for a free space...");
         // preserve the invariant
         self.type_info
@@ -92,6 +85,14 @@ impl Storage {
             panic!("move_in allocated something already owned??")
         }
         dest
+    }
+    ///////////////////
+    unsafe fn inner_free(&mut self, ptr: StorePtr, lh: &LayoutHashable) {
+        self.owned.remove(&ptr).expect("not owned?");
+        self.free
+            .get_mut(&lh)
+            .expect("not prepared for this len")
+            .push(ptr);
     }
 }
 impl Drop for Storage {

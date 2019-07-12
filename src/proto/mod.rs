@@ -4,7 +4,7 @@ use smallvec::SmallVec;
 
 pub mod definition;
 mod memory;
-use definition::{Formula, LocKind, ProtoBuildErr, ProtoBuilder, TypelessProtoDef};
+use definition::{Formula, LocKind, ProtoBuildErr, ProtoBuilder, Term, TypelessProtoDef};
 
 pub mod reflection;
 use reflection::TypeInfo;
@@ -35,13 +35,12 @@ use std::{
     mem::{transmute, MaybeUninit},
     str::FromStr,
     sync::{
-        atomic::{AtomicPtr, AtomicUsize, Ordering, AtomicU8},
+        atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
 };
 use std_semaphore::Semaphore;
-
 
 #[derive(Debug, Default)]
 struct MoveFlags {
@@ -53,7 +52,8 @@ impl MoveFlags {
 
     #[inline]
     fn type_is_copy_i_moved(&self) {
-        self.move_flags.store(Self::MOVE_FLAG_MOVED, Ordering::SeqCst);
+        self.move_flags
+            .store(Self::MOVE_FLAG_MOVED, Ordering::SeqCst);
     }
 
     #[inline]
@@ -64,7 +64,9 @@ impl MoveFlags {
 
     #[inline]
     fn ask_for_move_permission(&self) -> bool {
-        0 == self.move_flags.fetch_or(Self::MOVE_FLAG_MOVED, Ordering::SeqCst)
+        0 == self
+            .move_flags
+            .fetch_or(Self::MOVE_FLAG_MOVED, Ordering::SeqCst)
     }
 
     #[inline]
@@ -77,7 +79,6 @@ impl MoveFlags {
         self.move_flags.store(val, Ordering::SeqCst);
     }
 }
-
 
 /// A coordination point that getters interact with to acquire a datum.
 /// Common to memory and port putters.
@@ -168,7 +169,6 @@ impl PoPuSpace {
     }
 }
 
-
 /// Special instance of a memory space.
 /// differs from memory space in some ways:
 /// 1. only acts as putter or getter in ONE rule
@@ -180,6 +180,11 @@ impl PoPuSpace {
 /// 2. filled explicitly by the coordinator. emptied by coordinator or last getter as usual
 #[derive(Debug)]
 struct TempSpace(MemoSpace);
+impl TempSpace {
+    fn new(type_info: Arc<TypeInfo>) -> Self {
+        Self(MemoSpace::new(std::ptr::null_mut(), type_info))
+    }
+}
 
 /// Personal coordination space for this getter to receive messages and advertise
 /// whether it called get() or get_signal().
@@ -196,7 +201,9 @@ impl PoGeSpace {
     unsafe fn get_data(&self, a: &ProtoAll, putter_id: LocId, out_ptr: *mut u8) {
         // let (_case, putter_id) = DataGetCase::parse_msg(msg);
         match a.r.get_space(putter_id) {
-            Some(Space::Memo(space)) => space.acquire_data([out_ptr].iter().copied(), (a, putter_id)),
+            Some(Space::Memo(space)) => {
+                space.acquire_data([out_ptr].iter().copied(), (a, putter_id))
+            }
             Some(Space::PoPu(space)) => space.acquire_data([out_ptr].iter().copied(), ()),
             _ => panic!("Bad putter ID!!"),
         }
@@ -209,7 +216,6 @@ impl PoGeSpace {
         }
     }
 }
-
 
 // unsafe impl are safe. autoderive inhibited by HashMap<*mut u8, ..> but the
 // pointers are only used as keys (not accessed) in this context.
@@ -249,6 +255,12 @@ impl<'a, 'b> DebugPrint for (&'a ProtoR, &'b ProtoW) {
         println!(":: READY: {:?}", &self.1.active.ready);
         println!(":: TENTA: {:?}", &self.1.ready_tentative);
     }
+}
+
+enum EvalTerm {
+    True,
+    False,
+    Var(LocId),
 }
 
 /// The portion of the protcol that is proected by the lock.
@@ -315,11 +327,11 @@ impl ProtoW {
             for (rule_id, rule) in r.rules.iter().enumerate() {
                 let bits_ready = is_ready(&self.memory_bits, &self.active.ready, rule);
                 if bits_ready {
-                    // TODO 
-                    rule.build_temps(Firer { r, w: &mut self.active });
+                    // TODO
+                    unsafe { self.build_temps(r, rule) };
                     let guard_pass = unsafe { r.eval_formula(&rule.guard_pred, self) };
                     if !guard_pass {
-                        rule.unbuild_temps(Firer { r, w: &mut self.active });
+                        unsafe { self.unbuild_temps(r, rule) };
                         continue;
                     }
 
@@ -350,7 +362,10 @@ impl ProtoW {
                         return;
                     }
                     subtract_readiness(&mut self.active.ready, rule);
-                    rule.fire(Firer { r, w: &mut self.active });
+                    rule.fire(Firer {
+                        r,
+                        w: &mut self.active,
+                    });
 
                     println!("FIRING AFTER:");
                     (r, self as &ProtoW).debug_print();
@@ -364,6 +379,47 @@ impl ProtoW {
             // only get here if NO rule fired
             println!("EXITING");
             return;
+        }
+    }
+    #[inline]
+    unsafe fn build_temps(&mut self, r: &ProtoR, rule: &RunRule) {
+        for t in rule.temp_mems.iter() {
+            let putter_space = r
+                .get_temp(t.temp_mem_loc_id)
+                .expect("NOT TEMP??")
+                .my_space();
+            let dest = self.active.storage.alloc(&putter_space.type_info);
+            putter_space.overwrite_null_ptr(dest);
+            use TempRuleFunc::*;
+            match &t.func {
+                Arity0 { func, .. } => func(dest),
+                Arity1 { func, args } => func(dest, r.eval_term(&args[0], self)),
+                Arity2 { func, args } => func(
+                    dest,
+                    r.eval_term(&args[0], self),
+                    r.eval_term(&args[1], self),
+                ),
+                Arity3 { func, args } => func(
+                    dest,
+                    r.eval_term(&args[0], self),
+                    r.eval_term(&args[1], self),
+                    r.eval_term(&args[2], self),
+                ),
+            }
+            let was = self.active.mem_refs.insert(dest, 1);
+            assert!(was.is_none());
+            println!(
+                "COMPUTED TEMP VAL. INSERTED INTO TEMP SLOT {}",
+                t.temp_mem_loc_id
+            );
+        }
+    }
+    #[inline]
+    unsafe fn unbuild_temps(&mut self, r: &ProtoR, rule: &RunRule) {
+        for t in rule.temp_mems.iter() {
+            let dest = r.get_temp(t.temp_mem_loc_id).expect("NOT TEMP??");
+            dest.0.make_empty(&mut self.active, true, t.temp_mem_loc_id);
+            println!("DROPPING TEMP VAL IN SLOT {}", t.temp_mem_loc_id);
         }
     }
 }
@@ -448,29 +504,39 @@ pub struct ProtoR {
     spaces: Vec<Space>,
 }
 impl ProtoR {
-    unsafe fn eval_formula(&self, guard: &Formula, w: &ProtoW) -> bool {
+    unsafe fn eval_formula(&self, formula: &Formula, w: &ProtoW) -> bool {
         use definition::Formula::*;
-        let f = |formula: &Formula| self.eval_formula(formula, w);
-        match guard {
+        let f = |q: &Formula| self.eval_formula(q, w);
+        match formula {
             True => true,
             None(x) => !x.iter().any(f),
             And(x) => !x.iter().all(f),
             Or(x) => x.iter().any(f),
-            ValueEq(a, b) => self.equal_put_data(*a, *b),
+            ValueEq(a, b) => {
+                let aptr = self.eval_term(a, w);
+                let bptr = self.eval_term(b, w);
+                self.equal_put_data(*a, *b);
+                // cannot check equality anymore
+                i1.funcs.partial_eq.execute(p1, p2)
+            },
             MemIsNull(a) => !w.memory_bits.test(*a),
+            FuncDeclaration { .. } => panic!("TEMP. NOT ALLOWED AT RUNTIME"),
         }
     }
-
-    unsafe fn equal_put_data(&self, a: LocId, b: LocId) -> bool {
-        let clos = |id| match self.get_space(id) {
-            Some(Space::Memo(space)) => (&space.p.type_info, space.p.get_ptr()),
-            Some(Space::PoPu(space)) => (&space.p.type_info, space.p.get_ptr()),
-            _ => panic!("NO SPACE PTR"),
-        };
-        let (i1, p1) = clos(a);
-        let (i2, p2) = clos(b);
-        assert_eq!(i1.type_id, i2.type_id);
-        i1.funcs.partial_eq.execute(p1, p2)
+    unsafe fn eval_term(&self, term: &Term, w: &ProtoW) -> *mut u8 {
+        match term {
+            Term::Boolean(f) => {
+                if self.eval_formula(f, w) {
+                    std::mem::transmute((&true) as *const bool)
+                } else {
+                    std::mem::transmute((&false) as *const bool)
+                }
+            }
+            Term::Value(loc_id) => self
+                .get_space_putter(*loc_id)
+                .expect("NOT PUTTER")
+                .get_ptr(),
+        }
     }
     fn send_to_getter(&self, id: LocId, msg: usize) {
         if let Some(Space::PoGe(space)) = self.get_space(id) {
@@ -624,10 +690,21 @@ impl<T: 'static> TryInto<Getter<T>> for ClaimResult<T> {
 #[derive(Debug)]
 enum TempRuleFunc {
     // first arg is destination
-    Arity0 { func: fn(*mut u8) },
-    Arity1 { func: fn(*mut u8, *mut u8), args: [LocId; 1] },
-    Arity2 { func: fn(*mut u8, *mut u8, *mut u8), args: [LocId; 2] },
-    Arity3 { func: fn(*mut u8, *mut u8, *mut u8, *mut u8), args: [LocId; 3] },
+    Arity0 {
+        func: fn(*mut u8),
+    },
+    Arity1 {
+        func: fn(*mut u8, *mut u8),
+        args: [Term; 1],
+    },
+    Arity2 {
+        func: fn(*mut u8, *mut u8, *mut u8),
+        args: [Term; 2],
+    },
+    Arity3 {
+        func: fn(*mut u8, *mut u8, *mut u8, *mut u8),
+        args: [Term; 3],
+    },
 }
 #[derive(Debug)]
 struct TempMemRunnable {
@@ -636,6 +713,9 @@ struct TempMemRunnable {
 }
 
 /// Structure corresponding with one protocol rule at runtime
+/// for every t in temp_mems assumes:
+/// 1. t.temp_mem_loc_id is not used by ANY OTHER RULE
+/// 2. t.func is well-formed: its function populates the correct type, reading the correct types
 #[derive(Debug)]
 struct RunRule {
     guard_ready: BitSet,
@@ -650,37 +730,6 @@ struct RunRule {
 }
 impl RunRule {
     #[inline]
-    fn build_temps(&self, f: Firer) {
-        for t in self.temp_mems.iter() {
-            let dest = f.r.get_temp(t.temp_mem_loc_id).expect("NOT TEMP??").my_space().get_ptr();
-            use TempRuleFunc::*;
-            match t.func {
-                Arity0 { func, .. } => func(dest),
-                Arity1 { func, args } => func(
-                    dest,
-                    f.r.get_space_putter(args[0]).unwrap().get_ptr(),
-                ),
-                Arity2 { func, args } => func(
-                    dest, 
-                    f.r.get_space_putter(args[0]).unwrap().get_ptr(),
-                    f.r.get_space_putter(args[1]).unwrap().get_ptr(),
-                ),
-                Arity3 { func, args } => func(
-                    dest, 
-                    f.r.get_space_putter(args[0]).unwrap().get_ptr(),
-                    f.r.get_space_putter(args[1]).unwrap().get_ptr(),
-                    f.r.get_space_putter(args[2]).unwrap().get_ptr(),
-                )
-            }
-        }
-    }
-    #[inline]
-    fn unbuild_temps(&self, f: Firer) {
-        for t in self.temp_mems.iter() {
-            let dest = f.r.get_temp(t.temp_mem_loc_id).expect("NOT TEMP??");
-            dest.0.make_empty(f.w, true, t.temp_mem_loc_id);
-        }
-    }
     fn fire(&self, mut f: Firer) {
         for a in self.actions.iter() {
             f.perform_action(a.putter, &a.mg, &a.pg)
@@ -715,9 +764,7 @@ impl<T: 'static> Getter<T> {
 
     /// combination of `get_signal` and `get_timeout`
     pub fn get_signal_timeout(&mut self, timeout: Duration) -> bool {
-        unsafe {
-            self.get_signal_in_place_timeout(timeout)
-        }
+        unsafe { self.get_signal_in_place_timeout(timeout) }
     }
     /// like `get`, but doesn't acquire any data. Useful for participation
     /// in synchrony when the data isn't useful.
@@ -776,7 +823,6 @@ impl<T: 'static> Getter<T> {
             None => false,
         }
     }
-
 
     pub unsafe fn get_signal_in_place_timeout(&mut self, timeout: Duration) -> bool {
         let po_ge = self.c.p.r.get_po_ge(self.c.id).expect(Self::BAD_ID);
@@ -986,7 +1032,7 @@ impl<'a> Firer<'a> {
         let space = self.r.get_space(putter);
         let (putter_space, mem_putter): (&PutterSpace, bool) = match space {
             Some(Space::PoPu(space)) => (&space.p, false),
-            Some(Space::Memo(space)) => (&space.p, true),
+            Some(Space::Memo(space)) | Some(Space::Temp(TempSpace(space))) => (&space.p, true),
             _ => panic!("Not a putter!"),
         };
         let src = putter_space.get_ptr();
@@ -1006,7 +1052,11 @@ impl<'a> Firer<'a> {
                 }
             }
             // 3. update refcounts
-            let src_refs = self.w.mem_refs.get_mut(&src).expect("mem_to_locs BAD REFS?");
+            let src_refs = self
+                .w
+                .mem_refs
+                .get_mut(&src)
+                .expect("mem_to_locs BAD REFS?");
             assert!(*src_refs >= 1);
             *src_refs += me_ge.len();
             *src_refs != 1
@@ -1044,7 +1094,6 @@ impl<'a> Firer<'a> {
             false
         };
 
-
         // 4. perform port moves
         if po_ge.len() == 0 {
             println!("PROTO MEM CLEANUP");
@@ -1052,14 +1101,18 @@ impl<'a> Firer<'a> {
                 Space::PoPu(space) => {
                     let mem_movers = if me_ge.is_empty() { 0 } else { 1 };
                     space.dropbox.send(mem_movers);
-                },
-                Space::Memo(space) => if !move_into_self {
-                    space.make_empty(self.w, true, putter);
+                }
+                Space::Memo(space) | Space::Temp(TempSpace(space)) => {
+                    if !move_into_self {
+                        space.make_empty(self.w, true, putter);
+                    }
                 }
                 _ => unreachable!(),
             };
         } else {
-            putter_space.cloner_countdown.store(po_ge.len(), Ordering::SeqCst);
+            putter_space
+                .cloner_countdown
+                .store(po_ge.len(), Ordering::SeqCst);
             // move disabled only for memory cells with 2+ refcounts
             putter_space.move_flags.reset(!disable_move);
             for g in po_ge.iter().copied() {
