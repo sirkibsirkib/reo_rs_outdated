@@ -100,6 +100,25 @@ pub struct TypeInfoFuncs {
     pub(crate) partial_eq: PartialEqFn,
 }
 impl TypeInfo {
+    pub const BOOL_TYPE_INFO: &'static TypeInfo = &TypeInfo {
+        type_id: TypeId::of::<bool>(),
+        is_copy: true,
+        layout: unsafe { Layout::from_size_align_unchecked(1, 1) },
+        funcs: TypeInfoFuncs {
+            drop: DropFn(None),
+            clone: CloneFn(Some(|a, b| unsafe {
+                let a: *mut bool = std::mem::transmute(a);
+                let b: *const bool = std::mem::transmute(b);
+                a.write(b.read())
+            })),
+            partial_eq: PartialEqFn(Some(|a, b| unsafe {
+                let a: *const bool = std::mem::transmute(a);
+                let b: *const bool = std::mem::transmute(b);
+                a == b
+            })),
+        },
+    };
+
     #[inline]
     /// This function doesn't need a pointer. It's derived from the layout field.
     /// MOVE and COPY are equivalent. The only difference is whether an accompanying

@@ -512,13 +512,18 @@ impl ProtoR {
             None(x) => !x.iter().any(f),
             And(x) => !x.iter().all(f),
             Or(x) => x.iter().any(f),
-            ValueEq(a, b) => {
-                let aptr = self.eval_term(a, w);
-                let bptr = self.eval_term(b, w);
-                self.equal_put_data(*a, *b);
-                // cannot check equality anymore
-                i1.funcs.partial_eq.execute(p1, p2)
+            TermVal(loc_id) => {
+                let (ptr, i) = self.eval_term_with_info(loc_id, w);
+                assert_eq!(i.type_id, TypeInfo::BOOL_TYPE_INFO.type_id);
+                let p: *mut bool = transmute(ptr);
+                *p
             },
+            ValueEq(a, b) => {
+                let (aptr, i1) = self.eval_term_with_info(a, w);
+                let (bptr, i2) = self.eval_term_with_info(b, w);
+                assert_eq!(i1.type_id, i2.type_id);
+                i1.funcs.partial_eq.execute(aptr, bptr)
+            }
             MemIsNull(a) => !w.memory_bits.test(*a),
             FuncDeclaration { .. } => panic!("TEMP. NOT ALLOWED AT RUNTIME"),
         }
@@ -536,6 +541,22 @@ impl ProtoR {
                 .get_space_putter(*loc_id)
                 .expect("NOT PUTTER")
                 .get_ptr(),
+        }
+    }
+    unsafe fn eval_term_with_info(&self, term: &Term, w: &ProtoW) -> (*mut u8, &TypeInfo) {
+        match term {
+            Term::Boolean(f) => {
+                let ptr = if self.eval_formula(f, w) {
+                    std::mem::transmute((&true) as *const bool)
+                } else {
+                    std::mem::transmute((&false) as *const bool)
+                };
+                (ptr, TypeInfo::BOOL_TYPE_INFO)
+            }
+            Term::Value(loc_id) => {
+                let s = self.get_space_putter(*loc_id).expect("NOT PUTTER");
+                (s.get_ptr(), &s.type_info)
+            }
         }
     }
     fn send_to_getter(&self, id: LocId, msg: usize) {

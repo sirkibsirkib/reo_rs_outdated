@@ -19,7 +19,7 @@ pub struct ActionDef {
     pub getters: Vec<LocId>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Formula {
     True,
     And(Vec<Formula>),
@@ -31,7 +31,7 @@ pub enum Formula {
     FuncDeclaration { name: &'static str, args: Vec<Term> },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Term {
     Boolean(Box<Formula>),
     Value(LocId),
@@ -60,12 +60,19 @@ pub enum ProtoBuildErr {
     MemoryFillPromiseBroken {
         loc_id: LocId,
     },
+    FunctionUndefined {
+        name: &'static str,
+    },
+    FunctionUsedWithWrongArity {
+        name: &'static str,
+        used_arity: usize,
+    },
 }
 
 pub struct FuncDef {
-    ret_info: Arc<TypeInfo>,
-    param_info: Vec<Arc<TypeInfo>>,
-    fnptr: fn(), // bogus type
+    pub(crate) ret_info: Arc<TypeInfo>,
+    pub(crate) param_info: Vec<Arc<TypeInfo>>,
+    pub(crate) fnptr: fn(), // bogus type
 }
 
 pub struct ProtoBuilder {
@@ -126,7 +133,7 @@ impl ProtoBuilder {
         let was = self.init_mems.insert(id, ptr);
         assert!(was.is_none());
     }
-    pub fn finish<P: Proto>(self) -> Result<ProtoAll, ProtoBuildErr> {
+    pub fn finish<P: Proto>(mut self) -> Result<ProtoAll, ProtoBuildErr> {
         use ProtoBuildErr::*;
         let typeless_proto_def = P::typeless_proto_def();
         let max_loc_id = Self::max_loc_id(typeless_proto_def);
@@ -187,7 +194,7 @@ impl ProtoBuilder {
             .map(|(&loc_id, &ptr)| (ptr, loc_id))
             .collect();
 
-        let spaces = (0..=max_loc_id)
+        let mut spaces = (0..=max_loc_id)
             .map(|id| {
                 Ok(if let Some(k) = typeless_proto_def.loc_kinds.get(&id) {
                     match k {
@@ -249,7 +256,7 @@ impl ProtoBuilder {
     }
 
     fn build_rules<P: Proto>(
-        &self,
+        &mut self,
         id_2_type_id: &HashMap<LocId, TypeId>,
         spaces: &mut Vec<Space>,
     ) -> Result<Vec<RunRule>, ProtoBuildErr> {
@@ -340,6 +347,8 @@ impl ProtoBuilder {
             guard_full.pad_trailing_zeroes_to_capacity(c);
             assign_vals.pad_trailing_zeroes_to_capacity(c);
             assign_mask.pad_trailing_zeroes_to_capacity(c);
+
+            self.define_all_funcs_in::<P>(&rule_def.guard);
             let (guard_pred, temp_mems) =
                 Self::calc_guard(id_2_type_id, &rule_def.guard, &actions, spaces);
             rules.push(RunRule {
@@ -355,6 +364,37 @@ impl ProtoBuilder {
         Ok(rules)
     }
 
+    fn define_all_funcs_in<P: Proto>(&mut self, f: &Formula) -> Result<(), ProtoBuildErr> {
+        use Formula::*;
+        let clos = |me: &mut Self, fs: &Vec<Formula>| {
+            fs.iter()
+                .map(|f| me.define_all_funcs_in::<P>(f))
+                .collect::<Result<(), ProtoBuildErr>>()
+        };
+        let term = |me: &mut Self, t: &Term| match t {
+            Term::Boolean(f) => me.define_all_funcs_in::<P>(&f),
+            Term::Value(_) => Ok(()),
+        };
+        Ok(match f {
+            True | MemIsNull(_) => (),
+            And(fs) | Or(fs) | None(fs) => clos(self, fs)?,
+            ValueEq(a, b) => {
+                term(self, a)?;
+                term(self, b)?;
+            }
+            TermVal(a) => term(self, a)?,
+            FuncDeclaration { name, .. } => {
+                let promise = FuncDefPromise {
+                    builder: self,
+                    name,
+                };
+                if P::def_func(name, promise).is_none() {
+                    return Err(ProtoBuildErr::FunctionUndefined { name });
+                }
+            }
+        })
+    }
+
     fn calc_guard(
         _id_2_type_id: &HashMap<LocId, TypeId>,
         data_constraint: &Formula,
@@ -367,50 +407,60 @@ impl ProtoBuilder {
     }
 
     fn runnify_formulae<P: Proto>(
-        &mut self,
+        &self,
         f: &[Formula],
         spaces: &mut Vec<Space>,
         temp_mems: &mut Vec<TempRuleFunc>,
     ) -> Result<Vec<Formula>, ProtoBuildErr> {
         f.iter()
-        .map(|e| self.runnify_formula::<P>(e, spaces, temp_mems))
-        .collect()
+            .map(|e| self.runnify_formula::<P>(e, spaces, temp_mems))
+            .collect()
     }
 
     fn runnify_formula<P: Proto>(
-        &mut self,
+        &self,
         f: &Formula,
         spaces: &mut Vec<Space>,
         temp_mems: &mut Vec<TempRuleFunc>,
     ) -> Result<Formula, ProtoBuildErr> {
         use Formula::*;
+        use ProtoBuildErr::*;
         let mut r = |fs| self.runnify_formulae::<P>(fs, spaces, temp_mems);
         Ok(match f {
-            True | ValueEq(_, _) | MemIsNull(_) | TermVal(_) => f.clone(), // stop condtion
+            True | ValueEq(_, _) | MemIsNull(_) => f.clone(), // stop condtion
+            TermVal(t) => match t {
+                Term::Boolean(f) => TermVal(Term::Boolean(Box::new(
+                    self.runnify_formula::<P>(f, spaces, temp_mems)?,
+                ))),
+                Term::Value(_) => f.clone(),
+            },
             And(fs) => And(r(fs)?),
             Or(fs) => Or(r(fs)?),
             None(fs) => None(r(fs)?),
             FuncDeclaration { name, args } => {
-                if !self.func_defs.contains_key(name) {
-                    let promise = FuncDefPromise {
-                        builder: self,
-                        name,
-                    };
-                    P::def_func(name, promise);
-                }
+                // 1 ensure the function has been defined by user
                 if let Some(func_def) = self.func_defs.get(name) {
                     if args.len() != func_def.param_info.len() {
-                        panic!("WRONG ARGS");
+                        return Err(FunctionUsedWithWrongArity {
+                            name,
+                            used_arity: args.len(),
+                        });
                     }
-                    for (a, p) in args.iter().zip(func_def.param_info.iter()) {
-                        let subterm: Term = match a {
-                            Term::Boolean(f) => a,
-                            Term::Value(loc_id),
-                        }
-                    }
+                    let fixed_subterms: Vec<Term> = args
+                        .iter()
+                        .zip(func_def.param_info.iter())
+                        .map(|(a, p)| {
+                            Ok(match a {
+                                Term::Boolean(f) => Term::Boolean(Box::new(
+                                    self.runnify_formula::<P>(f, spaces, temp_mems)?,
+                                )),
+                                Term::Value(loc_id) => Term::Value(*loc_id),
+                            })
+                        })
+                        .collect::<Result<Vec<Term>, ProtoBuildErr>>()?;
                     unimplemented!()
                 } else {
-                    panic!();
+                    return Err(FunctionUndefined { name });
                 }
                 // pub struct FuncDef {
                 //     ret_info: Arc<TypeInfo>,
@@ -418,7 +468,6 @@ impl ProtoBuilder {
                 //     fnptr: fn(), // bogus type
                 // }
             }
-            _ => f.clone(),
         })
     }
 }
@@ -435,6 +484,7 @@ impl TempAllocator for Vec<Space> {
                     *s = t;
                     return i;
                 }
+                _ => (),
             }
         }
         self.push(t);

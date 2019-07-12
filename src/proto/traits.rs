@@ -134,9 +134,9 @@ impl<T: 'static> HasProto for Getter<T> {
 }
 
 pub struct MemFillPromise<'a> {
-    type_id_expected: TypeId,
-    loc_id: LocId,
-    builder: &'a mut ProtoBuilder,
+    pub(crate) type_id_expected: TypeId,
+    pub(crate) loc_id: LocId,
+    pub(crate) builder: &'a mut ProtoBuilder,
 }
 impl<'a> MemFillPromise<'a> {
     pub fn fill_memory<T: 'static>(self, t: T) -> Result<PromiseFulfilled, WrongMemFillType> {
@@ -152,8 +152,8 @@ impl<'a> MemFillPromise<'a> {
 }
 
 pub struct FuncDefPromise<'a> {
-    builder: &'a mut ProtoBuilder,
-    name: &'static str,
+    pub(crate) builder: &'a mut ProtoBuilder,
+    pub(crate) name: &'static str,
 }
 
 use std::mem::MaybeUninit;
