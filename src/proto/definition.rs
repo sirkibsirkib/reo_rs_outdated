@@ -440,12 +440,17 @@ impl ProtoBuilder {
             FuncDeclaration { name, args } => {
                 // 1 ensure the function has been defined by user
                 if let Some(func_def) = self.func_defs.get(name) {
+                    // 2 make sure the NUMBER of params corresponds with the definition
                     if args.len() != func_def.param_info.len() {
                         return Err(FunctionUsedWithWrongArity {
                             name,
                             used_arity: args.len(),
                         });
                     }
+                    // 3 make sure each TYPE of param matches what is expected
+                    // TODO walk down them, destructure the term and check types
+
+                    // fix all downstream params
                     let fixed_subterms: Vec<Term> = args
                         .iter()
                         .zip(func_def.param_info.iter())
@@ -462,11 +467,6 @@ impl ProtoBuilder {
                 } else {
                     return Err(FunctionUndefined { name });
                 }
-                // pub struct FuncDef {
-                //     ret_info: Arc<TypeInfo>,
-                //     param_info: Vec<Arc<TypeInfo>>,
-                //     fnptr: fn(), // bogus type
-                // }
             }
         })
     }
