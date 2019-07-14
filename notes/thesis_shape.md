@@ -1,7 +1,41 @@
 
+----------------------------------------
+## PART 1: Preliminaries
 # Ch 1 intro
 
-# Ch 2 Reo backend
+# Ch 2 background
+1. Reo
+	1. goal
+	2. language
+	3. semantic models
+	4. the Reo compiler
+
+2. target languages
+	1. affine types
+	2. the rust language
+	2. programming patterns
+		1. type-state
+		2. proof of work
+
+# Ch 3 Related Work
+
+----------------------------------------
+## PART 2: Contributions
+# Ch 4 Protocol Translation
+1. two-step generation
+	1. motivation
+	2. imperative rule form
+1. code generation
+	1. Reo side:
+		1. Compiler Internal Representation
+		2. Imperative Layout 
+		3. Type Constraining
+	3. Rust side:
+		1. checking and fallability
+		2. optimization pass
+		3. commandification
+
+# Ch 5 	Protocol Runtime
 1. reference implementation: java generator
 	1. structure
 	2. behavior: rules
@@ -23,17 +57,6 @@
 			(stack allocation)
 			(protocol guard eval)
 		2. maintainability
-1. code generation
-	1. two-step generation
-		(can work without but causes repetition, "general imperative". implementation requires a bunch of actions. the firing in particular)
-	1. api trait interface
-	2. reo side:
-		1. type constraining
-		2. imperative form
-	3. rust side:
-		1. checking and fallability
-		2. optimization pass
-		3. commandification
 1. rust runtime properties
 	1. user-facing
 		1. proto construction
@@ -60,7 +83,7 @@
 			1. port creation and destruction
 1. goals evaluated and summary
 
-# Ch 3 Static Governors
+# Ch 7 Static Component Governors
 1. problem: unintended constraints
 1. governor defined
 2. solution: static governance with types
@@ -80,10 +103,11 @@
 			1. purpose
 			1. algorithm
 	1. opt-in simplification
-		1. 
 	1. match macros
 
-# Ch 4 Benchmarks
+# Ch 8 Benchmarks
+1. goal
+2. experimental setup
 1. Rust vs Java
 	1. large values
 	2. small values
@@ -93,11 +117,15 @@
 	1. many rules
 	2. resource contention
 
-# Ch 5 Discussion
+----------------------------------------
+## PART 3: Reflection
+
+# Ch 9 Discussion
 1. future work:
 	1. distributed: Reowolf current project at CWI. sockets problems
 	2. smaller stuff
 	3. governors, software layer -> more low level
 2. conclusion
+
 
 

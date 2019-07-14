@@ -236,6 +236,7 @@ pub(crate) trait DataSource<'a> {
     where
         I: ExactSizeIterator<Item = *mut u8>,
     {
+        
         use Ordering::SeqCst;
         let space = self.my_space();
         if space.type_info.is_copy {
