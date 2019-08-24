@@ -2,6 +2,25 @@
 ----------------------------------------
 ## PART 1: Preliminaries
 # Ch 1 intro
+programming concurrent applications is hard and backwards. abstractions lag behind.
+Reo is a language for specifying protocols.
+It has tooling that takes advantage of this to generate coordination glue code
+for your computation code. "Reo compiler".
+The compiler has support for several target languages, but not all.
+Some work has gone into C, C++ and Rust targets in the past to varying degrees of
+success, but not sufficiently to be integrated into the compiler.
+The Java backend is well-established and has much experimentation and maintenance.
+The backend is primarily intended for sending primitives which are not subject to
+data races; in other cases it has problems with correctness and the code generated
+has some flaws with overwriting memory.
+
+In this thesis we cover contributions partitioned into three chapters which roughly
+follow in sequence: (a) imperative form, a new intermediate protocol representation
+for removing language specifics from the Reo compiler for imperative targets.
+(b) A Rust library that constructs protocol objects that act as the specified coordinators
+(c) A granular design for a code generator which generates a dependency for Rust;
+when used in conjunction with a Rust protocol, the user's Rust compiler itself
+verifies protocol adherence at compile time. 
 
 # Ch 2 background
 1. Reo
@@ -21,19 +40,18 @@
 
 ----------------------------------------
 ## PART 2: Contributions
-# Ch 4 Protocol Translation
-1. two-step generation
-	1. motivation
-	2. imperative rule form
-1. code generation
-	1. Reo side:
-		1. Compiler Internal Representation
-		2. Imperative Layout 
-		3. Type Constraining
-	3. Rust side:
-		1. checking and fallability
-		2. optimization pass
-		3. commandification
+# Ch 4 Imperative Form
+1. role in the Reo pipeline
+1. definition
+1. Reo to Imperative Form
+	1. Compiler Internal Representation
+	2. Action Sequencing
+	3. Type clusterinig and Constraining
+3. Imperative Form to Rust:
+	1. Well-formedness checks
+	2. Initial memory values
+	3. Preprocessing optimizations
+		(avoid checks) (separate out values)
 
 # Ch 5 	Protocol Runtime
 1. reference implementation: java generator
